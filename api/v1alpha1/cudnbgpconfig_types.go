@@ -44,6 +44,7 @@ const (
 	ConditionAWSEndpointsDiscovered  = "AWSEndpointsDiscovered"
 	ConditionFRRConfigurationApplied = "FRRConfigurationApplied"
 	ConditionAWSResourcesReconciled  = "AWSResourcesReconciled"
+	ConditionIncompleteNodeInventory = "IncompleteNodeInventory"
 )
 
 type BGPNeighbor struct {
