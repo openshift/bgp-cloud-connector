@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -322,8 +323,8 @@ func TestConfigReconcile_AWSFullReconcile(t *testing.T) {
 	if updated.Status.Phase != networkingv1alpha1.PhaseReady {
 		t.Errorf("expected Ready, got %s", updated.Status.Phase)
 	}
-	if len(updated.Status.Conditions) != 5 {
-		t.Errorf("expected 5 conditions, got %d", len(updated.Status.Conditions))
+	if len(updated.Status.Conditions) != 6 {
+		t.Errorf("expected 6 conditions, got %d", len(updated.Status.Conditions))
 	}
 	if updated.Status.AWS == nil {
 		t.Fatal("expected status.aws to be populated")
@@ -341,6 +342,11 @@ func TestConfigReconcile_AWSFullReconcile(t *testing.T) {
 		if cond.Type == networkingv1alpha1.ConditionAWSResourcesReconciled {
 			if cond.Status != metav1.ConditionTrue {
 				t.Errorf("expected AWSResourcesReconciled=True, got %s", cond.Status)
+			}
+		}
+		if cond.Type == networkingv1alpha1.ConditionIncompleteNodeInventory {
+			if cond.Status != metav1.ConditionTrue || cond.Reason != "Complete" {
+				t.Errorf("expected IncompleteNodeInventory=True/Complete, got %s/%s", cond.Status, cond.Reason)
 			}
 		}
 	}
@@ -555,7 +561,16 @@ func TestConfigReconcile_AWSNodeFiltering(t *testing.T) {
 		},
 	}
 
-	objs := []client.Object{config, network, frrNS, frrPod, missingIP, missingAZ}
+	missingProviderID := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "node-no-provider",
+			Labels: map[string]string{"bgp_router": "true", "topology.kubernetes.io/zone": "us-east-1a"},
+		},
+		Status: corev1.NodeStatus{
+			Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.5.10"}},
+		},
+	}
+	objs := []client.Object{config, network, frrNS, frrPod, missingIP, missingAZ, missingProviderID}
 	for _, n := range completeNodes {
 		objs = append(objs, n)
 	}
@@ -582,6 +597,23 @@ func TestConfigReconcile_AWSNodeFiltering(t *testing.T) {
 	if len(mock.reconcileNodesArgs) != 3 {
 		t.Errorf("expected 3 nodes passed to ReconcileNodes, got %d", len(mock.reconcileNodesArgs))
 	}
+
+	updated := &networkingv1alpha1.CUDNBgpConfig{}
+	_ = c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, updated)
+	for _, cond := range updated.Status.Conditions {
+		if cond.Type == networkingv1alpha1.ConditionIncompleteNodeInventory {
+			if cond.Reason != "NodesIncomplete" {
+				t.Errorf("expected reason NodesIncomplete, got %s", cond.Reason)
+			}
+			if !strings.Contains(cond.Message, "node-no-ip") ||
+				!strings.Contains(cond.Message, "node-no-az") ||
+				!strings.Contains(cond.Message, "node-no-provider") {
+				t.Errorf("expected message to list incomplete nodes, got %q", cond.Message)
+			}
+			return
+		}
+	}
+	t.Error("IncompleteNodeInventory condition not found")
 }
 
 func TestConfigReconcile_DeleteSucceedsWithCredentialFailure(t *testing.T) {
