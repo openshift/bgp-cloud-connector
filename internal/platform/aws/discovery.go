@@ -92,15 +92,24 @@ func (p *Platform) describeRouteServer(ctx context.Context, routeServerID string
 }
 
 func (p *Platform) describeRouteServerEndpoints(ctx context.Context, routeServerID string) ([]ec2types.RouteServerEndpoint, error) {
-	output, err := p.ec2Client.DescribeRouteServerEndpoints(ctx, &ec2.DescribeRouteServerEndpointsInput{})
-	if err != nil {
-		return nil, err
-	}
 	var filtered []ec2types.RouteServerEndpoint
-	for _, ep := range output.RouteServerEndpoints {
-		if aws.ToString(ep.RouteServerId) == routeServerID {
-			filtered = append(filtered, ep)
+	var nextToken *string
+	for {
+		output, err := p.ec2Client.DescribeRouteServerEndpoints(ctx, &ec2.DescribeRouteServerEndpointsInput{
+			NextToken: nextToken,
+		})
+		if err != nil {
+			return nil, err
 		}
+		for _, ep := range output.RouteServerEndpoints {
+			if aws.ToString(ep.RouteServerId) == routeServerID {
+				filtered = append(filtered, ep)
+			}
+		}
+		if aws.ToString(output.NextToken) == "" {
+			break
+		}
+		nextToken = output.NextToken
 	}
 	return filtered, nil
 }
