@@ -93,6 +93,7 @@ The operator authenticates to AWS using IAM Roles for Service Accounts (IRSA). R
 # Get the cluster's OIDC provider details
 OIDC_PROVIDER=$(rosa describe cluster -c <cluster-name> -o json | jq -r '.aws.sts.oidc_endpoint_url' | sed 's|https://||')
 AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+AWS_REGION=$(rosa describe cluster -c <cluster-name> -o json | jq -r '.region.id // .region')
 
 aws iam create-role --role-name cudn-bgp-operator \
   --assume-role-policy-document '{
