@@ -119,6 +119,7 @@ aws iam put-role-policy --role-name cudn-bgp-operator \
     "Version": "2012-10-17",
     "Statement": [
       {
+        "Sid": "ReadOnly",
         "Effect": "Allow",
         "Action": [
           "sts:GetCallerIdentity",
@@ -126,13 +127,28 @@ aws iam put-role-policy --role-name cudn-bgp-operator \
           "ec2:DescribeRouteServerEndpoints",
           "ec2:DescribeSubnets",
           "ec2:DescribeRouteServerPeers",
-          "ec2:CreateRouteServerPeer",
-          "ec2:DeleteRouteServerPeer",
-          "ec2:CreateTags",
-          "ec2:DescribeInstances",
-          "ec2:ModifyNetworkInterfaceAttribute"
+          "ec2:DescribeInstances"
         ],
         "Resource": "*"
+      },
+      {
+        "Sid": "RouteServerPeerManagement",
+        "Effect": "Allow",
+        "Action": [
+          "ec2:CreateRouteServerPeer",
+          "ec2:DeleteRouteServerPeer",
+          "ec2:CreateTags"
+        ],
+        "Resource": [
+          "arn:aws:ec2:'$AWS_REGION':'$AWS_ACCOUNT_ID':route-server-endpoint/*",
+          "arn:aws:ec2:'$AWS_REGION':'$AWS_ACCOUNT_ID':route-server-peer/*"
+        ]
+      },
+      {
+        "Sid": "DisableSourceDestCheck",
+        "Effect": "Allow",
+        "Action": "ec2:ModifyNetworkInterfaceAttribute",
+        "Resource": "arn:aws:ec2:'$AWS_REGION':'$AWS_ACCOUNT_ID':network-interface/*"
       }
     ]
   }'
