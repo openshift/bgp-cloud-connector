@@ -74,8 +74,10 @@ func (r *CUDNBgpConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	baselineStatus := config.Status.DeepCopy()
+
 	if config.Name != SingletonName {
-		return r.setDegraded(ctx, config, networkingv1alpha1.ConditionNetworkOperatorPatched,
+		return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionNetworkOperatorPatched,
 			"InvalidName", fmt.Sprintf("CUDNBgpConfig must be named %q, got %q", SingletonName, config.Name))
 	}
 
@@ -96,7 +98,7 @@ func (r *CUDNBgpConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Phase 1: Patch Network Operator
 	log.Info("Phase 1: patching Network operator")
 	if err := PatchNetworkOperator(ctx, r.Client); err != nil {
-		return r.setDegraded(ctx, config, networkingv1alpha1.ConditionNetworkOperatorPatched,
+		return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionNetworkOperatorPatched,
 			"PatchFailed", fmt.Sprintf("failed to patch Network operator: %v", err))
 	}
 	meta.SetStatusCondition(&config.Status.Conditions, metav1.Condition{
@@ -111,18 +113,21 @@ func (r *CUDNBgpConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	log.Info("Phase 2: checking FRR readiness")
 	ready, err := IsFRRReady(ctx, r.Client)
 	if err != nil {
-		return r.setDegraded(ctx, config, networkingv1alpha1.ConditionFRRNamespaceReady,
+		return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionFRRNamespaceReady,
 			"CheckFailed", fmt.Sprintf("failed to check FRR readiness: %v", err))
 	}
 	if !ready {
-		meta.SetStatusCondition(&config.Status.Conditions, metav1.Condition{
-			Type:               networkingv1alpha1.ConditionFRRNamespaceReady,
-			Status:             metav1.ConditionFalse,
-			Reason:             "WaitingForFRR",
-			Message:            "Waiting for openshift-frr-k8s namespace and pods",
-			ObservedGeneration: config.Generation,
-		})
-		if err := r.Status().Update(ctx, config); err != nil {
+		if err := r.patchConfigStatus(ctx, config, *baselineStatus, func(c *networkingv1alpha1.CUDNBgpConfig) {
+			c.Status.Phase = networkingv1alpha1.PhaseConfiguring
+			c.Status.ObservedGeneration = c.Generation
+			meta.SetStatusCondition(&c.Status.Conditions, metav1.Condition{
+				Type:               networkingv1alpha1.ConditionFRRNamespaceReady,
+				Status:             metav1.ConditionFalse,
+				Reason:             "WaitingForFRR",
+				Message:            "Waiting for openshift-frr-k8s namespace and pods",
+				ObservedGeneration: c.Generation,
+			})
+		}); err != nil {
 			return ctrl.Result{}, err
 		}
 		log.Info("FRR not ready, requeueing")
@@ -148,10 +153,10 @@ func (r *CUDNBgpConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if err != nil {
 			var credErr *awsplatform.CredentialError
 			if errors.As(err, &credErr) {
-				return r.setDegraded(ctx, config, networkingv1alpha1.ConditionAWSEndpointsDiscovered,
+				return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionAWSEndpointsDiscovered,
 					"AWSCredentialsInvalid", credErr.Error())
 			}
-			return r.setDegraded(ctx, config, networkingv1alpha1.ConditionAWSEndpointsDiscovered,
+			return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionAWSEndpointsDiscovered,
 				"AWSDiscoveryFailed", fmt.Sprintf("failed to build AWS platform: %v", err))
 		}
 		awsPlatform = p
@@ -160,7 +165,7 @@ func (r *CUDNBgpConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		log.Info("Phase 3: discovering Route Server endpoints")
 		discoveryResult, err = awsPlatform.DiscoverEndpoints(ctx)
 		if err != nil {
-			return r.setDegraded(ctx, config, networkingv1alpha1.ConditionAWSEndpointsDiscovered,
+			return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionAWSEndpointsDiscovered,
 				"AWSDiscoveryFailed", fmt.Sprintf("failed to discover Route Server endpoints: %v", err))
 		}
 		config.Status.AWS = discoveryResultToStatus(discoveryResult)
@@ -183,7 +188,7 @@ func (r *CUDNBgpConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		err = EnsureFRRConfigurations(ctx, r.Client, config)
 	}
 	if err != nil {
-		return r.setDegraded(ctx, config, networkingv1alpha1.ConditionFRRConfigurationApplied,
+		return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionFRRConfigurationApplied,
 			"ApplyFailed", fmt.Sprintf("failed to apply FRR configurations: %v", err))
 	}
 	meta.SetStatusCondition(&config.Status.Conditions, metav1.Condition{
@@ -199,11 +204,11 @@ func (r *CUDNBgpConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		log.Info("Phase 5: reconciling AWS resources")
 		nodes, err := r.listRouterNodes(ctx, config)
 		if err != nil {
-			return r.setDegraded(ctx, config, networkingv1alpha1.ConditionAWSResourcesReconciled,
+			return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionAWSResourcesReconciled,
 				"AWSReconcileFailed", fmt.Sprintf("failed to list router nodes: %v", err))
 		}
 		if err := awsPlatform.ReconcileNodes(ctx, nodes); err != nil {
-			return r.setDegraded(ctx, config, networkingv1alpha1.ConditionAWSResourcesReconciled,
+			return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionAWSResourcesReconciled,
 				"AWSReconcileFailed", fmt.Sprintf("failed to reconcile AWS resources: %v", err))
 		}
 		meta.SetStatusCondition(&config.Status.Conditions, metav1.Condition{
@@ -215,8 +220,9 @@ func (r *CUDNBgpConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		})
 	}
 
-	config.Status.Phase = networkingv1alpha1.PhaseReady
-	if err := r.Status().Update(ctx, config); err != nil {
+	if err := r.patchConfigStatus(ctx, config, *baselineStatus, func(c *networkingv1alpha1.CUDNBgpConfig) {
+		c.Status.Phase = networkingv1alpha1.PhaseReady
+	}); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -313,12 +319,17 @@ func (r *CUDNBgpConfigReconciler) listRouterNodes(ctx context.Context, config *n
 func (r *CUDNBgpConfigReconciler) reconcileDelete(ctx context.Context, config *networkingv1alpha1.CUDNBgpConfig) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
+	baselineStatus := config.Status.DeepCopy()
+
 	routingList := &networkingv1alpha1.CUDNBgpRoutingList{}
 	if err := r.List(ctx, routingList); err != nil {
 		return ctrl.Result{}, err
 	}
 	if len(routingList.Items) > 0 {
 		log.Info("deletion blocked: CUDNBgpRouting CRs still exist", "count", len(routingList.Items))
+		if err := r.reportDeletionBlocked(ctx, config, *baselineStatus, routingList.Items); err != nil {
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
@@ -355,18 +366,21 @@ func (r *CUDNBgpConfigReconciler) reconcileDelete(ctx context.Context, config *n
 func (r *CUDNBgpConfigReconciler) setDegraded(
 	ctx context.Context,
 	config *networkingv1alpha1.CUDNBgpConfig,
+	baselineStatus networkingv1alpha1.CUDNBgpConfigStatus,
 	condType, reason, message string,
 ) (ctrl.Result, error) {
 	logf.FromContext(ctx).Error(fmt.Errorf("%s: %s", reason, message), "setting degraded status")
-	config.Status.Phase = networkingv1alpha1.PhaseDegraded
-	meta.SetStatusCondition(&config.Status.Conditions, metav1.Condition{
-		Type:               condType,
-		Status:             metav1.ConditionFalse,
-		Reason:             reason,
-		Message:            message,
-		ObservedGeneration: config.Generation,
-	})
-	if err := r.Status().Update(ctx, config); err != nil {
+
+	if err := r.patchConfigStatus(ctx, config, baselineStatus, func(c *networkingv1alpha1.CUDNBgpConfig) {
+		c.Status.Phase = networkingv1alpha1.PhaseDegraded
+		meta.SetStatusCondition(&c.Status.Conditions, metav1.Condition{
+			Type:               condType,
+			Status:             metav1.ConditionFalse,
+			Reason:             reason,
+			Message:            message,
+			ObservedGeneration: c.Generation,
+		})
+	}); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil

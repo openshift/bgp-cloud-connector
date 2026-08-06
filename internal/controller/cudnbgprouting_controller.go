@@ -57,6 +57,8 @@ func (r *CUDNBgpRoutingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	baselineStatus := routing.Status.DeepCopy()
+
 	if !routing.DeletionTimestamp.IsZero() {
 		return r.reconcileDelete(ctx, routing)
 	}
@@ -79,7 +81,7 @@ func (r *CUDNBgpRoutingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	for i := range routingList.Items {
 		other := &routingList.Items[i]
 		if other.Name != routing.Name && other.Spec.Network.Name == routing.Spec.Network.Name {
-			return r.setDegraded(ctx, routing, networkingv1alpha1.ConditionCUDNCreated,
+			return r.setDegraded(ctx, routing, *baselineStatus, networkingv1alpha1.ConditionCUDNCreated,
 				"DuplicateNetwork",
 				fmt.Sprintf("spec.network.name %q already claimed by CUDNBgpRouting %q", routing.Spec.Network.Name, other.Name))
 		}
@@ -88,18 +90,20 @@ func (r *CUDNBgpRoutingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// Pre-check: CUDNBgpConfig must exist and be Ready
 	bgpConfig := &networkingv1alpha1.CUDNBgpConfig{}
 	if err := r.Get(ctx, types.NamespacedName{Name: SingletonName}, bgpConfig); err != nil {
-		routing.Status.Phase = networkingv1alpha1.PhasePending
-		routing.Status.Conditions = nil
-		if err := r.Status().Update(ctx, routing); err != nil {
+		if err := r.patchRoutingStatus(ctx, routing, *baselineStatus, func(rt *networkingv1alpha1.CUDNBgpRouting) {
+			rt.Status.Phase = networkingv1alpha1.PhasePending
+			rt.Status.Conditions = nil
+		}); err != nil {
 			return ctrl.Result{}, err
 		}
 		log.Info("CUDNBgpConfig 'cluster' not found, requeueing")
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 	if bgpConfig.Status.Phase != networkingv1alpha1.PhaseReady {
-		routing.Status.Phase = networkingv1alpha1.PhasePending
-		routing.Status.Conditions = nil
-		if err := r.Status().Update(ctx, routing); err != nil {
+		if err := r.patchRoutingStatus(ctx, routing, *baselineStatus, func(rt *networkingv1alpha1.CUDNBgpRouting) {
+			rt.Status.Phase = networkingv1alpha1.PhasePending
+			rt.Status.Conditions = nil
+		}); err != nil {
 			return ctrl.Result{}, err
 		}
 		log.Info("CUDNBgpConfig not Ready, requeueing", "phase", bgpConfig.Status.Phase)
@@ -109,11 +113,11 @@ func (r *CUDNBgpRoutingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// Phase 1: Validate namespace labels + ensure CUDN
 	log.Info("Phase 1: validating namespace and ensuring CUDN", "network", routing.Spec.Network.Name)
 	if err := ValidateNamespaceLabels(ctx, r.Client, routing.Spec.Network.Name); err != nil {
-		return r.setDegraded(ctx, routing, networkingv1alpha1.ConditionCUDNCreated,
+		return r.setDegraded(ctx, routing, *baselineStatus, networkingv1alpha1.ConditionCUDNCreated,
 			"NamespaceNotReady", fmt.Sprintf("namespace validation failed: %v", err))
 	}
 	if err := EnsureCUDN(ctx, r.Client, routing); err != nil {
-		return r.setDegraded(ctx, routing, networkingv1alpha1.ConditionCUDNCreated,
+		return r.setDegraded(ctx, routing, *baselineStatus, networkingv1alpha1.ConditionCUDNCreated,
 			"CUDNFailed", fmt.Sprintf("failed to ensure CUDN: %v", err))
 	}
 	meta.SetStatusCondition(&routing.Status.Conditions, metav1.Condition{
@@ -127,7 +131,7 @@ func (r *CUDNBgpRoutingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// Phase 2: Ensure shared RouteAdvertisements
 	log.Info("Phase 2: ensuring RouteAdvertisements")
 	if err := EnsureRouteAdvertisements(ctx, r.Client); err != nil {
-		return r.setDegraded(ctx, routing, networkingv1alpha1.ConditionRouteAdvertisementsCreated,
+		return r.setDegraded(ctx, routing, *baselineStatus, networkingv1alpha1.ConditionRouteAdvertisementsCreated,
 			"RAFailed", fmt.Sprintf("failed to ensure RouteAdvertisements: %v", err))
 	}
 	meta.SetStatusCondition(&routing.Status.Conditions, metav1.Condition{
@@ -138,8 +142,9 @@ func (r *CUDNBgpRoutingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		ObservedGeneration: routing.Generation,
 	})
 
-	routing.Status.Phase = networkingv1alpha1.PhaseReady
-	if err := r.Status().Update(ctx, routing); err != nil {
+	if err := r.patchRoutingStatus(ctx, routing, *baselineStatus, func(rt *networkingv1alpha1.CUDNBgpRouting) {
+		rt.Status.Phase = networkingv1alpha1.PhaseReady
+	}); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -188,18 +193,21 @@ func (r *CUDNBgpRoutingReconciler) reconcileDelete(ctx context.Context, routing 
 func (r *CUDNBgpRoutingReconciler) setDegraded(
 	ctx context.Context,
 	routing *networkingv1alpha1.CUDNBgpRouting,
+	baselineStatus networkingv1alpha1.CUDNBgpRoutingStatus,
 	condType, reason, message string,
 ) (ctrl.Result, error) {
 	logf.FromContext(ctx).Error(fmt.Errorf("%s: %s", reason, message), "setting degraded status")
-	routing.Status.Phase = networkingv1alpha1.PhaseDegraded
-	meta.SetStatusCondition(&routing.Status.Conditions, metav1.Condition{
-		Type:               condType,
-		Status:             metav1.ConditionFalse,
-		Reason:             reason,
-		Message:            message,
-		ObservedGeneration: routing.Generation,
-	})
-	if err := r.Status().Update(ctx, routing); err != nil {
+
+	if err := r.patchRoutingStatus(ctx, routing, baselineStatus, func(rt *networkingv1alpha1.CUDNBgpRouting) {
+		rt.Status.Phase = networkingv1alpha1.PhaseDegraded
+		meta.SetStatusCondition(&rt.Status.Conditions, metav1.Condition{
+			Type:               condType,
+			Status:             metav1.ConditionFalse,
+			Reason:             reason,
+			Message:            message,
+			ObservedGeneration: rt.Generation,
+		})
+	}); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil

@@ -22,6 +22,8 @@ const (
 	ConfigFinalizerName  = "networking.openshift.io/cudnbgpconfig"
 	RoutingFinalizerName = "networking.openshift.io/cudnbgprouting"
 
+	ConditionDeletionBlocked = "DeletionBlocked"
+
 	SingletonName          = "cluster"
 	FRRNamespace           = "openshift-frr-k8s"
 	FRRConfigNamePrefix    = "cudn-bgp-az-"
