@@ -59,6 +59,10 @@ spec:
                 - region
                 - routeServerIDs
                 type: object
+                x-kubernetes-validations:
+                - message: duplicate route server IDs are not allowed
+                  rule: self.routeServerIDs.all(id, self.routeServerIDs.filter(x,
+                    x == id).size() == 1)
               bgp:
                 properties:
                   availabilityZones:
@@ -69,6 +73,9 @@ spec:
                             properties:
                               address:
                                 type: string
+                                x-kubernetes-validations:
+                                - message: address must be a valid IPv4 or IPv6 address
+                                  rule: isIP(self)
                               remoteASN:
                                 format: int64
                                 maximum: 4294967295
@@ -88,6 +95,11 @@ spec:
                       - neighbors
                       - nodeSelector
                       type: object
+                      x-kubernetes-validations:
+                      - message: duplicate neighbor addresses within an availability
+                          zone are not allowed
+                        rule: self.neighbors.all(n, self.neighbors.filter(x, x.address
+                          == n.address).size() == 1)
                     type: array
                   livenessDetection:
                     default: bgp-keepalive
@@ -119,6 +131,14 @@ spec:
                 configured
               rule: has(self.aws) || (has(self.bgp.availabilityZones) && size(self.bgp.availabilityZones)
                 > 0)
+            - message: routerNodeSelector must not be empty
+              rule: size(self.routerNodeSelector) > 0
+            - message: all neighbor addresses must be valid IP addresses
+              rule: '!has(self.bgp.availabilityZones) || self.bgp.availabilityZones.all(az,
+                az.neighbors.all(n, isIP(n.address)))'
+            - message: cannot switch between AWS and manual availability zone mode
+                after creation
+              rule: '!has(oldSelf) || !(has(oldSelf.aws) != has(self.aws))'
           status:
             properties:
               aws:
@@ -220,6 +240,9 @@ spec:
                 type: string
             type: object
         type: object
+        x-kubernetes-validations:
+        - message: CUDNBgpConfig must be named 'cluster'
+          rule: self.metadata.name == 'cluster'
     served: true
     storage: true
     subresources:
