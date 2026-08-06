@@ -53,6 +53,9 @@ spec:
               network:
                 properties:
                   name:
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
                   subnets:
                     items:
@@ -64,6 +67,10 @@ spec:
                 - name
                 - subnets
                 type: object
+                x-kubernetes-validations:
+                - message: each subnet must be a valid CIDR with prefix /30 or wider
+                  rule: self.subnets.all(s, isCIDR(s) && cidr(s).prefixLength() <=
+                    30)
             required:
             - network
             type: object

@@ -47,18 +47,21 @@ const (
 )
 
 type BGPNeighbor struct {
+	// +kubebuilder:validation:XValidation:rule="isIP(self)",message="address must be a valid IPv4 or IPv6 address"
 	Address string `json:"address"`
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=4294967295
 	RemoteASN int64 `json:"remoteASN"`
 }
 
+// +kubebuilder:validation:XValidation:rule="self.neighbors.all(n, self.neighbors.filter(x, x.address == n.address).size() == 1)",message="duplicate neighbor addresses within an availability zone are not allowed"
 type AvailabilityZone struct {
 	NodeSelector map[string]string `json:"nodeSelector"`
 	// +kubebuilder:validation:MinItems=1
 	Neighbors []BGPNeighbor `json:"neighbors"`
 }
 
+// +kubebuilder:validation:XValidation:rule="self.routeServerIDs.all(id, self.routeServerIDs.filter(x, x == id).size() == 1)",message="duplicate route server IDs are not allowed"
 type AWSConfig struct {
 	Region string `json:"region"`
 	// +kubebuilder:validation:MinItems=1
@@ -93,6 +96,9 @@ type BGPConfig struct {
 
 // +kubebuilder:validation:XValidation:rule="!(has(self.aws) && has(self.bgp.availabilityZones) && size(self.bgp.availabilityZones) > 0)",message="spec.aws and spec.bgp.availabilityZones are mutually exclusive"
 // +kubebuilder:validation:XValidation:rule="has(self.aws) || (has(self.bgp.availabilityZones) && size(self.bgp.availabilityZones) > 0)",message="spec.bgp.availabilityZones is required when spec.aws is not configured"
+// +kubebuilder:validation:XValidation:rule="size(self.routerNodeSelector) > 0",message="routerNodeSelector must not be empty"
+// +kubebuilder:validation:XValidation:rule="!has(self.bgp.availabilityZones) || self.bgp.availabilityZones.all(az, az.neighbors.all(n, isIP(n.address)))",message="all neighbor addresses must be valid IP addresses"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf) || !(has(oldSelf.aws) != has(self.aws))",message="cannot switch between AWS and manual availability zone mode after creation"
 type CUDNBgpConfigSpec struct {
 	BGP                BGPConfig         `json:"bgp"`
 	RouterNodeSelector map[string]string `json:"routerNodeSelector"`
@@ -111,6 +117,7 @@ type CUDNBgpConfigStatus struct {
 // +kubebuilder:resource:scope=Cluster
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:validation:XValidation:rule="self.metadata.name == 'cluster'",message="CUDNBgpConfig must be named 'cluster'"
 
 // CUDNBgpConfig is the singleton cluster-scoped BGP infrastructure configuration.
 type CUDNBgpConfig struct {
