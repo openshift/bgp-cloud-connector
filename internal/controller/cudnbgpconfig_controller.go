@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"reflect"
@@ -197,10 +198,29 @@ func (r *CUDNBgpConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Phase 5: Reconcile AWS Resources (if configured)
 	if awsPlatform != nil {
 		log.Info("Phase 5: reconciling AWS resources")
-		nodes, err := r.listRouterNodes(ctx, config)
+		nodes, incomplete, err := r.listRouterNodes(ctx, config)
 		if err != nil {
 			return r.setDegraded(ctx, config, networkingv1alpha1.ConditionAWSResourcesReconciled,
 				"AWSReconcileFailed", fmt.Sprintf("failed to list router nodes: %v", err))
+		}
+		if len(incomplete) == 0 {
+			meta.SetStatusCondition(&config.Status.Conditions, metav1.Condition{
+				Type:               networkingv1alpha1.ConditionIncompleteNodeInventory,
+				Status:             metav1.ConditionTrue,
+				Reason:             "Complete",
+				Message:            "all selected router nodes have IP, AZ, and providerID",
+				ObservedGeneration: config.Generation,
+			})
+		} else {
+			// TODO: emit Warning Event on transition to incomplete (once EventRecorder exists):
+			// r.Recorder.Event(config, corev1.EventTypeWarning, "NodesIncomplete", formatIncompleteNodesMessage(incomplete))
+			meta.SetStatusCondition(&config.Status.Conditions, metav1.Condition{
+				Type:               networkingv1alpha1.ConditionIncompleteNodeInventory,
+				Status:             metav1.ConditionFalse,
+				Reason:             "NodesIncomplete",
+				Message:            formatIncompleteNodesMessage(incomplete),
+				ObservedGeneration: config.Generation,
+			})
 		}
 		if err := awsPlatform.ReconcileNodes(ctx, nodes); err != nil {
 			return r.setDegraded(ctx, config, networkingv1alpha1.ConditionAWSResourcesReconciled,
@@ -279,14 +299,14 @@ func getInfrastructureName(ctx context.Context, c client.Client) (string, error)
 	return name, nil
 }
 
-func (r *CUDNBgpConfigReconciler) listRouterNodes(ctx context.Context, config *networkingv1alpha1.CUDNBgpConfig) ([]platform.RouterNode, error) {
+func (r *CUDNBgpConfigReconciler) listRouterNodes(ctx context.Context, config *networkingv1alpha1.CUDNBgpConfig) (complete []platform.RouterNode, incomplete []platform.RouterNode, err error) {
 	nodeList := &corev1.NodeList{}
 	sel := labels.SelectorFromSet(config.Spec.RouterNodeSelector)
 	if err := r.List(ctx, nodeList, client.MatchingLabelsSelector{Selector: sel}); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	nodes := make([]platform.RouterNode, 0, len(nodeList.Items))
+	complete = make([]platform.RouterNode, 0, len(nodeList.Items))
 	for i := range nodeList.Items {
 		node := &nodeList.Items[i]
 		rn := platform.RouterNode{
@@ -303,11 +323,30 @@ func (r *CUDNBgpConfigReconciler) listRouterNodes(ctx context.Context, config *n
 		if rn.PrivateIP == "" || rn.AZ == "" || rn.ProviderID == "" {
 			logf.FromContext(ctx).Info("skipping node with incomplete info",
 				"node", node.Name, "ip", rn.PrivateIP, "az", rn.AZ, "providerID", rn.ProviderID)
+			incomplete = append(incomplete, rn)
 			continue
 		}
-		nodes = append(nodes, rn)
+		complete = append(complete, rn)
 	}
-	return nodes, nil
+	return complete, incomplete, nil
+}
+
+func formatIncompleteNodesMessage(incomplete []platform.RouterNode) string {
+	parts := make([]string, 0, len(incomplete))
+	for _, n := range incomplete {
+		var missing []string
+		if n.PrivateIP == "" {
+			missing = append(missing, "IP")
+		}
+		if n.AZ == "" {
+			missing = append(missing, "AZ")
+		}
+		if n.ProviderID == "" {
+			missing = append(missing, "providerID")
+		}
+		parts = append(parts, n.Name+" (missing "+strings.Join(missing, "/")+")")
+	}
+	return fmt.Sprintf("%d router node(s) incomplete: %s", len(incomplete), strings.Join(parts, "; "))
 }
 
 func (r *CUDNBgpConfigReconciler) reconcileDelete(ctx context.Context, config *networkingv1alpha1.CUDNBgpConfig) (ctrl.Result, error) {
