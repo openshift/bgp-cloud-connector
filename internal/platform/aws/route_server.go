@@ -101,15 +101,24 @@ func (p *Platform) listManagedPeers(ctx context.Context, endpointID string) ([]e
 }
 
 func (p *Platform) listAllPeers(ctx context.Context, endpointID string) ([]ec2types.RouteServerPeer, error) {
-	output, err := p.ec2Client.DescribeRouteServerPeers(ctx, &ec2.DescribeRouteServerPeersInput{})
-	if err != nil {
-		return nil, err
-	}
 	var filtered []ec2types.RouteServerPeer
-	for _, peer := range output.RouteServerPeers {
-		if aws.ToString(peer.RouteServerEndpointId) == endpointID {
-			filtered = append(filtered, peer)
+	var nextToken *string
+	for {
+		output, err := p.ec2Client.DescribeRouteServerPeers(ctx, &ec2.DescribeRouteServerPeersInput{
+			NextToken: nextToken,
+		})
+		if err != nil {
+			return nil, err
 		}
+		for _, peer := range output.RouteServerPeers {
+			if aws.ToString(peer.RouteServerEndpointId) == endpointID {
+				filtered = append(filtered, peer)
+			}
+		}
+		if aws.ToString(output.NextToken) == "" {
+			break
+		}
+		nextToken = output.NextToken
 	}
 	return filtered, nil
 }
