@@ -16,7 +16,17 @@ limitations under the License.
 
 package controller
 
-import "k8s.io/apimachinery/pkg/runtime/schema"
+import (
+	"time"
+
+	"k8s.io/apimachinery/pkg/runtime/schema"
+)
+
+// DefaultResyncInterval is how long a reconciler waits before
+// re-examining a healthy resource. It bounds how long the cluster can
+// sit with drifted AWS state, a peer deleted or SourceDestCheck
+// re-enabled, before we notice and put it back.
+const DefaultResyncInterval = 5 * time.Minute
 
 const (
 	ConfigFinalizerName  = "networking.openshift.io/cudnbgpconfig"

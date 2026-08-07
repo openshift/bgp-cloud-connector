@@ -19,6 +19,8 @@ package aws_e2e
 import (
 	"context"
 	"fmt"
+	"os"
+	"sort"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -45,9 +47,36 @@ const (
 	labelManagedBy         = "app.kubernetes.io/managed-by"
 	labelManagedByVal      = "cudn-bgp-routing-operator"
 
-	reconcileTimeout = 6 * time.Minute
-	pollInterval     = 10 * time.Second
+	pollInterval = 10 * time.Second
 )
+
+// The operator re-examines healthy resources every --resync-interval,
+// which bounds how long the self-healing specs must wait for it to notice
+// something has drifted. That interval is a flag now, so the suite has to
+// be told which value the operator under test is using; hard-coding it
+// meant a 6 minute budget per assertion regardless, and a message claiming
+// "5m cycle" whatever you had actually set.
+//
+//	E2E_RESYNC_INTERVAL=30s   alongside   --resync-interval=30s
+var (
+	resyncInterval   = durationFromEnv("E2E_RESYNC_INTERVAL", 5*time.Minute)
+	reconcileTimeout = 2*resyncInterval + time.Minute
+)
+
+// durationFromEnv is deliberately strict: a typo in a duration should stop
+// the run rather than silently fall back to a value that makes the suite
+// wait five minutes per assertion for reasons nobody can see.
+func durationFromEnv(name string, fallback time.Duration) time.Duration {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		panic(fmt.Sprintf("%s=%q is not a duration: %v", name, raw, err))
+	}
+	return d
+}
 
 var _ = Describe("AWS E2E", Ordered, func() {
 
@@ -59,7 +88,7 @@ var _ = Describe("AWS E2E", Ordered, func() {
 			By("applying CUDNBgpConfig CR")
 			configCR := bgpConfig.DeepCopy()
 			configCR.ResourceVersion = ""
-			Expect(k8sClient.Create(ctx, configCR)).To(Succeed())
+			createEventually(ctx, configCR, "CUDNBgpConfig")
 
 			By("waiting for config phase=Ready")
 			Eventually(func(g Gomega) {
@@ -120,9 +149,14 @@ var _ = Describe("AWS E2E", Ordered, func() {
 			}
 
 			By("creating labeled namespace for CUDN")
+			// The CUDN selects namespaces by the cluster-udn label, not by
+			// name, so the name is free. Let the API server generate it:
+			// a fixed name meant any run that failed before cleanup left a
+			// namespace behind that made every later run fail on
+			// AlreadyExists.
 			ns := &corev1.Namespace{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: bgpRouting.Spec.Network.Name,
+					GenerateName: bgpRouting.Spec.Network.Name + "-",
 					Labels: map[string]string{
 						"k8s.ovn.org/primary-user-defined-network": "",
 						"cluster-udn": bgpRouting.Spec.Network.Name,
@@ -130,11 +164,13 @@ var _ = Describe("AWS E2E", Ordered, func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, ns)).To(Succeed())
+			testNamespace = ns.Name
+			GinkgoWriter.Printf("created namespace %s\n", testNamespace)
 
 			By("applying CUDNBgpRouting CR")
 			routingCR := bgpRouting.DeepCopy()
 			routingCR.ResourceVersion = ""
-			Expect(k8sClient.Create(ctx, routingCR)).To(Succeed())
+			createEventually(ctx, routingCR, "CUDNBgpRouting")
 
 			By("waiting for routing phase=Ready")
 			Eventually(func(g Gomega) {
@@ -193,7 +229,7 @@ var _ = Describe("AWS E2E", Ordered, func() {
 			GinkgoWriter.Printf("initial router nodes: %d, initial peers: %d\n",
 				len(initialNodes), initialPeerCount)
 
-			By("waiting for operator to reconcile (next 5m cycle)")
+			By(fmt.Sprintf("waiting for operator to reconcile (next %s cycle)", resyncInterval))
 			// The operator re-reconciles every 5 minutes; after a node change the
 			// watcher should trigger sooner. We poll until the peer set matches
 			// the current node set.
@@ -240,18 +276,39 @@ var _ = Describe("AWS E2E", Ordered, func() {
 	// ---------------------------------------------------------------
 	Context("E2E-AWS-03: Route Server peer manually deleted", func() {
 		It("should recreate the deleted peer within the reconcile window", func(ctx context.Context) {
-			By("finding a managed peer to delete")
-			peers, err := allManagedPeers(ctx)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(peers).NotTo(BeEmpty())
+			By("finding an available managed peer to delete")
+			// AWS rejects DeleteRouteServerPeer on a peer that is still
+			// pending, so wait for one to settle rather than racing the
+			// operator's own creation.
+			// allManagedPeers walks endpointsByAZ, a map, so Go randomises
+			// the order: taking peers[0] deletes a different peer on every
+			// run. Sort so a failure names the same peer twice running.
+			var victim ec2types.RouteServerPeer
+			Eventually(func(g Gomega) {
+				peers, err := allManagedPeers(ctx)
+				g.Expect(err).NotTo(HaveOccurred())
 
-			victim := peers[0]
+				var available []ec2types.RouteServerPeer
+				for _, p := range peers {
+					if p.State == ec2types.RouteServerPeerStateAvailable {
+						available = append(available, p)
+					}
+				}
+				g.Expect(available).NotTo(BeEmpty(), "no available managed peer yet")
+
+				sort.Slice(available, func(i, j int) bool {
+					return aws.ToString(available[i].RouteServerPeerId) <
+						aws.ToString(available[j].RouteServerPeerId)
+				})
+				victim = available[0]
+			}, reconcileTimeout, pollInterval).Should(Succeed())
+
 			victimID := aws.ToString(victim.RouteServerPeerId)
 			victimIP := aws.ToString(victim.PeerAddress)
 			GinkgoWriter.Printf("deleting peer %s (IP %s)\n", victimID, victimIP)
 
 			By("deleting the peer via EC2 API")
-			_, err = ec2Client.DeleteRouteServerPeer(ctx, &ec2.DeleteRouteServerPeerInput{
+			_, err := ec2Client.DeleteRouteServerPeer(ctx, &ec2.DeleteRouteServerPeerInput{
 				RouteServerPeerId: aws.String(victimID),
 			})
 			Expect(err).NotTo(HaveOccurred())

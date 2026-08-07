@@ -47,6 +47,15 @@ import (
 type CUDNBgpRoutingReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// ResyncInterval overrides DefaultResyncInterval when non-zero.
+	ResyncInterval time.Duration
+}
+
+func (r *CUDNBgpRoutingReconciler) resyncInterval() time.Duration {
+	if r.ResyncInterval > 0 {
+		return r.ResyncInterval
+	}
+	return DefaultResyncInterval
 }
 
 func (r *CUDNBgpRoutingReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -144,7 +153,7 @@ func (r *CUDNBgpRoutingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	log.Info("reconciliation complete", "phase", routing.Status.Phase)
-	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+	return ctrl.Result{RequeueAfter: r.resyncInterval()}, nil
 }
 
 func (r *CUDNBgpRoutingReconciler) reconcileDelete(ctx context.Context, routing *networkingv1alpha1.CUDNBgpRouting) (ctrl.Result, error) {

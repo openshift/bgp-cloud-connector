@@ -64,6 +64,15 @@ type CUDNBgpConfigReconciler struct {
 	client.Client
 	Scheme          *runtime.Scheme
 	PlatformBuilder PlatformBuilderFunc
+	// ResyncInterval overrides DefaultResyncInterval when non-zero.
+	ResyncInterval time.Duration
+}
+
+func (r *CUDNBgpConfigReconciler) resyncInterval() time.Duration {
+	if r.ResyncInterval > 0 {
+		return r.ResyncInterval
+	}
+	return DefaultResyncInterval
 }
 
 func (r *CUDNBgpConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -221,7 +230,7 @@ func (r *CUDNBgpConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	log.Info("reconciliation complete", "phase", config.Status.Phase)
-	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+	return ctrl.Result{RequeueAfter: r.resyncInterval()}, nil
 }
 
 func discoveryResultToStatus(dr *platform.DiscoveryResult) *networkingv1alpha1.AWSStatus {
