@@ -45,7 +45,7 @@ metadata:
     capabilities: Basic Install
     categories: Networking
     containerImage: controller:latest
-    createdAt: "2026-07-31T10:07:33Z"
+    createdAt: "2026-08-06T16:50:13Z"
     description: Automates L3 direct routing between CUDN Pod networks and external
       networks via BGP on OpenShift. Cloud platform aware — auto-discovers BGP infrastructure
       on AWS (VPC Route Server) and works on-premise with explicit configuration.
@@ -71,17 +71,6 @@ spec:
       kind: CUDNBgpRouting
       name: cudnbgproutings.networking.openshift.io
       version: v1alpha1
-    required:
-    - description: FRR-K8s BGP configuration.
-      displayName: FRR Configuration
-      kind: FRRConfiguration
-      name: frrconfigurations.frrk8s.metallb.io
-      version: v1beta1
-    - description: OVN Cluster User Defined Network.
-      displayName: Cluster User Defined Network
-      kind: ClusterUserDefinedNetwork
-      name: clusteruserdefinednetworks.k8s.ovn.org
-      version: v1
   description: |
     CUDN BGP Routing Operator automates L3 direct routing between
     Cluster User Defined Networks (CUDN) and external networks via BGP
