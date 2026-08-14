@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"sort"
 
 	corev1 "k8s.io/api/core/v1"
@@ -259,6 +260,36 @@ func createOrUpdate(ctx context.Context, c client.Client, obj *unstructured.Unst
 		return err
 	}
 
+	if specEqual(existing, obj) && labelsSatisfied(existing.GetLabels(), obj.GetLabels()) {
+		return nil
+	}
+
 	obj.SetResourceVersion(existing.GetResourceVersion())
 	return c.Update(ctx, obj)
+}
+
+// specEqual reports whether the object already has the spec we want.
+//
+// Without this, createOrUpdate rewrote its object on every reconcile
+// whether or not anything had changed. Both controllers watch what they
+// write, so each write returned immediately as an event: on a live cluster
+// the routing controller reconciled about twice a second, indefinitely,
+// rewriting the CUDN every time. Nothing converged because nothing was
+// meant to; the write itself was the trigger.
+func specEqual(existing, desired *unstructured.Unstructured) bool {
+	existingSpec, _, _ := unstructured.NestedMap(existing.Object, "spec")
+	desiredSpec, _, _ := unstructured.NestedMap(desired.Object, "spec")
+	return equality.Semantic.DeepEqual(existingSpec, desiredSpec)
+}
+
+// labelsSatisfied reports whether every label we care about is already set
+// as we want it. Labels added by anyone else are ignored, so their presence
+// does not send us back into the loop this exists to prevent.
+func labelsSatisfied(existing, desired map[string]string) bool {
+	for k, v := range desired {
+		if existing[k] != v {
+			return false
+		}
+	}
+	return true
 }

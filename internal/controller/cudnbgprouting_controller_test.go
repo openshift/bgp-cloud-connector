@@ -368,3 +368,119 @@ func TestMapRAToRouting_UnmanagedRA(t *testing.T) {
 		t.Errorf("expected 0 requests for unmanaged RA, got %d", len(requests))
 	}
 }
+
+func TestRoutingReconcile_ConfiguredResyncInterval(t *testing.T) {
+	routing := newTestCUDNBgpRouting()
+	config := newReadyCUDNBgpConfig()
+	ns := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "app1",
+			Labels: map[string]string{
+				LabelPrimaryUDN: "",
+				LabelCUDN:       "prod",
+			},
+		},
+	}
+
+	s := routingTestScheme()
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(routing, config, ns).
+		WithStatusSubresource(routing, config).
+		Build()
+
+	r := &CUDNBgpRoutingReconciler{Client: c, Scheme: s, ResyncInterval: 30 * time.Second}
+
+	_, _ = r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "prod"},
+	})
+
+	result, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "prod"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile error: %v", err)
+	}
+	if result.RequeueAfter != 30*time.Second {
+		t.Errorf("expected configured 30s resync requeue, got %v", result.RequeueAfter)
+	}
+}
+
+// createOrUpdate rewrote its object on every call, whether or not anything
+// had changed. Both controllers watch what they write, so each write came
+// straight back as an event: on a live cluster the routing controller
+// reconciled roughly twice a second, indefinitely, rewriting the CUDN each
+// time. Writing only on a real difference breaks the loop.
+func TestCreateOrUpdate_NoWriteWhenUnchanged(t *testing.T) {
+	s := routingTestScheme()
+	c := fake.NewClientBuilder().WithScheme(s).Build()
+
+	desired := func() *unstructured.Unstructured {
+		o := &unstructured.Unstructured{}
+		o.SetGroupVersionKind(CUDNNetworkGVK)
+		o.SetName("cluster-udn-prod")
+		o.SetLabels(map[string]string{LabelManagedBy: LabelManagedByVal})
+		_ = unstructured.SetNestedMap(o.Object, map[string]interface{}{
+			"topology": "Layer2",
+		}, "spec")
+		return o
+	}
+
+	if err := createOrUpdate(context.Background(), c, desired()); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	read := &unstructured.Unstructured{}
+	read.SetGroupVersionKind(CUDNNetworkGVK)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster-udn-prod"}, read); err != nil {
+		t.Fatalf("get after create: %v", err)
+	}
+	first := read.GetResourceVersion()
+
+	// Same desired state, twice more.
+	for i := 0; i < 2; i++ {
+		if err := createOrUpdate(context.Background(), c, desired()); err != nil {
+			t.Fatalf("update %d: %v", i, err)
+		}
+	}
+
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster-udn-prod"}, read); err != nil {
+		t.Fatalf("get after updates: %v", err)
+	}
+	if read.GetResourceVersion() != first {
+		t.Errorf("object was rewritten despite being unchanged: resourceVersion %s -> %s",
+			first, read.GetResourceVersion())
+	}
+}
+
+// ...but a genuine change must still be written.
+func TestCreateOrUpdate_WritesWhenChanged(t *testing.T) {
+	s := routingTestScheme()
+	c := fake.NewClientBuilder().WithScheme(s).Build()
+
+	build := func(topology string) *unstructured.Unstructured {
+		o := &unstructured.Unstructured{}
+		o.SetGroupVersionKind(CUDNNetworkGVK)
+		o.SetName("cluster-udn-prod")
+		_ = unstructured.SetNestedMap(o.Object, map[string]interface{}{
+			"topology": topology,
+		}, "spec")
+		return o
+	}
+
+	if err := createOrUpdate(context.Background(), c, build("Layer2")); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := createOrUpdate(context.Background(), c, build("Layer3")); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	read := &unstructured.Unstructured{}
+	read.SetGroupVersionKind(CUDNNetworkGVK)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster-udn-prod"}, read); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	topology, _, _ := unstructured.NestedString(read.Object, "spec", "topology")
+	if topology != "Layer3" {
+		t.Errorf("expected the change to be written, got topology %q", topology)
+	}
+}

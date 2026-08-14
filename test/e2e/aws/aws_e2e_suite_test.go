@@ -21,6 +21,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"path/filepath"
 	"testing"
 
@@ -51,8 +54,11 @@ var (
 	bgpConfig  *networkingv1alpha1.CUDNBgpConfig
 	bgpRouting *networkingv1alpha1.CUDNBgpRouting
 
-	clusterID     string
-	managedByTag  string
+	clusterID    string
+	managedByTag string
+	// testNamespace is generated at run time, so cleanup must use the
+	// name the API server actually assigned.
+	testNamespace string
 	endpointsByAZ map[string][]string
 )
 
@@ -153,6 +159,77 @@ func addUnstructuredTypes(s *runtime.Scheme) {
 	}
 }
 
+// The suite creates a CUDNBgpConfig, a CUDNBgpRouting and a namespace, and
+// Create is not idempotent: anything a failed run leaves behind makes the
+// next run fail on AlreadyExists, needing manual cleanup before you can try
+// again. AfterSuite runs whether or not specs passed, so the suite becomes
+// re-runnable.
+//
+// Order matters. The config CR has a finalizer that blocks its deletion
+// while any routing CR exists, which E2E-AWS-05 asserts deliberately, so
+// routing goes first.
+//
+// Set E2E_SKIP_CLEANUP to keep the wreckage for a post-mortem.
+var _ = AfterSuite(func(ctx SpecContext) {
+	if os.Getenv("E2E_SKIP_CLEANUP") != "" {
+		GinkgoWriter.Println("E2E_SKIP_CLEANUP set; leaving resources in place")
+		return
+	}
+	if k8sClient == nil {
+		return
+	}
+
+	deleteAndWait := func(obj client.Object, what string) {
+		if err := k8sClient.Delete(ctx, obj); err != nil {
+			if !apierrors.IsNotFound(err) {
+				GinkgoWriter.Printf("cleanup: deleting %s: %v\n", what, err)
+			}
+			return
+		}
+		GinkgoWriter.Printf("cleanup: deleted %s\n", what)
+		Eventually(func() bool {
+			err := k8sClient.Get(ctx, client.ObjectKeyFromObject(obj), obj)
+			return apierrors.IsNotFound(err)
+		}, 3*time.Minute, 5*time.Second).Should(BeTrue(), "%s should go away", what)
+	}
+
+	if bgpRouting != nil {
+		r := &networkingv1alpha1.CUDNBgpRouting{}
+		r.Name = bgpRouting.Name
+		deleteAndWait(r, "CUDNBgpRouting/"+bgpRouting.Name)
+	}
+
+	if bgpConfig != nil {
+		c := &networkingv1alpha1.CUDNBgpConfig{}
+		c.Name = bgpConfig.Name
+		deleteAndWait(c, "CUDNBgpConfig/"+bgpConfig.Name)
+	}
+
+	if testNamespace != "" {
+		ns := &corev1.Namespace{}
+		ns.Name = testNamespace
+		deleteAndWait(ns, "namespace/"+ns.Name)
+	}
+})
+
+// createEventually retries Create while the object is still going away.
+//
+// Both CRs have fixed names, and the config CR carries a finalizer that is
+// only removed on the next reconcile, so it lingers in Terminating for up
+// to a resync interval after AfterSuite deletes it. A run started in that
+// window used to fail immediately with "object is being deleted", which is
+// exactly what happens when you interrupt a run and start another.
+func createEventually(ctx context.Context, obj client.Object, what string) {
+	GinkgoHelper()
+	Eventually(func() error {
+		err := k8sClient.Create(ctx, obj)
+		if apierrors.IsAlreadyExists(err) {
+			GinkgoWriter.Printf("waiting for previous %s to finish deleting\n", what)
+		}
+		return err
+	}, 3*time.Minute, 5*time.Second).Should(Succeed(), "creating %s", what)
+}
+
 func listManagedPeers(ctx context.Context, endpointID string) ([]ec2types.RouteServerPeer, error) {
 	out, err := ec2Client.DescribeRouteServerPeers(ctx, &ec2.DescribeRouteServerPeersInput{})
 	if err != nil {
@@ -163,6 +240,9 @@ func listManagedPeers(ctx context.Context, endpointID string) ([]ec2types.RouteS
 		if aws.ToString(peer.RouteServerEndpointId) != endpointID {
 			continue
 		}
+		if !peerIsAlive(peer.State) {
+			continue
+		}
 		for _, t := range peer.Tags {
 			if aws.ToString(t.Key) == "managed-by" && aws.ToString(t.Value) == managedByTag {
 				filtered = append(filtered, peer)
@@ -171,6 +251,19 @@ func listManagedPeers(ctx context.Context, endpointID string) ([]ec2types.RouteS
 		}
 	}
 	return filtered, nil
+}
+
+// peerIsAlive mirrors the operator's own check. DescribeRouteServerPeers
+// keeps returning peers after they are gone, so without this the suite
+// tries to delete peers AWS has already deleted, which fails with
+// IncorrectState, and counts dead peers when asserting cleanup.
+func peerIsAlive(state ec2types.RouteServerPeerState) bool {
+	switch state {
+	case ec2types.RouteServerPeerStateAvailable, ec2types.RouteServerPeerStatePending:
+		return true
+	default:
+		return false
+	}
 }
 
 func allManagedPeers(ctx context.Context) ([]ec2types.RouteServerPeer, error) {

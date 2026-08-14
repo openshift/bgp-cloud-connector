@@ -37,10 +37,11 @@ type mockEC2 struct {
 	describeInstFunc  func(*ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error)
 	modifyENIFunc     func(*ec2.ModifyNetworkInterfaceAttributeInput) (*ec2.ModifyNetworkInterfaceAttributeOutput, error)
 
-	createPeerCalls []*ec2.CreateRouteServerPeerInput
-	deletePeerCalls []*ec2.DeleteRouteServerPeerInput
-	createTagsCalls []*ec2.CreateTagsInput
-	modifyENICalls  []*ec2.ModifyNetworkInterfaceAttributeInput
+	describePeersCalls int
+	createPeerCalls    []*ec2.CreateRouteServerPeerInput
+	deletePeerCalls    []*ec2.DeleteRouteServerPeerInput
+	createTagsCalls    []*ec2.CreateTagsInput
+	modifyENICalls     []*ec2.ModifyNetworkInterfaceAttributeInput
 }
 
 func (m *mockEC2) DescribeRouteServers(_ context.Context, input *ec2.DescribeRouteServersInput, _ ...func(*ec2.Options)) (*ec2.DescribeRouteServersOutput, error) {
@@ -65,6 +66,7 @@ func (m *mockEC2) DescribeSubnets(_ context.Context, input *ec2.DescribeSubnetsI
 }
 
 func (m *mockEC2) DescribeRouteServerPeers(_ context.Context, input *ec2.DescribeRouteServerPeersInput, _ ...func(*ec2.Options)) (*ec2.DescribeRouteServerPeersOutput, error) {
+	m.describePeersCalls++
 	if m.describePeersFunc != nil {
 		return m.describePeersFunc(input)
 	}
@@ -236,7 +238,7 @@ func TestReconcilePeers_AdoptPreExistingUntagged(t *testing.T) {
 		describePeersFunc: func(_ *ec2.DescribeRouteServerPeersInput) (*ec2.DescribeRouteServerPeersOutput, error) {
 			return &ec2.DescribeRouteServerPeersOutput{
 				RouteServerPeers: []ec2types.RouteServerPeer{
-					{PeerAddress: aws.String("10.0.1.10"), RouteServerPeerId: aws.String("peer-existing"), RouteServerEndpointId: aws.String("ep-a1")},
+					{PeerAddress: aws.String("10.0.1.10"), RouteServerPeerId: aws.String("peer-existing"), RouteServerEndpointId: aws.String("ep-a1"), State: ec2types.RouteServerPeerStateAvailable},
 				},
 			}, nil
 		},
@@ -276,6 +278,7 @@ func TestReconcilePeers_DeleteStalePeer(t *testing.T) {
 						PeerAddress:           aws.String("10.0.1.99"),
 						RouteServerPeerId:     aws.String("peer-stale"),
 						RouteServerEndpointId: aws.String("ep-a1"),
+						State:                 ec2types.RouteServerPeerStateAvailable,
 						Tags: []ec2types.Tag{
 							{Key: aws.String("managed-by"), Value: aws.String("cudn-bgp-routing-operator/test-cluster")},
 						},
@@ -344,12 +347,12 @@ func TestCleanup_DeletesAllManagedPeers(t *testing.T) {
 		describePeersFunc: func(_ *ec2.DescribeRouteServerPeersInput) (*ec2.DescribeRouteServerPeersOutput, error) {
 			return &ec2.DescribeRouteServerPeersOutput{
 				RouteServerPeers: []ec2types.RouteServerPeer{
-					{PeerAddress: aws.String("10.0.0.1"), RouteServerPeerId: aws.String("peer-ep-a1"), RouteServerEndpointId: aws.String("ep-a1"), Tags: managedTag},
-					{PeerAddress: aws.String("10.0.0.2"), RouteServerPeerId: aws.String("peer-ep-a2"), RouteServerEndpointId: aws.String("ep-a2"), Tags: managedTag},
-					{PeerAddress: aws.String("10.0.0.3"), RouteServerPeerId: aws.String("peer-ep-b1"), RouteServerEndpointId: aws.String("ep-b1"), Tags: managedTag},
-					{PeerAddress: aws.String("10.0.0.4"), RouteServerPeerId: aws.String("peer-ep-b2"), RouteServerEndpointId: aws.String("ep-b2"), Tags: managedTag},
-					{PeerAddress: aws.String("10.0.0.5"), RouteServerPeerId: aws.String("peer-ep-c1"), RouteServerEndpointId: aws.String("ep-c1"), Tags: managedTag},
-					{PeerAddress: aws.String("10.0.0.6"), RouteServerPeerId: aws.String("peer-ep-c2"), RouteServerEndpointId: aws.String("ep-c2"), Tags: managedTag},
+					{PeerAddress: aws.String("10.0.0.1"), RouteServerPeerId: aws.String("peer-ep-a1"), RouteServerEndpointId: aws.String("ep-a1"), State: ec2types.RouteServerPeerStateAvailable, Tags: managedTag},
+					{PeerAddress: aws.String("10.0.0.2"), RouteServerPeerId: aws.String("peer-ep-a2"), RouteServerEndpointId: aws.String("ep-a2"), State: ec2types.RouteServerPeerStateAvailable, Tags: managedTag},
+					{PeerAddress: aws.String("10.0.0.3"), RouteServerPeerId: aws.String("peer-ep-b1"), RouteServerEndpointId: aws.String("ep-b1"), State: ec2types.RouteServerPeerStateAvailable, Tags: managedTag},
+					{PeerAddress: aws.String("10.0.0.4"), RouteServerPeerId: aws.String("peer-ep-b2"), RouteServerEndpointId: aws.String("ep-b2"), State: ec2types.RouteServerPeerStateAvailable, Tags: managedTag},
+					{PeerAddress: aws.String("10.0.0.5"), RouteServerPeerId: aws.String("peer-ep-c1"), RouteServerEndpointId: aws.String("ep-c1"), State: ec2types.RouteServerPeerStateAvailable, Tags: managedTag},
+					{PeerAddress: aws.String("10.0.0.6"), RouteServerPeerId: aws.String("peer-ep-c2"), RouteServerEndpointId: aws.String("ep-c2"), State: ec2types.RouteServerPeerStateAvailable, Tags: managedTag},
 				},
 			}, nil
 		},
@@ -606,5 +609,187 @@ func TestDiscoverEndpoints_APIFailure(t *testing.T) {
 	_, err := p.DiscoverEndpoints(context.Background())
 	if err == nil {
 		t.Fatal("expected error on API failure")
+	}
+}
+
+// A peer AWS has already deleted must not be mistaken for a live one.
+// Deleting the CUDNBgpConfig removes the peers, and DescribeRouteServerPeers
+// keeps returning them in state "deleted" afterwards; counting those as
+// present leaves BGP down while the operator reports everything reconciled.
+//
+// The check is an allowlist, so a state AWS adds in future is treated as
+// gone rather than silently counted as a working peer.
+func TestReconcilePeers_RecreatesPeerNotAlive(t *testing.T) {
+	goneStates := []ec2types.RouteServerPeerState{
+		ec2types.RouteServerPeerStateDeleted,
+		ec2types.RouteServerPeerStateDeleting,
+		ec2types.RouteServerPeerStateFailing,
+		ec2types.RouteServerPeerStateFailed,
+		ec2types.RouteServerPeerState("some-state-aws-adds-later"),
+		ec2types.RouteServerPeerState(""),
+	}
+
+	for _, state := range goneStates {
+		t.Run(string(state), func(t *testing.T) {
+			mock := &mockEC2{
+				describePeersFunc: func(_ *ec2.DescribeRouteServerPeersInput) (*ec2.DescribeRouteServerPeersOutput, error) {
+					return &ec2.DescribeRouteServerPeersOutput{
+						RouteServerPeers: []ec2types.RouteServerPeer{
+							{
+								PeerAddress:           aws.String("10.0.1.10"),
+								RouteServerPeerId:     aws.String("peer-gone"),
+								RouteServerEndpointId: aws.String("ep-a1"),
+								State:                 state,
+								Tags: []ec2types.Tag{
+									{Key: aws.String("managed-by"), Value: aws.String("cudn-bgp-routing-operator/test-cluster")},
+								},
+							},
+						},
+					}, nil
+				},
+			}
+			p := newTestPlatform(mock)
+
+			nodes := []platform.RouterNode{
+				{Name: "node-a", PrivateIP: "10.0.1.10", AZ: "us-east-1a", ProviderID: "aws:///us-east-1a/i-a"},
+			}
+
+			if err := p.reconcileRouteServerPeers(context.Background(), nodes); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			// One node in one AZ with two endpoints: both need a peer,
+			// because the only existing one is not alive.
+			if len(mock.createPeerCalls) != 2 {
+				t.Errorf("expected 2 create calls, got %d", len(mock.createPeerCalls))
+			}
+			for _, call := range mock.deletePeerCalls {
+				if aws.ToString(call.RouteServerPeerId) == "peer-gone" {
+					t.Error("tried to delete a peer that is already gone")
+				}
+			}
+		})
+	}
+}
+
+// The other half of the allowlist: a peer that exists, or is on its way to
+// existing, must not be duplicated. Peers sit in "pending" for minutes after
+// creation, and a short resync interval would otherwise create a second one.
+func TestReconcilePeers_DoesNotDuplicateLivePeer(t *testing.T) {
+	for _, state := range []ec2types.RouteServerPeerState{
+		ec2types.RouteServerPeerStateAvailable,
+		ec2types.RouteServerPeerStatePending,
+	} {
+		t.Run(string(state), func(t *testing.T) {
+			mock := &mockEC2{
+				describePeersFunc: func(_ *ec2.DescribeRouteServerPeersInput) (*ec2.DescribeRouteServerPeersOutput, error) {
+					return &ec2.DescribeRouteServerPeersOutput{
+						RouteServerPeers: []ec2types.RouteServerPeer{
+							{
+								PeerAddress:           aws.String("10.0.1.10"),
+								RouteServerPeerId:     aws.String("peer-a1"),
+								RouteServerEndpointId: aws.String("ep-a1"),
+								State:                 state,
+								Tags: []ec2types.Tag{
+									{Key: aws.String("managed-by"), Value: aws.String("cudn-bgp-routing-operator/test-cluster")},
+								},
+							},
+						},
+					}, nil
+				},
+			}
+			p := newTestPlatform(mock)
+
+			nodes := []platform.RouterNode{
+				{Name: "node-a", PrivateIP: "10.0.1.10", AZ: "us-east-1a", ProviderID: "aws:///us-east-1a/i-a"},
+			}
+
+			if err := p.reconcileRouteServerPeers(context.Background(), nodes); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			// ep-a1 already has a peer; only ep-a2 needs one.
+			if len(mock.createPeerCalls) != 1 {
+				t.Errorf("expected 1 create call, got %d", len(mock.createPeerCalls))
+			}
+			for _, call := range mock.createPeerCalls {
+				if aws.ToString(call.RouteServerEndpointId) == "ep-a1" {
+					t.Error("created a duplicate peer on an endpoint that already has one")
+				}
+			}
+		})
+	}
+}
+
+// DescribeRouteServerPeers takes no endpoint filter, so every call returns
+// every peer in the region. Calling it once per endpoint, twice over, means
+// a reconcile makes 2N identical full-region calls where one would do. The
+// rate buckets for these APIs are per-account, so with many clusters in one
+// account that amplification is the contended resource.
+func TestReconcilePeers_DescribesPeersOnce(t *testing.T) {
+	mock := &mockEC2{
+		describePeersFunc: func(_ *ec2.DescribeRouteServerPeersInput) (*ec2.DescribeRouteServerPeersOutput, error) {
+			return &ec2.DescribeRouteServerPeersOutput{}, nil
+		},
+	}
+	p := newTestPlatform(mock) // 3 AZs, 2 endpoints each
+
+	nodes := []platform.RouterNode{
+		{Name: "node-a", PrivateIP: "10.0.1.10", AZ: "us-east-1a", ProviderID: "aws:///us-east-1a/i-a"},
+		{Name: "node-b", PrivateIP: "10.0.2.10", AZ: "us-east-1b", ProviderID: "aws:///us-east-1b/i-b"},
+		{Name: "node-c", PrivateIP: "10.0.3.10", AZ: "us-east-1c", ProviderID: "aws:///us-east-1c/i-c"},
+	}
+
+	if err := p.reconcileRouteServerPeers(context.Background(), nodes); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if mock.describePeersCalls != 1 {
+		t.Errorf("expected 1 DescribeRouteServerPeers call for the whole reconcile, got %d",
+			mock.describePeersCalls)
+	}
+}
+
+// Peers were created in whatever order Go happened to walk endpointsByAZ,
+// which is a map and therefore randomised. That makes logs and failures
+// non-reproducible: the same input produced a different sequence each run.
+func TestReconcilePeers_CreateOrderIsDeterministic(t *testing.T) {
+	nodes := []platform.RouterNode{
+		{Name: "node-a", PrivateIP: "10.0.1.10", AZ: "us-east-1a", ProviderID: "aws:///us-east-1a/i-a"},
+		{Name: "node-b", PrivateIP: "10.0.2.10", AZ: "us-east-1b", ProviderID: "aws:///us-east-1b/i-b"},
+		{Name: "node-c", PrivateIP: "10.0.3.10", AZ: "us-east-1c", ProviderID: "aws:///us-east-1c/i-c"},
+	}
+
+	var first []string
+	for run := 0; run < 20; run++ {
+		mock := &mockEC2{
+			describePeersFunc: func(_ *ec2.DescribeRouteServerPeersInput) (*ec2.DescribeRouteServerPeersOutput, error) {
+				return &ec2.DescribeRouteServerPeersOutput{}, nil
+			},
+		}
+		p := newTestPlatform(mock)
+
+		if err := p.reconcileRouteServerPeers(context.Background(), nodes); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		var seq []string
+		for _, c := range mock.createPeerCalls {
+			seq = append(seq, aws.ToString(c.RouteServerEndpointId)+"/"+aws.ToString(c.PeerAddress))
+		}
+
+		if run == 0 {
+			first = seq
+			continue
+		}
+		if len(seq) != len(first) {
+			t.Fatalf("run %d produced %d creates, run 0 produced %d", run, len(seq), len(first))
+		}
+		for i := range seq {
+			if seq[i] != first[i] {
+				t.Fatalf("run %d differs from run 0 at position %d: %s vs %s\nrun 0: %v\nrun %d: %v",
+					run, i, seq[i], first[i], first, run, seq)
+			}
+		}
 	}
 }
