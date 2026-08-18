@@ -25,7 +25,11 @@ const (
 	ConditionRouteAdvertisementsCreated = "RouteAdvertisementsCreated"
 )
 
+// +kubebuilder:validation:XValidation:rule="self.subnets.all(s, isCIDR(s) && cidr(s).prefixLength() <= 30)",message="each subnet must be a valid CIDR with prefix /30 or wider"
 type NetworkConfig struct {
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=2
