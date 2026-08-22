@@ -158,6 +158,14 @@ type CUDNBgpConfigStatus struct {
 	// rather than discovered.
 	// +optional
 	PeerGroups []PeerGroupStatus `json:"peerGroups,omitempty"`
+	// FRRProviderOwned is true when this controller added FRR to Network/cluster
+	// additionalRoutingCapabilities.providers.
+	// +optional
+	FRRProviderOwned bool `json:"frrProviderOwned,omitempty"`
+	// RouteAdsOwned is true when this controller set routeAdvertisements to
+	// Enabled on Network/cluster.
+	// +optional
+	RouteAdsOwned bool `json:"routeAdsOwned,omitempty"`
 }
 
 // +kubebuilder:object:root=true

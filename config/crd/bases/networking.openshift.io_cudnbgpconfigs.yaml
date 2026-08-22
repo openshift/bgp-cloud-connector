@@ -210,6 +210,14 @@ spec:
                   - type
                   type: object
                 type: array
+              frrProviderOwned:
+                description: FRRProviderOwned is true when this controller added
+                  FRR to Network/cluster additionalRoutingCapabilities.providers.
+                type: boolean
+              routeAdsOwned:
+                description: RouteAdsOwned is true when this controller set routeAdvertisements
+                  to Enabled on Network/cluster.
+                type: boolean
               observedGeneration:
                 format: int64
                 type: integer

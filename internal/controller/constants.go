@@ -27,8 +27,10 @@ const (
 	SingletonName          = "cluster"
 	FRRNamespace           = "openshift-frr-k8s"
 	FRRConfigNamePrefix    = "cudn-bgp-"
+	FRRProviderName        = "FRR"
 	CUDNNamePrefix         = "cluster-udn-"
 	RouteAdvertisementName = "cudn-bgp-route-advertisements"
+	RouteAdvertisementsOn  = "Enabled"
 
 	LabelManagedBy    = "app.kubernetes.io/managed-by"
 	LabelManagedByVal = "cudn-bgp-routing-operator"
