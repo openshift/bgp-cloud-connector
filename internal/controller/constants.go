@@ -37,6 +37,45 @@ const (
 	LabelPrimaryUDN   = "k8s.ovn.org/primary-user-defined-network"
 )
 
+// Condition reason constants
+const (
+	// Terminal degraded reasons — no requeue, user action required.
+	ReasonInvalidName             = "InvalidName"
+	ReasonDuplicateNetwork        = "DuplicateNetwork"
+	ReasonCloudCredentialsInvalid = "CloudCredentialsInvalid"
+	ReasonRouteServerNotFound     = "RouteServerNotFound"
+	ReasonCUDNSpecInvalid         = "CUDNSpecInvalid"
+
+	// Transient degraded reasons
+	ReasonPatchFailed          = "PatchFailed"
+	ReasonCheckFailed          = "CheckFailed"
+	ReasonCloudDiscoveryFailed = "CloudDiscoveryFailed"
+	ReasonApplyFailed          = "ApplyFailed"
+	ReasonCloudReconcileFailed = "CloudReconcileFailed"
+	ReasonNamespaceNotReady    = "NamespaceNotReady"
+	ReasonCUDNFailed           = "CUDNFailed"
+	ReasonRAFailed             = "RAFailed"
+
+	// Success / informational reasons
+	ReasonPatched         = "Patched"
+	ReasonWaitingForFRR   = "WaitingForFRR"
+	ReasonFRRReady        = "Ready"
+	ReasonDiscovered      = "Discovered"
+	ReasonApplied         = "Applied"
+	ReasonReconciled      = "Reconciled"
+	ReasonCreated         = "Created"
+	ReasonRoutingCRsExist = "RoutingCRsExist"
+)
+
+// TerminalDegradedReasons are condition reasons that must not schedule RequeueAfter.
+var TerminalDegradedReasons = map[string]struct{}{
+	ReasonInvalidName:             {},
+	ReasonDuplicateNetwork:        {},
+	ReasonCloudCredentialsInvalid: {},
+	ReasonRouteServerNotFound:     {},
+	ReasonCUDNSpecInvalid:         {},
+}
+
 var (
 	NetworkGVK = schema.GroupVersionKind{
 		Group: "operator.openshift.io", Version: "v1", Kind: "Network",

@@ -22,12 +22,16 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	networkingv1alpha1 "github.com/openshift/bgp-cloud-connector/api/v1alpha1"
@@ -120,7 +124,9 @@ func TestRoutingReconcile_FullReconcile(t *testing.T) {
 	}
 
 	updated := &networkingv1alpha1.CUDNBgpRouting{}
-	_ = c.Get(context.Background(), types.NamespacedName{Name: "prod"}, updated)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "prod"}, updated); err != nil {
+		t.Fatalf("failed to get routing: %v", err)
+	}
 	if updated.Status.Phase != networkingv1alpha1.PhaseReady {
 		t.Errorf("expected Ready, got %s", updated.Status.Phase)
 	}
@@ -166,7 +172,9 @@ func TestRoutingReconcile_NoNamespace(t *testing.T) {
 	}
 
 	updated := &networkingv1alpha1.CUDNBgpRouting{}
-	_ = c.Get(context.Background(), types.NamespacedName{Name: "prod"}, updated)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "prod"}, updated); err != nil {
+		t.Fatalf("failed to get routing: %v", err)
+	}
 	if updated.Status.Phase != networkingv1alpha1.PhaseDegraded {
 		t.Errorf("expected Degraded, got %s", updated.Status.Phase)
 	}
@@ -286,14 +294,143 @@ func TestRoutingReconcile_DuplicateNetworkName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.RequeueAfter != 30*time.Second {
-		t.Errorf("expected 30s degraded requeue, got %v", result.RequeueAfter)
+	// DuplicateNetwork is terminal — no requeue after status update.
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue for terminal DuplicateNetwork, got %v", result.RequeueAfter)
 	}
 
 	updated := &networkingv1alpha1.CUDNBgpRouting{}
-	_ = c.Get(context.Background(), types.NamespacedName{Name: "prod"}, updated)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "prod"}, updated); err != nil {
+		t.Fatalf("failed to get routing: %v", err)
+	}
 	if updated.Status.Phase != networkingv1alpha1.PhaseDegraded {
 		t.Errorf("expected Degraded, got %s", updated.Status.Phase)
+	}
+}
+
+// After the conflicting CR is deleted, the degraded duplicate recovers to Ready
+// on the next reconcile (triggered in production by enqueueAllRoutings).
+func TestRoutingReconcile_DuplicateNetwork_RecoversOnConflictDelete(t *testing.T) {
+	existing := &networkingv1alpha1.CUDNBgpRouting{
+		ObjectMeta: metav1.ObjectMeta{Name: "existing-prod"},
+		Spec: networkingv1alpha1.CUDNBgpRoutingSpec{
+			Network: networkingv1alpha1.NetworkConfig{
+				Name: "prod", Subnets: []string{"10.100.0.0/16"},
+			},
+		},
+	}
+	duplicate := newTestCUDNBgpRouting()
+	duplicate.Finalizers = []string{RoutingFinalizerName}
+	config := newReadyCUDNBgpConfig()
+	ns := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "app1",
+			Labels: map[string]string{
+				LabelPrimaryUDN: "",
+				LabelCUDN:       "prod",
+			},
+		},
+	}
+
+	s := routingTestScheme()
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(existing, duplicate, config, ns).
+		WithStatusSubresource(existing, duplicate, config).
+		Build()
+
+	r := &CUDNBgpRoutingReconciler{Client: c, Scheme: s}
+
+	// First reconcile: DuplicateNetwork → Degraded, no requeue.
+	result, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "prod"},
+	})
+	if err != nil {
+		t.Fatalf("first reconcile error: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue for terminal DuplicateNetwork, got %v", result.RequeueAfter)
+	}
+	before := &networkingv1alpha1.CUDNBgpRouting{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "prod"}, before); err != nil {
+		t.Fatalf("failed to get routing: %v", err)
+	}
+	if before.Status.Phase != networkingv1alpha1.PhaseDegraded {
+		t.Fatalf("expected Degraded after duplicate, got %s", before.Status.Phase)
+	}
+
+	// Simulate conflict resolution: delete the conflicting CR.
+	// In production this triggers enqueueAllRoutings which re-enqueues "prod".
+	if err := c.Delete(context.Background(), existing); err != nil {
+		t.Fatalf("failed to delete existing-prod: %v", err)
+	}
+
+	// Re-reconcile "prod" (as the secondary watch would trigger).
+	result2, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "prod"},
+	})
+	if err != nil {
+		t.Fatalf("recovery reconcile error: %v", err)
+	}
+	if result2.RequeueAfter != 5*time.Minute {
+		t.Errorf("expected 5m resync after recovery, got %v", result2.RequeueAfter)
+	}
+
+	recovered := &networkingv1alpha1.CUDNBgpRouting{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "prod"}, recovered); err != nil {
+		t.Fatalf("failed to get routing: %v", err)
+	}
+	if recovered.Status.Phase != networkingv1alpha1.PhaseReady {
+		t.Errorf("expected Ready after conflict resolution, got %s", recovered.Status.Phase)
+	}
+}
+
+// NamespaceNotReady stays transient (regression guard — must still be 30s).
+func TestRoutingReconcile_NamespaceNotReady_StillTransient(t *testing.T) {
+	routing := newTestCUDNBgpRouting()
+	routing.Finalizers = []string{RoutingFinalizerName}
+	config := newReadyCUDNBgpConfig()
+
+	s := routingTestScheme()
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(routing, config).
+		WithStatusSubresource(routing, config).
+		Build()
+
+	r := &CUDNBgpRoutingReconciler{Client: c, Scheme: s}
+	result, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "prod"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 30*time.Second {
+		t.Errorf("NamespaceNotReady must remain transient (30s), got %v", result.RequeueAfter)
+	}
+}
+
+// TestEnqueueAllRoutings verifies the mapper returns a reconcile.Request for every CR.
+func TestEnqueueAllRoutings(t *testing.T) {
+	routing1 := newTestCUDNBgpRouting()
+	routing2 := &networkingv1alpha1.CUDNBgpRouting{
+		ObjectMeta: metav1.ObjectMeta{Name: "staging"},
+		Spec: networkingv1alpha1.CUDNBgpRoutingSpec{
+			Network: networkingv1alpha1.NetworkConfig{Name: "staging", Subnets: []string{"10.200.0.0/16"}},
+		},
+	}
+	s := routingTestScheme()
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(routing1, routing2).Build()
+	r := &CUDNBgpRoutingReconciler{Client: c, Scheme: s}
+
+	reqs := r.enqueueAllRoutings(context.Background(), routing1)
+	if len(reqs) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(reqs))
+	}
+	names := map[string]bool{}
+	for _, req := range reqs {
+		names[req.Name] = true
+	}
+	if !names["prod"] || !names["staging"] {
+		t.Errorf("expected requests for prod and staging, got %v", names)
 	}
 }
 
@@ -368,4 +505,69 @@ func TestMapRAToRouting_UnmanagedRA(t *testing.T) {
 	if len(requests) != 0 {
 		t.Errorf("expected 0 requests for unmanaged RA, got %d", len(requests))
 	}
+}
+
+// TestRoutingReconcile_CUDNSpecInvalid_NoRequeue: an invalid CUDN spec (e.g. bad CIDR)
+// is terminal — the user must correct spec.network in the CUDNBgpRouting.
+func TestRoutingReconcile_CUDNSpecInvalid_NoRequeue(t *testing.T) {
+	routing := newTestCUDNBgpRouting()
+	routing.Finalizers = []string{RoutingFinalizerName}
+	config := newReadyCUDNBgpConfig()
+	ns := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "app1",
+			Labels: map[string]string{
+				LabelPrimaryUDN: "",
+				LabelCUDN:       "prod",
+			},
+		},
+	}
+
+	invalidErr := apierrors.NewInvalid(
+		schema.GroupKind{Group: "k8s.ovn.org", Kind: "ClusterUserDefinedNetwork"},
+		"cluster-udn-prod",
+		nil,
+	)
+
+	s := routingTestScheme()
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(routing, config, ns).
+		WithStatusSubresource(routing, config).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if obj.GetName() == CUDNNamePrefix+"prod" {
+					return invalidErr
+				}
+				return cl.Create(ctx, obj, opts...)
+			},
+		}).
+		Build()
+
+	r := &CUDNBgpRoutingReconciler{Client: c, Scheme: s}
+	result, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "prod"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue for terminal CUDNSpecInvalid, got %v", result.RequeueAfter)
+	}
+
+	updated := &networkingv1alpha1.CUDNBgpRouting{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "prod"}, updated); err != nil {
+		t.Fatalf("failed to get routing: %v", err)
+	}
+	if updated.Status.Phase != networkingv1alpha1.PhaseDegraded {
+		t.Errorf("expected Degraded, got %s", updated.Status.Phase)
+	}
+	for _, cond := range updated.Status.Conditions {
+		if cond.Type == networkingv1alpha1.ConditionCUDNCreated {
+			if cond.Reason != ReasonCUDNSpecInvalid {
+				t.Errorf("expected reason CUDNSpecInvalid, got %s", cond.Reason)
+			}
+			return
+		}
+	}
+	t.Error("CUDNCreated condition with CUDNSpecInvalid reason not found")
 }

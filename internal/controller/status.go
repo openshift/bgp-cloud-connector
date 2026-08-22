@@ -101,7 +101,7 @@ func (r *CUDNBgpConfigReconciler) reportDeletionBlocked(
 		meta.SetStatusCondition(&c.Status.Conditions, metav1.Condition{
 			Type:               ConditionDeletionBlocked,
 			Status:             metav1.ConditionTrue,
-			Reason:             "RoutingCRsExist",
+			Reason:             ReasonRoutingCRsExist,
 			Message:            condMessage,
 			ObservedGeneration: c.Generation,
 		})

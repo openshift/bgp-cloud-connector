@@ -32,7 +32,7 @@ func TestConfigStatusEqual(t *testing.T) {
 		Phase:              networkingv1alpha1.PhaseConfiguring,
 		ObservedGeneration: 1,
 		Conditions: []metav1.Condition{
-			{Type: networkingv1alpha1.ConditionFRRNamespaceReady, Status: metav1.ConditionFalse, Reason: "WaitingForFRR"},
+			{Type: networkingv1alpha1.ConditionFRRNamespaceReady, Status: metav1.ConditionFalse, Reason: ReasonWaitingForFRR},
 		},
 	}
 	same := base.DeepCopy()

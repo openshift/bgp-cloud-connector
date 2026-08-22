@@ -79,7 +79,7 @@ func (r *CUDNBgpConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	if config.Name != SingletonName {
 		return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionNetworkOperatorPatched,
-			"InvalidName", fmt.Sprintf("CUDNBgpConfig must be named %q, got %q", SingletonName, config.Name))
+			ReasonInvalidName, fmt.Sprintf("CUDNBgpConfig must be named %q, got %q", SingletonName, config.Name))
 	}
 
 	if !config.DeletionTimestamp.IsZero() {
@@ -100,12 +100,12 @@ func (r *CUDNBgpConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	log.Info("Phase 1: patching Network operator")
 	if err := PatchNetworkOperator(ctx, r.Client); err != nil {
 		return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionNetworkOperatorPatched,
-			"PatchFailed", fmt.Sprintf("failed to patch Network operator: %v", err))
+			ReasonPatchFailed, fmt.Sprintf("failed to patch Network operator: %v", err))
 	}
 	meta.SetStatusCondition(&config.Status.Conditions, metav1.Condition{
 		Type:               networkingv1alpha1.ConditionNetworkOperatorPatched,
 		Status:             metav1.ConditionTrue,
-		Reason:             "Patched",
+		Reason:             ReasonPatched,
 		Message:            "Network operator patched with FRR and routeAdvertisements",
 		ObservedGeneration: config.Generation,
 	})
@@ -115,7 +115,7 @@ func (r *CUDNBgpConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	ready, err := IsFRRReady(ctx, r.Client)
 	if err != nil {
 		return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionFRRNamespaceReady,
-			"CheckFailed", fmt.Sprintf("failed to check FRR readiness: %v", err))
+			ReasonCheckFailed, fmt.Sprintf("failed to check FRR readiness: %v", err))
 	}
 	if !ready {
 		if err := r.patchConfigStatus(ctx, config, *baselineStatus, func(c *networkingv1alpha1.CUDNBgpConfig) {
@@ -124,7 +124,7 @@ func (r *CUDNBgpConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			meta.SetStatusCondition(&c.Status.Conditions, metav1.Condition{
 				Type:               networkingv1alpha1.ConditionFRRNamespaceReady,
 				Status:             metav1.ConditionFalse,
-				Reason:             "WaitingForFRR",
+				Reason:             ReasonWaitingForFRR,
 				Message:            "Waiting for openshift-frr-k8s namespace and pods",
 				ObservedGeneration: c.Generation,
 			})
@@ -137,7 +137,7 @@ func (r *CUDNBgpConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	meta.SetStatusCondition(&config.Status.Conditions, metav1.Condition{
 		Type:               networkingv1alpha1.ConditionFRRNamespaceReady,
 		Status:             metav1.ConditionTrue,
-		Reason:             "Ready",
+		Reason:             ReasonFRRReady,
 		Message:            "FRR namespace and pods are running",
 		ObservedGeneration: config.Generation,
 	})
@@ -155,10 +155,10 @@ func (r *CUDNBgpConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			var credErr *platform.CredentialError
 			if errors.As(err, &credErr) {
 				return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionCloudEndpointsDiscovered,
-					"CloudCredentialsInvalid", credErr.Error())
+					ReasonCloudCredentialsInvalid, credErr.Error())
 			}
 			return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionCloudEndpointsDiscovered,
-				"CloudDiscoveryFailed", fmt.Sprintf("failed to build the cloud platform: %v", err))
+				ReasonCloudDiscoveryFailed, fmt.Sprintf("failed to build the cloud platform: %v", err))
 		}
 		cloudPlatform = p
 
@@ -166,14 +166,19 @@ func (r *CUDNBgpConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		log.Info("Phase 3: discovering cloud BGP endpoints")
 		discoveryResult, err = cloudPlatform.DiscoverEndpoints(ctx)
 		if err != nil {
+			var notFoundErr *awsplatform.RouteServerNotFoundError
+			if errors.As(err, &notFoundErr) {
+				return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionCloudEndpointsDiscovered,
+					ReasonRouteServerNotFound, notFoundErr.Error())
+			}
 			return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionCloudEndpointsDiscovered,
-				"CloudDiscoveryFailed", fmt.Sprintf("failed to discover cloud BGP endpoints: %v", err))
+				ReasonCloudDiscoveryFailed, fmt.Sprintf("failed to discover cloud BGP endpoints: %v", err))
 		}
 		config.Status.PeerGroups = peerGroupsToStatus(discoveryResult.PeerGroups)
 		meta.SetStatusCondition(&config.Status.Conditions, metav1.Condition{
 			Type:               networkingv1alpha1.ConditionCloudEndpointsDiscovered,
 			Status:             metav1.ConditionTrue,
-			Reason:             "Discovered",
+			Reason:             ReasonDiscovered,
 			Message:            fmt.Sprintf("Discovered %d peer group(s)", len(discoveryResult.PeerGroups)),
 			ObservedGeneration: config.Generation,
 		})
@@ -190,12 +195,12 @@ func (r *CUDNBgpConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 	if err != nil {
 		return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionFRRConfigurationApplied,
-			"ApplyFailed", fmt.Sprintf("failed to apply FRR configurations: %v", err))
+			ReasonApplyFailed, fmt.Sprintf("failed to apply FRR configurations: %v", err))
 	}
 	meta.SetStatusCondition(&config.Status.Conditions, metav1.Condition{
 		Type:               networkingv1alpha1.ConditionFRRConfigurationApplied,
 		Status:             metav1.ConditionTrue,
-		Reason:             "Applied",
+		Reason:             ReasonApplied,
 		Message:            fmt.Sprintf("Applied %d FRRConfiguration(s)", frrCount),
 		ObservedGeneration: config.Generation,
 	})
@@ -206,16 +211,16 @@ func (r *CUDNBgpConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		nodes, err := r.listRouterNodes(ctx, config)
 		if err != nil {
 			return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionCloudResourcesReconciled,
-				"CloudReconcileFailed", fmt.Sprintf("failed to list router nodes: %v", err))
+				ReasonCloudReconcileFailed, fmt.Sprintf("failed to list router nodes: %v", err))
 		}
 		if err := cloudPlatform.ReconcileNodes(ctx, nodes); err != nil {
 			return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionCloudResourcesReconciled,
-				"CloudReconcileFailed", fmt.Sprintf("failed to reconcile cloud resources: %v", err))
+				ReasonCloudReconcileFailed, fmt.Sprintf("failed to reconcile cloud resources: %v", err))
 		}
 		meta.SetStatusCondition(&config.Status.Conditions, metav1.Condition{
 			Type:               networkingv1alpha1.ConditionCloudResourcesReconciled,
 			Status:             metav1.ConditionTrue,
-			Reason:             "Reconciled",
+			Reason:             ReasonReconciled,
 			Message:            "Cloud BGP peerings and router node settings reconciled",
 			ObservedGeneration: config.Generation,
 		})
@@ -386,7 +391,12 @@ func (r *CUDNBgpConfigReconciler) setDegraded(
 	baselineStatus networkingv1alpha1.CUDNBgpConfigStatus,
 	condType, reason, message string,
 ) (ctrl.Result, error) {
-	logf.FromContext(ctx).Error(fmt.Errorf("%s: %s", reason, message), "setting degraded status")
+	log := logf.FromContext(ctx)
+	if _, terminal := TerminalDegradedReasons[reason]; terminal {
+		log.Info("terminal degraded condition, not requeueing", "reason", reason, "message", message)
+	} else {
+		log.Error(fmt.Errorf("%s: %s", reason, message), "setting degraded status")
+	}
 
 	if err := r.patchConfigStatus(ctx, config, baselineStatus, func(c *networkingv1alpha1.CUDNBgpConfig) {
 		c.Status.Phase = networkingv1alpha1.PhaseDegraded
@@ -399,6 +409,9 @@ func (r *CUDNBgpConfigReconciler) setDegraded(
 		})
 	}); err != nil {
 		return ctrl.Result{}, err
+	}
+	if _, terminal := TerminalDegradedReasons[reason]; terminal {
+		return ctrl.Result{}, nil
 	}
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
@@ -441,6 +454,16 @@ func (r *CUDNBgpConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: SingletonName}}}
 			},
 		)).
+		Watches(&networkingv1alpha1.CUDNBgpRouting{}, handler.EnqueueRequestsFromMapFunc(
+			func(_ context.Context, _ client.Object) []reconcile.Request {
+				return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: SingletonName}}}
+			},
+		), builder.WithPredicates(predicate.Funcs{
+			CreateFunc:  func(event.CreateEvent) bool { return true },
+			DeleteFunc:  func(event.DeleteEvent) bool { return true },
+			UpdateFunc:  func(event.UpdateEvent) bool { return false },
+			GenericFunc: func(event.GenericEvent) bool { return false },
+		})).
 		Named("cudnbgpconfig").
 		Complete(r)
 }

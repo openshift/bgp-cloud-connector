@@ -35,6 +35,7 @@ import (
 
 	networkingv1alpha1 "github.com/openshift/bgp-cloud-connector/api/v1alpha1"
 	"github.com/openshift/bgp-cloud-connector/internal/platform"
+	awsplatform "github.com/openshift/bgp-cloud-connector/internal/platform/aws"
 )
 
 func configTestScheme() *runtime.Scheme {
@@ -141,6 +142,80 @@ func TestConfigReconcile_FullReconcile(t *testing.T) {
 	}
 }
 
+// singleton name mismatch → Degraded, no requeue (terminal).
+func TestConfigReconcile_InvalidName_NoRequeue(t *testing.T) {
+	config := newTestCUDNBgpConfig()
+	config.Name = "wrong-name"
+
+	s := configTestScheme()
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(config).
+		WithStatusSubresource(config).
+		Build()
+
+	r := &CUDNBgpConfigReconciler{Client: c, Scheme: s}
+	result, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "wrong-name"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue for terminal InvalidName, got %v", result.RequeueAfter)
+	}
+
+	updated := &networkingv1alpha1.CUDNBgpConfig{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "wrong-name"}, updated); err != nil {
+		t.Fatalf("failed to get config: %v", err)
+	}
+	if updated.Status.Phase != networkingv1alpha1.PhaseDegraded {
+		t.Errorf("expected phase Degraded, got %s", updated.Status.Phase)
+	}
+	for _, cond := range updated.Status.Conditions {
+		if cond.Type == networkingv1alpha1.ConditionNetworkOperatorPatched {
+			if cond.Reason != ReasonInvalidName {
+				t.Errorf("expected reason InvalidName, got %s", cond.Reason)
+			}
+			return
+		}
+	}
+	t.Error("NetworkOperatorPatched condition with InvalidName reason not found")
+}
+
+// second reconcile of InvalidName still returns no requeue (regression guard).
+func TestConfigReconcile_InvalidName_SecondReconcileNoRequeue(t *testing.T) {
+	config := newTestCUDNBgpConfig()
+	config.Name = "wrong-name"
+
+	s := configTestScheme()
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(config).
+		WithStatusSubresource(config).
+		Build()
+
+	r := &CUDNBgpConfigReconciler{Client: c, Scheme: s}
+
+	result1, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "wrong-name"},
+	})
+	if err != nil {
+		t.Fatalf("first reconcile error: %v", err)
+	}
+	if result1.RequeueAfter != 0 {
+		t.Errorf("expected no requeue after first reconcile, got %v", result1.RequeueAfter)
+	}
+
+	result2, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "wrong-name"},
+	})
+	if err != nil {
+		t.Fatalf("second reconcile error: %v", err)
+	}
+	if result2.RequeueAfter != 0 {
+		t.Errorf("expected no requeue after second reconcile, got %v", result2.RequeueAfter)
+	}
+}
+
 func TestConfigReconcile_DeleteBlockedByRouting(t *testing.T) {
 	now := metav1.Now()
 	config := newTestCUDNBgpConfig()
@@ -174,7 +249,9 @@ func TestConfigReconcile_DeleteBlockedByRouting(t *testing.T) {
 	}
 
 	updated := &networkingv1alpha1.CUDNBgpConfig{}
-	_ = c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, updated)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, updated); err != nil {
+		t.Fatalf("failed to get config: %v", err)
+	}
 	found := false
 	for _, f := range updated.Finalizers {
 		if f == ConfigFinalizerName {
@@ -312,7 +389,9 @@ func TestConfigReconcile_AWSFullReconcile(t *testing.T) {
 	}
 
 	updated := &networkingv1alpha1.CUDNBgpConfig{}
-	_ = c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, updated)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, updated); err != nil {
+		t.Fatalf("failed to get config: %v", err)
+	}
 	if updated.Status.Phase != networkingv1alpha1.PhaseReady {
 		t.Errorf("expected Ready, got %s", updated.Status.Phase)
 	}
@@ -384,18 +463,21 @@ func TestConfigReconcile_AWSCredentialFailure(t *testing.T) {
 	}
 
 	result, _ := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}})
-	if result.RequeueAfter != 30*time.Second {
-		t.Errorf("expected 30s degraded requeue, got %v", result.RequeueAfter)
+	// CloudCredentialsInvalid is terminal — user must fix the credentials, not time.
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue for terminal CloudCredentialsInvalid, got %v", result.RequeueAfter)
 	}
 
 	updated := &networkingv1alpha1.CUDNBgpConfig{}
-	_ = c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, updated)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, updated); err != nil {
+		t.Fatalf("failed to get config: %v", err)
+	}
 	if updated.Status.Phase != networkingv1alpha1.PhaseDegraded {
 		t.Errorf("expected Degraded, got %s", updated.Status.Phase)
 	}
 	for _, cond := range updated.Status.Conditions {
 		if cond.Type == networkingv1alpha1.ConditionCloudEndpointsDiscovered {
-			if cond.Reason != "CloudCredentialsInvalid" {
+			if cond.Reason != ReasonCloudCredentialsInvalid {
 				t.Errorf("expected reason CloudCredentialsInvalid, got %s", cond.Reason)
 			}
 			return
@@ -404,8 +486,67 @@ func TestConfigReconcile_AWSCredentialFailure(t *testing.T) {
 	t.Error("CloudEndpointsDiscovered condition not found")
 }
 
-func TestConfigReconcile_AWSDiscoveryFailure(t *testing.T) {
-	mock := &mockPlatform{discoverErr: fmt.Errorf("DescribeRouteServers: InvalidRouteServerID")}
+// TestConfigReconcile_RouteServerNotFound_NoRequeue: non-existent route server ID is
+// terminal — user must correct spec.aws.routeServerIDs.
+func TestConfigReconcile_RouteServerNotFound_NoRequeue(t *testing.T) {
+	mock := &mockPlatform{discoverErr: &awsplatform.RouteServerNotFoundError{ID: "rs-deadbeef"}}
+	config := newTestCUDNBgpConfigWithAWS()
+	config.Finalizers = []string{ConfigFinalizerName}
+	s := configTestScheme()
+
+	network := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "operator.openshift.io/v1",
+			"kind":       "Network",
+			"metadata":   map[string]interface{}{"name": "cluster"},
+			"spec":       map[string]interface{}{},
+		},
+	}
+	frrNS := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: FRRNamespace}}
+	frrPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "frr-k8s-pod", Namespace: FRRNamespace, Labels: map[string]string{"app": "frr-k8s"}},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(config, network, frrNS, frrPod).
+		WithStatusSubresource(config).
+		Build()
+
+	r := &CUDNBgpConfigReconciler{
+		Client: c, Scheme: s,
+		PlatformBuilder: func(_ context.Context, _ client.Client, _ *networkingv1alpha1.CUDNBgpConfig) (platform.CloudPlatform, error) {
+			return mock, nil
+		},
+	}
+
+	result, _ := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}})
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue for terminal RouteServerNotFound, got %v", result.RequeueAfter)
+	}
+
+	updated := &networkingv1alpha1.CUDNBgpConfig{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, updated); err != nil {
+		t.Fatalf("failed to get config: %v", err)
+	}
+	if updated.Status.Phase != networkingv1alpha1.PhaseDegraded {
+		t.Errorf("expected Degraded, got %s", updated.Status.Phase)
+	}
+	for _, cond := range updated.Status.Conditions {
+		if cond.Type == networkingv1alpha1.ConditionCloudEndpointsDiscovered {
+			if cond.Reason != ReasonRouteServerNotFound {
+				t.Errorf("expected reason RouteServerNotFound, got %s", cond.Reason)
+			}
+			return
+		}
+	}
+	t.Error("CloudEndpointsDiscovered condition not found")
+}
+
+// TestConfigReconcile_AWSDiscovery_TransientStillRequeues: a generic AWS API error
+// (not a missing route server) must remain transient and requeue after 30s.
+func TestConfigReconcile_AWSDiscovery_TransientStillRequeues(t *testing.T) {
+	mock := &mockPlatform{discoverErr: fmt.Errorf("ec2: request throttled")}
 	config := newTestCUDNBgpConfigWithAWS()
 	config.Finalizers = []string{ConfigFinalizerName}
 	s := configTestScheme()
@@ -438,7 +579,7 @@ func TestConfigReconcile_AWSDiscoveryFailure(t *testing.T) {
 
 	result, _ := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}})
 	if result.RequeueAfter != 30*time.Second {
-		t.Errorf("expected 30s degraded requeue, got %v", result.RequeueAfter)
+		t.Errorf("generic AWS discovery failure must remain transient (30s), got %v", result.RequeueAfter)
 	}
 
 	updated := &networkingv1alpha1.CUDNBgpConfig{}
@@ -448,7 +589,7 @@ func TestConfigReconcile_AWSDiscoveryFailure(t *testing.T) {
 	}
 	for _, cond := range updated.Status.Conditions {
 		if cond.Type == networkingv1alpha1.ConditionCloudEndpointsDiscovered {
-			if cond.Reason != "CloudDiscoveryFailed" {
+			if cond.Reason != ReasonCloudDiscoveryFailed {
 				t.Errorf("expected reason CloudDiscoveryFailed, got %s", cond.Reason)
 			}
 			return
@@ -496,13 +637,15 @@ func TestConfigReconcile_AWSReconcileFailure(t *testing.T) {
 	}
 
 	updated := &networkingv1alpha1.CUDNBgpConfig{}
-	_ = c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, updated)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, updated); err != nil {
+		t.Fatalf("failed to get config: %v", err)
+	}
 	if updated.Status.Phase != networkingv1alpha1.PhaseDegraded {
 		t.Errorf("expected Degraded, got %s", updated.Status.Phase)
 	}
 	for _, cond := range updated.Status.Conditions {
 		if cond.Type == networkingv1alpha1.ConditionCloudResourcesReconciled {
-			if cond.Reason != "CloudReconcileFailed" {
+			if cond.Reason != ReasonCloudReconcileFailed {
 				t.Errorf("expected reason CloudReconcileFailed, got %s", cond.Reason)
 			}
 			return

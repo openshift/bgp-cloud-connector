@@ -28,6 +28,19 @@ import (
 	networkingv1alpha1 "github.com/openshift/bgp-cloud-connector/api/v1alpha1"
 )
 
+// CUDNValidationError is returned when the Kubernetes API server rejects a CUDN
+// object as structurally invalid (e.g. bad CIDR in spec.network.layer2.subnets).
+// This is a terminal condition — the user must correct spec.network in the CUDNBgpRouting.
+type CUDNValidationError struct {
+	Cause error
+}
+
+func (e *CUDNValidationError) Error() string {
+	return fmt.Sprintf("CUDN spec is invalid and must be corrected: %v", e.Cause)
+}
+
+func (e *CUDNValidationError) Unwrap() error { return e.Cause }
+
 // ValidateNamespaceLabels checks that at least one namespace exists with the required
 // labels for the given network name. Users must create and label namespaces themselves.
 func ValidateNamespaceLabels(ctx context.Context, c client.Client, networkName string) error {
@@ -79,7 +92,15 @@ func EnsureCUDN(ctx context.Context, c client.Client, routing *networkingv1alpha
 		},
 	}
 
-	return createOrUpdate(ctx, c, obj)
+	return createOrUpdateCUDN(ctx, c, obj)
+}
+
+func createOrUpdateCUDN(ctx context.Context, c client.Client, obj *unstructured.Unstructured) error {
+	err := createOrUpdate(ctx, c, obj)
+	if err != nil && apierrors.IsInvalid(err) {
+		return &CUDNValidationError{Cause: err}
+	}
+	return err
 }
 
 func DeleteCUDN(ctx context.Context, c client.Client, networkName string) error {

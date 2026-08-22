@@ -102,7 +102,7 @@ func (p *Platform) describeRouteServer(ctx context.Context, routeServerID string
 		return nil, err
 	}
 	if len(output.RouteServers) == 0 {
-		return nil, fmt.Errorf("route server %s not found", routeServerID)
+		return nil, &RouteServerNotFoundError{ID: routeServerID}
 	}
 	return &output.RouteServers[0], nil
 }

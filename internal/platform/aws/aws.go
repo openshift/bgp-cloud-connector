@@ -85,6 +85,16 @@ func newPlatform(ctx context.Context, cfg Config, ec2Override ec2API, stsOverrid
 	}, nil
 }
 
+// RouteServerNotFoundError is returned when a route server ID in spec.aws.routeServerIDs
+// does not exist in AWS. This is a terminal condition — the user must correct the spec.
+type RouteServerNotFoundError struct {
+	ID string
+}
+
+func (e *RouteServerNotFoundError) Error() string {
+	return fmt.Sprintf("route server %q not found in AWS; verify spec.aws.routeServerIDs", e.ID)
+}
+
 func (p *Platform) ReconcileNodes(ctx context.Context, nodes []platform.RouterNode) error {
 	logger := log.FromContext(ctx)
 

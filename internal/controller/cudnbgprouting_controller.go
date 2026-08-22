@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -28,10 +29,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	networkingv1alpha1 "github.com/openshift/bgp-cloud-connector/api/v1alpha1"
@@ -82,7 +86,7 @@ func (r *CUDNBgpRoutingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		other := &routingList.Items[i]
 		if other.Name != routing.Name && other.Spec.Network.Name == routing.Spec.Network.Name {
 			return r.setDegraded(ctx, routing, *baselineStatus, networkingv1alpha1.ConditionCUDNCreated,
-				"DuplicateNetwork",
+				ReasonDuplicateNetwork,
 				fmt.Sprintf("spec.network.name %q already claimed by CUDNBgpRouting %q", routing.Spec.Network.Name, other.Name))
 		}
 	}
@@ -114,16 +118,21 @@ func (r *CUDNBgpRoutingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	log.Info("Phase 1: validating namespace and ensuring CUDN", "network", routing.Spec.Network.Name)
 	if err := ValidateNamespaceLabels(ctx, r.Client, routing.Spec.Network.Name); err != nil {
 		return r.setDegraded(ctx, routing, *baselineStatus, networkingv1alpha1.ConditionCUDNCreated,
-			"NamespaceNotReady", fmt.Sprintf("namespace validation failed: %v", err))
+			ReasonNamespaceNotReady, fmt.Sprintf("namespace validation failed: %v", err))
 	}
 	if err := EnsureCUDN(ctx, r.Client, routing); err != nil {
+		var validationErr *CUDNValidationError
+		if errors.As(err, &validationErr) {
+			return r.setDegraded(ctx, routing, *baselineStatus, networkingv1alpha1.ConditionCUDNCreated,
+				ReasonCUDNSpecInvalid, validationErr.Error())
+		}
 		return r.setDegraded(ctx, routing, *baselineStatus, networkingv1alpha1.ConditionCUDNCreated,
-			"CUDNFailed", fmt.Sprintf("failed to ensure CUDN: %v", err))
+			ReasonCUDNFailed, fmt.Sprintf("failed to ensure CUDN: %v", err))
 	}
 	meta.SetStatusCondition(&routing.Status.Conditions, metav1.Condition{
 		Type:               networkingv1alpha1.ConditionCUDNCreated,
 		Status:             metav1.ConditionTrue,
-		Reason:             "Created",
+		Reason:             ReasonCreated,
 		Message:            fmt.Sprintf("CUDN %q ensured", CUDNNamePrefix+routing.Spec.Network.Name),
 		ObservedGeneration: routing.Generation,
 	})
@@ -132,12 +141,12 @@ func (r *CUDNBgpRoutingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	log.Info("Phase 2: ensuring RouteAdvertisements")
 	if err := EnsureRouteAdvertisements(ctx, r.Client); err != nil {
 		return r.setDegraded(ctx, routing, *baselineStatus, networkingv1alpha1.ConditionRouteAdvertisementsCreated,
-			"RAFailed", fmt.Sprintf("failed to ensure RouteAdvertisements: %v", err))
+			ReasonRAFailed, fmt.Sprintf("failed to ensure RouteAdvertisements: %v", err))
 	}
 	meta.SetStatusCondition(&routing.Status.Conditions, metav1.Condition{
 		Type:               networkingv1alpha1.ConditionRouteAdvertisementsCreated,
 		Status:             metav1.ConditionTrue,
-		Reason:             "Created",
+		Reason:             ReasonCreated,
 		Message:            "Shared RouteAdvertisements ensured",
 		ObservedGeneration: routing.Generation,
 	})
@@ -196,7 +205,12 @@ func (r *CUDNBgpRoutingReconciler) setDegraded(
 	baselineStatus networkingv1alpha1.CUDNBgpRoutingStatus,
 	condType, reason, message string,
 ) (ctrl.Result, error) {
-	logf.FromContext(ctx).Error(fmt.Errorf("%s: %s", reason, message), "setting degraded status")
+	log := logf.FromContext(ctx)
+	if _, terminal := TerminalDegradedReasons[reason]; terminal {
+		log.Info("terminal degraded condition, not requeueing", "reason", reason, "message", message)
+	} else {
+		log.Error(fmt.Errorf("%s: %s", reason, message), "setting degraded status")
+	}
 
 	if err := r.patchRoutingStatus(ctx, routing, baselineStatus, func(rt *networkingv1alpha1.CUDNBgpRouting) {
 		rt.Status.Phase = networkingv1alpha1.PhaseDegraded
@@ -209,6 +223,9 @@ func (r *CUDNBgpRoutingReconciler) setDegraded(
 		})
 	}); err != nil {
 		return ctrl.Result{}, err
+	}
+	if _, terminal := TerminalDegradedReasons[reason]; terminal {
+		return ctrl.Result{}, nil
 	}
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
@@ -228,8 +245,38 @@ func (r *CUDNBgpRoutingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(ra, handler.EnqueueRequestsFromMapFunc(
 			r.mapRAToRouting,
 		)).
+		Watches(&networkingv1alpha1.CUDNBgpRouting{}, handler.EnqueueRequestsFromMapFunc(
+			r.enqueueAllRoutings,
+		), builder.WithPredicates(predicate.Funcs{
+			CreateFunc: func(event.CreateEvent) bool { return true },
+			DeleteFunc: func(event.DeleteEvent) bool { return true },
+			UpdateFunc: func(e event.UpdateEvent) bool {
+				oldR, ok1 := e.ObjectOld.(*networkingv1alpha1.CUDNBgpRouting)
+				newR, ok2 := e.ObjectNew.(*networkingv1alpha1.CUDNBgpRouting)
+				if !ok1 || !ok2 {
+					return true
+				}
+				return oldR.Spec.Network.Name != newR.Spec.Network.Name
+			},
+			GenericFunc: func(event.GenericEvent) bool { return false },
+		})).
 		Named("cudnbgprouting").
 		Complete(r)
+}
+
+// enqueueAllRoutings enqueues every CUDNBgpRouting so that a DuplicateNetwork
+// conflict is re-evaluated across all CRs whenever any routing CR changes.
+func (r *CUDNBgpRoutingReconciler) enqueueAllRoutings(ctx context.Context, _ client.Object) []reconcile.Request {
+	list := &networkingv1alpha1.CUDNBgpRoutingList{}
+	if err := r.List(ctx, list); err != nil {
+		logf.FromContext(ctx).Error(err, "failed to list CUDNBgpRouting for enqueue-all")
+		return nil
+	}
+	reqs := make([]reconcile.Request, len(list.Items))
+	for i := range list.Items {
+		reqs[i] = reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])}
+	}
+	return reqs
 }
 
 func (r *CUDNBgpRoutingReconciler) mapCUDNToRouting(ctx context.Context, obj client.Object) []reconcile.Request {
