@@ -1,0 +1,33 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: bgp-cloud-connector-alerts
+  namespace: system
+  labels:
+    app.kubernetes.io/name: openshift-cudn-bgp-routing
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  groups:
+  - name: BGPCloudConnectorHealth
+    rules:
+    - alert: AWSAPIErrors
+      annotations:
+        summary: AWS API errors detected
+        description: >-
+          The bgp-cloud-connector operator has encountered AWS API errors
+          (operation={{ $labels.operation }}) over the last 5 minutes.
+          Check operator logs for details.
+      expr: increase(aws_api_errors_total[5m]) > 0
+      labels:
+        severity: warning
+
+    - alert: AWSRouteServerPeersMissing
+      annotations:
+        summary: No AWS Route Server peers managed
+        description: >-
+          The operator reports 0 managed Route Server peers for more than 5 minutes.
+          BGP-enabled worker nodes may not be peered with the cloud BGP service.
+      expr: aws_peers_managed == 0 and max_over_time(aws_peers_managed[24h]) > 0
+      for: 5m
+      labels:
+        severity: warning

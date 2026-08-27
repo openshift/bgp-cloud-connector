@@ -1,0 +1,97 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: bgp-cloud-connector-frrk8s-alerts
+  namespace: system
+  labels:
+    app.kubernetes.io/name: openshift-cudn-bgp-routing
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  groups:
+  # Alerts based on frrk8s metrics (exposed by the frr-k8s daemonset, not by
+  # this operator). These are shipped here because bgp-cloud-connector drives
+  # the FRRConfiguration lifecycle and MetalLB alerts are not present on
+  # clusters where frr-k8s is deployed by CNO.
+  # Labels: peer, vrf (no node label by default).
+  - name: BGPSessionHealth
+    rules:
+    - alert: BGPSessionDown
+      annotations:
+        summary: BGP session is down
+        description: >-
+          BGP session to peer {{ $labels.peer }}
+          (VRF {{ $labels.vrf }}) has been down for more than 1 minute.
+        netobserv_io_network_health: '{}'
+      expr: frrk8s_bgp_session_up == 0
+      for: 1m
+      labels:
+        severity: critical
+        netobserv: "true"
+
+    - alert: BGPPeerFlapping
+      annotations:
+        summary: BGP peer is flapping
+        description: >-
+          BGP session to peer {{ $labels.peer }} is flapping:
+          more than 3 opens sent in the last 10 minutes.
+        netobserv_io_network_health: '{}'
+      expr: increase(frrk8s_bgp_opens_sent[10m]) > 3
+      for: 5m
+      labels:
+        severity: warning
+        netobserv: "true"
+
+    - alert: BGPNoPrefixesReceived
+      annotations:
+        summary: BGP session has no received prefixes
+        description: >-
+          BGP session to peer {{ $labels.peer }} has 0 received prefixes
+          for more than 5 minutes. Routes may not be imported.
+        netobserv_io_network_health: '{}'
+      expr: frrk8s_bgp_received_prefixes_total == 0 and frrk8s_bgp_session_up == 1
+      for: 5m
+      labels:
+        severity: warning
+        netobserv: "true"
+
+    - alert: BGPNoPrefixesAnnounced
+      annotations:
+        summary: BGP session has no announced prefixes
+        description: >-
+          BGP session to peer {{ $labels.peer }} has 0 announced prefixes
+          for more than 5 minutes. Pod subnets may not be reachable externally.
+        netobserv_io_network_health: '{}'
+      expr: frrk8s_bgp_announced_prefixes_total == 0 and frrk8s_bgp_session_up == 1
+      for: 5m
+      labels:
+        severity: warning
+        netobserv: "true"
+
+  - name: BFDSessionHealth
+    rules:
+    - alert: BFDSessionDown
+      annotations:
+        summary: BFD session is down
+        description: >-
+          BFD session to peer {{ $labels.peer }}
+          (VRF {{ $labels.vrf }}) has been down for more than 30 seconds.
+          Fast failover is impaired.
+        netobserv_io_network_health: '{}'
+      expr: frrk8s_bfd_session_up == 0
+      for: 30s
+      labels:
+        severity: critical
+        netobserv: "true"
+
+    - alert: BFDPeerFlapping
+      annotations:
+        summary: BFD session is flapping
+        description: >-
+          BFD session to peer {{ $labels.peer }} is flapping:
+          more than 3 down events in the last 10 minutes.
+        netobserv_io_network_health: '{}'
+      expr: increase(frrk8s_bfd_session_down_events[10m]) > 3
+      for: 5m
+      labels:
+        severity: warning
+        netobserv: "true"
