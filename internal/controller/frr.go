@@ -21,10 +21,12 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	networkingv1alpha1 "github.com/openshift/bgp-cloud-connector/api/v1alpha1"
@@ -253,14 +255,31 @@ func createOrUpdate(ctx context.Context, c client.Client, obj *unstructured.Unst
 	existing.SetGroupVersionKind(obj.GroupVersionKind())
 	key := types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
 
-	err := c.Get(ctx, key, existing)
-	if apierrors.IsNotFound(err) {
-		return c.Create(ctx, obj)
-	}
-	if err != nil {
+	if err := c.Get(ctx, key, existing); err != nil {
+		if apierrors.IsNotFound(err) {
+			return c.Create(ctx, obj)
+		}
 		return err
 	}
 
-	obj.SetResourceVersion(existing.GetResourceVersion())
-	return c.Update(ctx, obj)
+	if specUnchanged(existing, obj) {
+		return nil
+	}
+
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := c.Get(ctx, key, existing); err != nil {
+			return err
+		}
+		obj.SetResourceVersion(existing.GetResourceVersion())
+		return c.Update(ctx, obj)
+	})
+}
+
+func specUnchanged(existing, desired *unstructured.Unstructured) bool {
+	existingSpec := existing.Object["spec"]
+	desiredSpec := desired.Object["spec"]
+	existingLabels := existing.GetLabels()
+	desiredLabels := desired.GetLabels()
+	return apiequality.Semantic.DeepEqual(existingSpec, desiredSpec) &&
+		apiequality.Semantic.DeepEqual(existingLabels, desiredLabels)
 }
