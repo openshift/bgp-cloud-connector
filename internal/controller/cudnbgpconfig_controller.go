@@ -104,9 +104,29 @@ func (r *CUDNBgpConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Phase 1: Patch Network Operator
 	log.Info("Phase 1: patching Network operator")
+	var claimFRRProvider, claimRouteAds bool
+	if !config.Status.FRRProviderOwned || !config.Status.RouteAdsOwned {
+		frrPresent, routeAdsOn, err := ReadNetworkOwnership(ctx, r.Client)
+		if err != nil {
+			return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionNetworkOperatorPatched,
+				"NetworkReadFailed", fmt.Sprintf("failed to read Network/cluster: %v", err))
+		}
+		if !frrPresent && !config.Status.FRRProviderOwned {
+			claimFRRProvider = true
+		}
+		if !routeAdsOn && !config.Status.RouteAdsOwned {
+			claimRouteAds = true
+		}
+	}
 	if err := PatchNetworkOperator(ctx, r.Client); err != nil {
 		return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionNetworkOperatorPatched,
 			"PatchFailed", fmt.Sprintf("failed to patch Network operator: %v", err))
+	}
+	if claimFRRProvider {
+		config.Status.FRRProviderOwned = true
+	}
+	if claimRouteAds {
+		config.Status.RouteAdsOwned = true
 	}
 	meta.SetStatusCondition(&config.Status.Conditions, metav1.Condition{
 		Type:               networkingv1alpha1.ConditionNetworkOperatorPatched,
@@ -575,6 +595,27 @@ func (r *CUDNBgpConfigReconciler) reconcileDelete(ctx context.Context, config *n
 	log.Info("cleaning up FRR configurations")
 	if err := DeleteFRRConfigurations(ctx, r.Client); err != nil {
 		return ctrl.Result{}, err
+	}
+
+	// Revert the Network/cluster patch only for fields this controller owned,
+	// and only when no other FRRConfiguration consumers remain in the cluster.
+	if config.Status.FRRProviderOwned || config.Status.RouteAdsOwned {
+		others, err := anyFRRConfigurationsExist(ctx, r.Client)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("listing FRRConfigurations: %w", err)
+		}
+		if others {
+			log.Info("skipping Network unpatch: external FRRConfiguration objects still exist")
+		} else {
+			log.Info("reverting Network operator patch")
+			if err := UnpatchNetworkOperator(ctx, r.Client,
+				config.Status.FRRProviderOwned, config.Status.RouteAdsOwned); err != nil {
+				return ctrl.Result{}, fmt.Errorf("reverting Network operator patch: %w", err)
+			}
+			log.Info("Network operator patch reverted")
+		}
+	} else {
+		log.Info("skipping Network unpatch: no fields owned by this controller")
 	}
 
 	controllerutil.RemoveFinalizer(config, ConfigFinalizerName)

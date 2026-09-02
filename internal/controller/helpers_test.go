@@ -444,3 +444,322 @@ func TestEnsureFRRConfigurationsFromGroups_EBGPMultiHop(t *testing.T) {
 		t.Error("on-link neighbour should carry no ebgpMultiHop field")
 	}
 }
+
+// --- Network/cluster builders used across config controller tests ---
+
+func newNetworkObject(spec map[string]interface{}) *unstructured.Unstructured {
+	return &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "operator.openshift.io/v1",
+			"kind":       "Network",
+			"metadata":   map[string]interface{}{"name": "cluster"},
+			"spec":       spec,
+		},
+	}
+}
+
+func newEmptyNetwork() *unstructured.Unstructured {
+	return newNetworkObject(map[string]interface{}{})
+}
+
+func newFRREnabledNetwork() *unstructured.Unstructured {
+	return newNetworkObject(map[string]interface{}{
+		"additionalRoutingCapabilities": map[string]interface{}{
+			"providers": []interface{}{FRRProviderName},
+		},
+		"defaultNetwork": map[string]interface{}{
+			"ovnKubernetesConfig": map[string]interface{}{
+				"routeAdvertisements": RouteAdvertisementsOn,
+			},
+		},
+	})
+}
+
+func mustNetworkProviders(t *testing.T, network *unstructured.Unstructured) []string {
+	providers, found, err := unstructured.NestedStringSlice(network.Object, "spec", "additionalRoutingCapabilities", "providers")
+	if err != nil {
+		t.Fatalf("reading additionalRoutingCapabilities.providers: %v", err)
+	}
+	if !found {
+		t.Fatal("spec.additionalRoutingCapabilities.providers not found")
+	}
+	return providers
+}
+
+func mustNetworkRouteAds(t *testing.T, network *unstructured.Unstructured) string {
+	ra, found, err := unstructured.NestedString(network.Object, "spec", "defaultNetwork", "ovnKubernetesConfig", "routeAdvertisements")
+	if err != nil {
+		t.Fatalf("reading routeAdvertisements: %v", err)
+	}
+	if !found {
+		t.Fatal("spec.defaultNetwork.ovnKubernetesConfig.routeAdvertisements not found")
+	}
+	return ra
+}
+
+func networkHasFRRProvider(t *testing.T, network *unstructured.Unstructured) bool {
+	providers, found, err := unstructured.NestedStringSlice(network.Object, "spec", "additionalRoutingCapabilities", "providers")
+	if err != nil {
+		t.Fatalf("reading additionalRoutingCapabilities.providers: %v", err)
+	}
+	if !found {
+		return false
+	}
+	for _, p := range providers {
+		if p == FRRProviderName {
+			return true
+		}
+	}
+	return false
+}
+
+// --- ReadNetworkOwnership ---
+
+func TestReadNetworkOwnership_NetworkNotFound(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(configTestScheme()).Build()
+	frrPresent, routeAdsOn, err := ReadNetworkOwnership(context.Background(), c)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if frrPresent || routeAdsOn {
+		t.Error("expected (false, false) when Network/cluster does not exist")
+	}
+}
+
+func TestReadNetworkOwnership_NoProviders(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(configTestScheme()).
+		WithObjects(newNetworkObject(map[string]interface{}{})).Build()
+	frrPresent, routeAdsOn, err := ReadNetworkOwnership(context.Background(), c)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if frrPresent || routeAdsOn {
+		t.Error("expected (false, false) when providers list is absent")
+	}
+}
+
+func TestReadNetworkOwnership_FRRProviderPresentRouteAdsDisabled(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(configTestScheme()).
+		WithObjects(newNetworkObject(map[string]interface{}{
+			"additionalRoutingCapabilities": map[string]interface{}{
+				"providers": []interface{}{FRRProviderName},
+			},
+		})).Build()
+	frrPresent, routeAdsOn, err := ReadNetworkOwnership(context.Background(), c)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !frrPresent {
+		t.Error("expected frrPresent=true when FRR is in providers")
+	}
+	if routeAdsOn {
+		t.Error("expected routeAdsOn=false when routeAdvertisements is not Enabled")
+	}
+}
+
+func TestReadNetworkOwnership_FullyEnabled(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(configTestScheme()).
+		WithObjects(newFRREnabledNetwork()).Build()
+	frrPresent, routeAdsOn, err := ReadNetworkOwnership(context.Background(), c)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !frrPresent {
+		t.Error("expected frrPresent=true")
+	}
+	if !routeAdsOn {
+		t.Error("expected routeAdsOn=true")
+	}
+}
+
+// --- UnpatchNetworkOperator ---
+
+func TestUnpatchNetworkOperator_NetworkNotFound(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(configTestScheme()).Build()
+	if err := UnpatchNetworkOperator(context.Background(), c, true, true); err != nil {
+		t.Fatalf("expected nil when Network/cluster not found, got: %v", err)
+	}
+}
+
+func TestUnpatchNetworkOperator_RemovesFRRAndClearsRouteAds(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(configTestScheme()).
+		WithObjects(newFRREnabledNetwork()).Build()
+	if err := UnpatchNetworkOperator(context.Background(), c, true, true); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	network := &unstructured.Unstructured{}
+	network.SetGroupVersionKind(NetworkGVK)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, network); err != nil {
+		t.Fatalf("failed to read Network: %v", err)
+	}
+	if networkHasFRRProvider(t, network) {
+		t.Error("FRR should be removed from providers after unpatch")
+	}
+	if got := mustNetworkRouteAds(t, network); got != RouteAdvertisementsDisabled {
+		t.Errorf("routeAdvertisements = %q, want %q after unpatch", got, RouteAdvertisementsDisabled)
+	}
+}
+
+func TestUnpatchNetworkOperator_PreservesOtherProviders(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(configTestScheme()).
+		WithObjects(newNetworkObject(map[string]interface{}{
+			"additionalRoutingCapabilities": map[string]interface{}{
+				"providers": []interface{}{"OtherProvider", FRRProviderName},
+			},
+			"defaultNetwork": map[string]interface{}{
+				"ovnKubernetesConfig": map[string]interface{}{"routeAdvertisements": RouteAdvertisementsOn},
+			},
+		})).Build()
+	if err := UnpatchNetworkOperator(context.Background(), c, true, true); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	network := &unstructured.Unstructured{}
+	network.SetGroupVersionKind(NetworkGVK)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, network); err != nil {
+		t.Fatalf("failed to read Network: %v", err)
+	}
+	providers := mustNetworkProviders(t, network)
+	hasFRR, hasOther := false, false
+	for _, p := range providers {
+		if p == FRRProviderName {
+			hasFRR = true
+		}
+		if p == "OtherProvider" {
+			hasOther = true
+		}
+	}
+	if hasFRR {
+		t.Error("FRR should be removed from providers")
+	}
+	if !hasOther {
+		t.Error("OtherProvider should be preserved after unpatch")
+	}
+	if got := mustNetworkRouteAds(t, network); got != RouteAdvertisementsDisabled {
+		t.Errorf("routeAdvertisements = %q, want %q after unpatch", got, RouteAdvertisementsDisabled)
+	}
+}
+
+func TestUnpatchNetworkOperator_Idempotent(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(configTestScheme()).
+		WithObjects(newFRREnabledNetwork()).Build()
+	ctx := context.Background()
+	if err := UnpatchNetworkOperator(ctx, c, true, true); err != nil {
+		t.Fatalf("first unpatch: %v", err)
+	}
+	if err := UnpatchNetworkOperator(ctx, c, true, true); err != nil {
+		t.Fatalf("second unpatch: %v", err)
+	}
+	network := &unstructured.Unstructured{}
+	network.SetGroupVersionKind(NetworkGVK)
+	if err := c.Get(ctx, types.NamespacedName{Name: "cluster"}, network); err != nil {
+		t.Fatalf("failed to read Network: %v", err)
+	}
+	if networkHasFRRProvider(t, network) {
+		t.Error("FRR should be absent after the second unpatch")
+	}
+	if got := mustNetworkRouteAds(t, network); got != RouteAdvertisementsDisabled {
+		t.Errorf("routeAdvertisements = %q, want %q after the second unpatch", got, RouteAdvertisementsDisabled)
+	}
+}
+
+func TestUnpatchNetworkOperator_OnlyClearsRouteAdsWhenNotOwningProvider(t *testing.T) {
+	// FRR was pre-existing in providers; we only own routeAdvertisements.
+	c := fake.NewClientBuilder().WithScheme(configTestScheme()).
+		WithObjects(newFRREnabledNetwork()).Build()
+	if err := UnpatchNetworkOperator(context.Background(), c, false, true); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	network := &unstructured.Unstructured{}
+	network.SetGroupVersionKind(NetworkGVK)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, network); err != nil {
+		t.Fatalf("failed to read Network: %v", err)
+	}
+	providers := mustNetworkProviders(t, network)
+	hasFRR := false
+	for _, p := range providers {
+		if p == FRRProviderName {
+			hasFRR = true
+		}
+	}
+	if !hasFRR {
+		t.Error("FRR should remain in providers when FRRProviderOwned=false")
+	}
+	if got := mustNetworkRouteAds(t, network); got != RouteAdvertisementsDisabled {
+		t.Errorf("routeAdvertisements = %q, want %q when RouteAdsOwned=true", got, RouteAdvertisementsDisabled)
+	}
+}
+
+func TestUnpatchNetworkOperator_OnlyRemovesFRRWhenNotOwningRouteAds(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(configTestScheme()).
+		WithObjects(newFRREnabledNetwork()).Build()
+	if err := UnpatchNetworkOperator(context.Background(), c, true, false); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	network := &unstructured.Unstructured{}
+	network.SetGroupVersionKind(NetworkGVK)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, network); err != nil {
+		t.Fatalf("failed to read Network: %v", err)
+	}
+	if networkHasFRRProvider(t, network) {
+		t.Error("FRR should be removed when FRRProviderOwned=true")
+	}
+	if mustNetworkRouteAds(t, network) != RouteAdvertisementsOn {
+		t.Error("routeAdvertisements should remain Enabled when RouteAdsOwned=false")
+	}
+}
+
+// --- anyFRRConfigurationsExist ---
+
+func TestAnyFRRConfigurationsExist_Empty(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(configTestScheme()).Build()
+	got, err := anyFRRConfigurationsExist(context.Background(), c)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got {
+		t.Error("expected false when no FRRConfiguration objects exist")
+	}
+}
+
+func TestAnyFRRConfigurationsExist_ManagedExists(t *testing.T) {
+	obj := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "frrk8s.metallb.io/v1beta1", "kind": "FRRConfiguration",
+		"metadata": map[string]interface{}{
+			"name": "cudn-bgp-1", "namespace": FRRNamespace,
+			"labels": map[string]interface{}{LabelManagedBy: LabelManagedByVal},
+		},
+	}}
+	c := fake.NewClientBuilder().WithScheme(configTestScheme()).WithObjects(obj).Build()
+	got, err := anyFRRConfigurationsExist(context.Background(), c)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got {
+		t.Error("expected false when only a managed FRRConfiguration exists")
+	}
+}
+
+func TestAnyFRRConfigurationsExist_UnmanagedExists(t *testing.T) {
+	managed := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "frrk8s.metallb.io/v1beta1", "kind": "FRRConfiguration",
+		"metadata": map[string]interface{}{
+			"name": "cudn-bgp-1", "namespace": FRRNamespace,
+			"labels": map[string]interface{}{LabelManagedBy: LabelManagedByVal},
+		},
+	}}
+	external := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "frrk8s.metallb.io/v1beta1", "kind": "FRRConfiguration",
+		"metadata": map[string]interface{}{
+			"name": "user-frr", "namespace": FRRNamespace,
+			"labels": map[string]interface{}{"owner": "user"},
+		},
+	}}
+	c := fake.NewClientBuilder().WithScheme(configTestScheme()).WithObjects(managed, external).Build()
+	got, err := anyFRRConfigurationsExist(context.Background(), c)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got {
+		t.Error("expected true when an unmanaged FRRConfiguration exists alongside a managed one")
+	}
+}

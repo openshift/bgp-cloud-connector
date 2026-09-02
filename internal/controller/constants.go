@@ -32,6 +32,9 @@ const (
 	FRRConfigNamePrefix      = "cudn-bgp-"
 	CUDNNamePrefix           = "cluster-udn-"
 	RouteAdvertisementName   = "cudn-bgp-route-advertisements"
+	FRRProviderName             = "FRR"
+	RouteAdvertisementsOn       = "Enabled"
+	RouteAdvertisementsDisabled = "Disabled"
 
 	// RawFRRConfigPriority orders this raw block against the raw blocks of
 	// other FRRConfigurations, a higher value being appended later. It says

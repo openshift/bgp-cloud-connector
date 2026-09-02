@@ -230,6 +230,25 @@ func DeleteFRRConfigurations(ctx context.Context, c client.Client) error {
 	return nil
 }
 
+// anyFRRConfigurationsExist reports whether any FRRConfiguration not owned by
+// this controller still exists. Managed objects (including those that are
+// terminating after DeleteFRRConfigurations) are ignored so they cannot block
+// reverting the Network/cluster patch.
+func anyFRRConfigurationsExist(ctx context.Context, c client.Client) (bool, error) {
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(FRRConfigurationGVK)
+	if err := c.List(ctx, list); err != nil {
+		return false, err
+	}
+	for i := range list.Items {
+		if list.Items[i].GetLabels()[LabelManagedBy] == LabelManagedByVal {
+			continue
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
 func mergeLabels(base, overlay map[string]string) map[string]string {
 	merged := make(map[string]string, len(base)+len(overlay))
 	for k, v := range base {
