@@ -383,12 +383,9 @@ spec:
                 - type
                 x-kubernetes-list-type: map
               frrProviderOwned:
-                description: FRRProviderOwned is true when this controller added
-                  FRR to Network/cluster additionalRoutingCapabilities.providers.
-                type: boolean
-              routeAdsOwned:
-                description: RouteAdsOwned is true when this controller set routeAdvertisements
-                  to Enabled on Network/cluster.
+                description: |-
+                  FRRProviderOwned is true when this controller added FRR to Network/cluster
+                  additionalRoutingCapabilities.providers.
                 type: boolean
               observedGeneration:
                 description: ObservedGeneration is the most recent generation observed
@@ -477,6 +474,11 @@ spec:
                 - Ready
                 - Degraded
                 type: string
+              routeAdsOwned:
+                description: |-
+                  RouteAdsOwned is true when this controller set routeAdvertisements to
+                  Enabled on Network/cluster.
+                type: boolean
             type: object
         type: object
     served: true

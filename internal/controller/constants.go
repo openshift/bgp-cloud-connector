@@ -28,11 +28,11 @@ const (
 	FRRNamespace  = "openshift-frr-k8s"
 	// DefaultOperatorNamespace is where the operator runs unless the
 	// Deployment says otherwise through POD_NAMESPACE.
-	DefaultOperatorNamespace = "openshift-cudn-bgp-routing"
-	FRRConfigNamePrefix      = "cudn-bgp-"
-	CUDNNamePrefix           = "cluster-udn-"
-	RouteAdvertisementName   = "cudn-bgp-route-advertisements"
+	DefaultOperatorNamespace    = "openshift-cudn-bgp-routing"
+	FRRConfigNamePrefix         = "cudn-bgp-"
 	FRRProviderName             = "FRR"
+	CUDNNamePrefix              = "cluster-udn-"
+	RouteAdvertisementName      = "cudn-bgp-route-advertisements"
 	RouteAdvertisementsOn       = "Enabled"
 	RouteAdvertisementsDisabled = "Disabled"
 
@@ -70,14 +70,15 @@ const (
 	ReasonRAFailed             = "RAFailed"
 
 	// Success / informational reasons
-	ReasonPatched         = "Patched"
-	ReasonWaitingForFRR   = "WaitingForFRR"
-	ReasonFRRReady        = "Ready"
-	ReasonDiscovered      = "Discovered"
-	ReasonApplied         = "Applied"
-	ReasonReconciled      = "Reconciled"
-	ReasonCreated         = "Created"
-	ReasonRoutingCRsExist = "RoutingCRsExist"
+	ReasonPatched                 = "Patched"
+	ReasonWaitingForFRR           = "WaitingForFRR"
+	ReasonFRRReady                = "Ready"
+	ReasonDiscovered              = "Discovered"
+	ReasonApplied                 = "Applied"
+	ReasonReconciled              = "Reconciled"
+	ReasonCreated                 = "Created"
+	ReasonRoutingCRsExist         = "RoutingCRsExist"
+	ReasonExternalFRRConfigsExist = "ExternalFRRConfigsExist"
 )
 
 // TerminalDegradedReasons returns condition reasons that must not schedule RequeueAfter.

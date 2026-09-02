@@ -302,19 +302,10 @@ type CUDNBgpConfigStatus struct {
 	PeerGroups []PeerGroupStatus `json:"peerGroups,omitempty"`
 	// FRRProviderOwned is true when this controller added FRR to Network/cluster
 	// additionalRoutingCapabilities.providers.
-	//
-	// Both ownership flags default to false, including on configs that predate
-	// this field. If a config was reconciled by an older controller that patched
-	// Network/cluster without recording ownership, the field will already be
-	// present when this controller re-reads it, so ownership is not re-claimed
-	// and the patch is not reverted on deletion. This is deliberate: a present
-	// field is indistinguishable from one an administrator set, and reverting it
-	// could break unrelated routing.
 	// +optional
 	FRRProviderOwned bool `json:"frrProviderOwned,omitempty"`
 	// RouteAdsOwned is true when this controller set routeAdvertisements to
-	// Enabled on Network/cluster. See FRRProviderOwned for the migration and
-	// non-ownership semantics that apply equally here.
+	// Enabled on Network/cluster.
 	// +optional
 	RouteAdsOwned bool `json:"routeAdsOwned,omitempty"`
 }

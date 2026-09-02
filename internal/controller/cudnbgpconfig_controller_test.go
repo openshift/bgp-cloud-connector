@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +34,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	networkingv1alpha1 "github.com/openshift/bgp-cloud-connector/api/v1alpha1"
@@ -1037,6 +1039,7 @@ func TestConfigReconcile_DeleteSuccessful(t *testing.T) {
 	mock := &mockPlatform{}
 	now := metav1.Now()
 	config := newTestCUDNBgpConfigWithAWS()
+	config.UID = testConfigUID
 	config.Finalizers = []string{ConfigFinalizerName}
 	config.DeletionTimestamp = &now
 
@@ -1051,6 +1054,7 @@ func TestConfigReconcile_DeleteSuccessful(t *testing.T) {
 			},
 		},
 	}
+	withCUDNBgpConfigOwner(frrObj, config)
 
 	s := configTestScheme()
 	c := fake.NewClientBuilder().WithScheme(s).
@@ -1537,6 +1541,7 @@ func TestConfigReconcile_PartialNetworkOwnership(t *testing.T) {
 func TestConfigReconcile_DeleteUnpatchesNetworkWhenOwned(t *testing.T) {
 	now := metav1.Now()
 	config := newTestCUDNBgpConfig()
+	config.UID = testConfigUID
 	config.Finalizers = []string{ConfigFinalizerName}
 	config.DeletionTimestamp = &now
 	config.Status.FRRProviderOwned = true
@@ -1551,6 +1556,7 @@ func TestConfigReconcile_DeleteUnpatchesNetworkWhenOwned(t *testing.T) {
 			"finalizers": []interface{}{"frrk8s.metallb.io/finalizer"},
 		},
 	}}
+	withCUDNBgpConfigOwner(managedFRR, config)
 
 	s := configTestScheme()
 	c := fake.NewClientBuilder().WithScheme(s).
@@ -1599,6 +1605,52 @@ func TestConfigReconcile_DeleteUnpatchesNetworkWhenOwned(t *testing.T) {
 	}
 }
 
+// TestConfigReconcile_DeleteRemovesFinalizerWhenUnpatchFails asserts that a
+// failure reverting the Network/cluster patch is best-effort: it must not wedge
+// the finalizer and leave the CUDNBgpConfig stuck Terminating forever.
+func TestConfigReconcile_DeleteRemovesFinalizerWhenUnpatchFails(t *testing.T) {
+	now := metav1.Now()
+	config := newTestCUDNBgpConfig()
+	config.Finalizers = []string{ConfigFinalizerName}
+	config.DeletionTimestamp = &now
+	config.Status.FRRProviderOwned = true
+	config.Status.RouteAdsOwned = true
+
+	s := configTestScheme()
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(config, newFRREnabledNetwork()).
+		WithStatusSubresource(config).
+		WithInterceptorFuncs(interceptor.Funcs{
+			// Fail the Network/cluster revert patch to simulate a webhook rejection
+			// or transient API error during unpatch.
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if obj.GetObjectKind().GroupVersionKind() == NetworkGVK {
+					return fmt.Errorf("injected patch failure")
+				}
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}).
+		Build()
+
+	r := &CUDNBgpConfigReconciler{Client: c, Scheme: s}
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}}); err != nil {
+		t.Fatalf("reconcileDelete must not return an error when unpatch fails, got: %v", err)
+	}
+
+	updated := &networkingv1alpha1.CUDNBgpConfig{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, updated); err != nil {
+		if apierrors.IsNotFound(err) {
+			return // config fully deleted once finalizer was removed — acceptable
+		}
+		t.Fatalf("failed to get config after delete: %v", err)
+	}
+	for _, f := range updated.Finalizers {
+		if f == ConfigFinalizerName {
+			t.Error("finalizer must be removed even when Network unpatch fails, to avoid a stuck deletion")
+		}
+	}
+}
+
 func TestConfigReconcile_DeleteSkipsUnpatchWhenNotOwned(t *testing.T) {
 	now := metav1.Now()
 	config := newTestCUDNBgpConfig()
@@ -1639,6 +1691,7 @@ func TestConfigReconcile_DeleteSkipsUnpatchWhenNotOwned(t *testing.T) {
 func TestConfigReconcile_DeleteSkipsUnpatchWhenExternalFRRConfigExists(t *testing.T) {
 	now := metav1.Now()
 	config := newTestCUDNBgpConfig()
+	config.UID = testConfigUID
 	config.Finalizers = []string{ConfigFinalizerName}
 	config.DeletionTimestamp = &now
 	config.Status.FRRProviderOwned = true
@@ -1658,6 +1711,7 @@ func TestConfigReconcile_DeleteSkipsUnpatchWhenExternalFRRConfigExists(t *testin
 			"labels": map[string]interface{}{LabelManagedBy: LabelManagedByVal},
 		},
 	}}
+	withCUDNBgpConfigOwner(managedFRR, config)
 
 	s := configTestScheme()
 	c := fake.NewClientBuilder().WithScheme(s).
@@ -1666,8 +1720,12 @@ func TestConfigReconcile_DeleteSkipsUnpatchWhenExternalFRRConfigExists(t *testin
 		Build()
 
 	r := &CUDNBgpConfigReconciler{Client: c, Scheme: s}
-	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}}); err != nil {
+	res, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}})
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.RequeueAfter == 0 {
+		t.Error("deletion should requeue while an external FRRConfiguration still exists")
 	}
 
 	network := &unstructured.Unstructured{}
@@ -1687,5 +1745,20 @@ func TestConfigReconcile_DeleteSkipsUnpatchWhenExternalFRRConfigExists(t *testin
 	}
 	if mustNetworkRouteAds(t, network) != RouteAdvertisementsOn {
 		t.Error("routeAdvertisements should remain Enabled when external FRRConfiguration still exists")
+	}
+
+	// The finalizer must be retained so ownership survives until the external
+	// consumer is gone; otherwise nothing could ever revert the Network patch.
+	updated := &networkingv1alpha1.CUDNBgpConfig{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, updated); err != nil {
+		t.Fatalf("CUDNBgpConfig should still exist (finalizer retained): %v", err)
+	}
+	if !slices.Contains(updated.Finalizers, ConfigFinalizerName) {
+		t.Error("finalizer should be retained while an external FRRConfiguration still exists")
+	}
+
+	cond := meta.FindStatusCondition(updated.Status.Conditions, ConditionDeletionBlocked)
+	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != ReasonExternalFRRConfigsExist {
+		t.Errorf("expected DeletionBlocked=True/%s condition, got %+v", ReasonExternalFRRConfigsExist, cond)
 	}
 }

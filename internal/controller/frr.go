@@ -23,6 +23,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
@@ -118,6 +119,9 @@ func EnsureFRRConfigurationsFromGroups(
 		return 0, err
 	}
 	for i := range list.Items {
+		if !isFRRConfigurationOwnedBy(&list.Items[i], config) {
+			continue
+		}
 		if !expected[list.Items[i].GetName()] {
 			if err := c.Delete(ctx, &list.Items[i]); err != nil && !apierrors.IsNotFound(err) {
 				return 0, fmt.Errorf("pruning stale %s: %w", list.Items[i].GetName(), err)
@@ -210,19 +214,20 @@ func ensureSingleFRRConfiguration(
 		}
 	}
 
+	setFRRConfigurationOwnerReference(obj, config)
 	return createOrUpdate(ctx, c, obj)
 }
 
-func DeleteFRRConfigurations(ctx context.Context, c client.Client) error {
+func DeleteFRRConfigurations(ctx context.Context, c client.Client, config *networkingv1alpha1.CUDNBgpConfig) error {
 	list := &unstructured.UnstructuredList{}
 	list.SetGroupVersionKind(FRRConfigurationGVK)
-	if err := c.List(ctx, list,
-		client.InNamespace(FRRNamespace),
-		client.MatchingLabels{LabelManagedBy: LabelManagedByVal},
-	); err != nil {
+	if err := c.List(ctx, list, client.InNamespace(FRRNamespace)); err != nil {
 		return err
 	}
 	for i := range list.Items {
+		if !isFRRConfigurationOwnedBy(&list.Items[i], config) {
+			continue
+		}
 		if err := c.Delete(ctx, &list.Items[i]); err != nil && !apierrors.IsNotFound(err) {
 			return err
 		}
@@ -231,22 +236,60 @@ func DeleteFRRConfigurations(ctx context.Context, c client.Client) error {
 }
 
 // anyFRRConfigurationsExist reports whether any FRRConfiguration not owned by
-// this controller still exists. Managed objects (including those that are
+// this CUDNBgpConfig still exists. Objects owned by this config (including those
 // terminating after DeleteFRRConfigurations) are ignored so they cannot block
 // reverting the Network/cluster patch.
-func anyFRRConfigurationsExist(ctx context.Context, c client.Client) (bool, error) {
+func anyFRRConfigurationsExist(ctx context.Context, c client.Client, config *networkingv1alpha1.CUDNBgpConfig) (bool, error) {
 	list := &unstructured.UnstructuredList{}
 	list.SetGroupVersionKind(FRRConfigurationGVK)
 	if err := c.List(ctx, list); err != nil {
 		return false, err
 	}
 	for i := range list.Items {
-		if list.Items[i].GetLabels()[LabelManagedBy] == LabelManagedByVal {
+		if isFRRConfigurationOwnedBy(&list.Items[i], config) {
 			continue
 		}
 		return true, nil
 	}
 	return false, nil
+}
+
+func setFRRConfigurationOwnerReference(obj *unstructured.Unstructured, config *networkingv1alpha1.CUDNBgpConfig) {
+	if config.UID == "" {
+		return
+	}
+	controller := true
+	ref := metav1.OwnerReference{
+		APIVersion: networkingv1alpha1.GroupVersion.String(),
+		Kind:       "CUDNBgpConfig",
+		Name:       config.Name,
+		UID:        config.UID,
+		Controller: &controller,
+	}
+	refs := obj.GetOwnerReferences()
+	for i := range refs {
+		if refs[i].Kind == "CUDNBgpConfig" && refs[i].Name == config.Name {
+			refs[i] = ref
+			obj.SetOwnerReferences(refs)
+			return
+		}
+	}
+	obj.SetOwnerReferences(append(refs, ref))
+}
+
+func isFRRConfigurationOwnedBy(obj *unstructured.Unstructured, config *networkingv1alpha1.CUDNBgpConfig) bool {
+	if config.UID == "" {
+		return false
+	}
+	for _, ref := range obj.GetOwnerReferences() {
+		if ref.APIVersion == networkingv1alpha1.GroupVersion.String() &&
+			ref.Kind == "CUDNBgpConfig" &&
+			ref.Name == config.Name &&
+			ref.UID == config.UID {
+			return true
+		}
+	}
+	return false
 }
 
 func mergeLabels(base, overlay map[string]string) map[string]string {
@@ -283,7 +326,7 @@ func createOrUpdate(ctx context.Context, c client.Client, obj *unstructured.Unst
 
 	obj.SetResourceVersion(existing.GetResourceVersion())
 	// Both controllers watch what they write here, so skip the write when nothing we manage changed to avoid re-triggering reconcile.
-	if specEqual(existing, obj) && labelsSatisfied(existing.GetLabels(), obj.GetLabels()) {
+	if specEqual(existing, obj) && labelsSatisfied(existing.GetLabels(), obj.GetLabels()) && ownerRefsSatisfied(existing, obj) {
 		return nil
 	}
 	// The write replaces metadata wholesale, so carry forward anything we don't manage ourselves (e.g. a foreign label, or ovn-kubernetes' own finalizer/annotations on a CUDN).
@@ -335,6 +378,27 @@ func specSatisfied(existing, desired interface{}) bool {
 func labelsSatisfied(existing, desired map[string]string) bool {
 	for k, v := range desired {
 		if existing[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+func ownerRefsSatisfied(existing, desired *unstructured.Unstructured) bool {
+	want := desired.GetOwnerReferences()
+	if len(want) == 0 {
+		return true
+	}
+	have := existing.GetOwnerReferences()
+	for _, ref := range want {
+		found := false
+		for _, h := range have {
+			if h.APIVersion == ref.APIVersion && h.Kind == ref.Kind && h.Name == ref.Name && h.UID == ref.UID {
+				found = true
+				break
+			}
+		}
+		if !found {
 			return false
 		}
 	}

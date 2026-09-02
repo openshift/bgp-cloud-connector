@@ -33,6 +33,10 @@ import (
 	"github.com/openshift/bgp-cloud-connector/internal/platform"
 )
 
+// testConfigUID is the CUDNBgpConfig UID used across tests so owner-reference
+// matching has a stable, non-empty value.
+const testConfigUID = "test-cudn-config-uid"
+
 func testScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(s)
@@ -135,10 +139,11 @@ func TestEnsureFRRConfigurations_PrunesStale(t *testing.T) {
 		},
 	}
 
-	c := fake.NewClientBuilder().WithScheme(s).WithObjects(ns, stale).Build()
-	ctx := context.Background()
-
 	config := &networkingv1alpha1.CUDNBgpConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "cluster",
+			UID:  testConfigUID,
+		},
 		Spec: networkingv1alpha1.CUDNBgpConfigSpec{
 			Platform: networkingv1alpha1.PlatformManual,
 			BGP: networkingv1alpha1.BGPConfig{
@@ -154,6 +159,10 @@ func TestEnsureFRRConfigurations_PrunesStale(t *testing.T) {
 			RouterNodeSelector: map[string]string{"bgp_router": "true"},
 		},
 	}
+	withCUDNBgpConfigOwner(stale, config)
+
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(ns, stale).Build()
+	ctx := context.Background()
 
 	if err := EnsureFRRConfigurations(ctx, c, config); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -710,9 +719,26 @@ func TestUnpatchNetworkOperator_OnlyRemovesFRRWhenNotOwningRouteAds(t *testing.T
 
 // --- anyFRRConfigurationsExist ---
 
+func testCUDNBgpConfigUID() *networkingv1alpha1.CUDNBgpConfig {
+	config := newTestCUDNBgpConfig()
+	config.UID = testConfigUID
+	return config
+}
+
+func withCUDNBgpConfigOwner(obj *unstructured.Unstructured, config *networkingv1alpha1.CUDNBgpConfig) {
+	controller := true
+	obj.SetOwnerReferences([]metav1.OwnerReference{{
+		APIVersion: networkingv1alpha1.GroupVersion.String(),
+		Kind:       "CUDNBgpConfig",
+		Name:       config.Name,
+		UID:        config.UID,
+		Controller: &controller,
+	}})
+}
+
 func TestAnyFRRConfigurationsExist_Empty(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(configTestScheme()).Build()
-	got, err := anyFRRConfigurationsExist(context.Background(), c)
+	got, err := anyFRRConfigurationsExist(context.Background(), c, testCUDNBgpConfigUID())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -722,6 +748,7 @@ func TestAnyFRRConfigurationsExist_Empty(t *testing.T) {
 }
 
 func TestAnyFRRConfigurationsExist_ManagedExists(t *testing.T) {
+	config := testCUDNBgpConfigUID()
 	obj := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "frrk8s.metallb.io/v1beta1", "kind": "FRRConfiguration",
 		"metadata": map[string]interface{}{
@@ -729,17 +756,19 @@ func TestAnyFRRConfigurationsExist_ManagedExists(t *testing.T) {
 			"labels": map[string]interface{}{LabelManagedBy: LabelManagedByVal},
 		},
 	}}
+	withCUDNBgpConfigOwner(obj, config)
 	c := fake.NewClientBuilder().WithScheme(configTestScheme()).WithObjects(obj).Build()
-	got, err := anyFRRConfigurationsExist(context.Background(), c)
+	got, err := anyFRRConfigurationsExist(context.Background(), c, config)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got {
-		t.Error("expected false when only a managed FRRConfiguration exists")
+		t.Error("expected false when only a controller-owned FRRConfiguration exists")
 	}
 }
 
 func TestAnyFRRConfigurationsExist_UnmanagedExists(t *testing.T) {
+	config := testCUDNBgpConfigUID()
 	managed := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "frrk8s.metallb.io/v1beta1", "kind": "FRRConfiguration",
 		"metadata": map[string]interface{}{
@@ -747,6 +776,7 @@ func TestAnyFRRConfigurationsExist_UnmanagedExists(t *testing.T) {
 			"labels": map[string]interface{}{LabelManagedBy: LabelManagedByVal},
 		},
 	}}
+	withCUDNBgpConfigOwner(managed, config)
 	external := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "frrk8s.metallb.io/v1beta1", "kind": "FRRConfiguration",
 		"metadata": map[string]interface{}{
@@ -755,11 +785,30 @@ func TestAnyFRRConfigurationsExist_UnmanagedExists(t *testing.T) {
 		},
 	}}
 	c := fake.NewClientBuilder().WithScheme(configTestScheme()).WithObjects(managed, external).Build()
-	got, err := anyFRRConfigurationsExist(context.Background(), c)
+	got, err := anyFRRConfigurationsExist(context.Background(), c, config)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !got {
 		t.Error("expected true when an unmanaged FRRConfiguration exists alongside a managed one")
+	}
+}
+
+func TestAnyFRRConfigurationsExist_ForgedManagedByLabel(t *testing.T) {
+	config := testCUDNBgpConfigUID()
+	forged := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "frrk8s.metallb.io/v1beta1", "kind": "FRRConfiguration",
+		"metadata": map[string]interface{}{
+			"name": "forged-frr", "namespace": FRRNamespace,
+			"labels": map[string]interface{}{LabelManagedBy: LabelManagedByVal},
+		},
+	}}
+	c := fake.NewClientBuilder().WithScheme(configTestScheme()).WithObjects(forged).Build()
+	got, err := anyFRRConfigurationsExist(context.Background(), c, config)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got {
+		t.Error("expected true when an external FRRConfiguration copies managed-by without an owner reference")
 	}
 }

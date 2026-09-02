@@ -73,6 +73,65 @@ type CUDNBgpConfigReconciler struct {
 	PlatformBuilder PlatformBuilderFunc
 }
 
+// reconcileNetworkOperatorPatch runs Phase 1: it patches Network/cluster with
+// FRR and routeAdvertisements, records which of those this controller now owns,
+// and sets the NetworkOperatorPatched condition. It returns done=true when the
+// caller should return the accompanying result/error immediately (a terminal
+// error path); done=false means reconciliation should continue.
+func (r *CUDNBgpConfigReconciler) reconcileNetworkOperatorPatch(
+	ctx context.Context,
+	config *networkingv1alpha1.CUDNBgpConfig,
+	baselineStatus networkingv1alpha1.CUDNBgpConfigStatus,
+) (ctrl.Result, bool, error) {
+	log := logf.FromContext(ctx)
+	log.Info("Phase 1: patching Network operator")
+	// There is a small TOCTOU window between reading Network/cluster here and
+	// patching it below, since another actor may modify the providers in between.
+	// The reconcile loop retries quickly, so the window is small.
+	var claimFRRProvider, claimRouteAds bool
+	if !config.Status.FRRProviderOwned || !config.Status.RouteAdsOwned {
+		frrPresent, routeAdsOn, err := ReadNetworkOwnership(ctx, r.Client)
+		if err != nil {
+			res, err := r.setDegraded(ctx, config, baselineStatus, networkingv1alpha1.ConditionNetworkOperatorPatched,
+				"NetworkReadFailed", fmt.Sprintf("failed to read Network/cluster: %v", err))
+			return res, true, err
+		}
+		if !frrPresent && !config.Status.FRRProviderOwned {
+			claimFRRProvider = true
+		}
+		if !routeAdsOn && !config.Status.RouteAdsOwned {
+			claimRouteAds = true
+		}
+	}
+	if err := PatchNetworkOperator(ctx, r.Client); err != nil {
+		res, err := r.setDegraded(ctx, config, baselineStatus, networkingv1alpha1.ConditionNetworkOperatorPatched,
+			"PatchFailed", fmt.Sprintf("failed to patch Network operator: %v", err))
+		return res, true, err
+	}
+	if claimFRRProvider {
+		config.Status.FRRProviderOwned = true
+	}
+	if claimRouteAds {
+		config.Status.RouteAdsOwned = true
+	}
+	if claimFRRProvider || claimRouteAds {
+		// Persist ownership as soon as the patch succeeds. If the controller
+		// restarts before the end-of-reconcile status write, the flags would
+		// otherwise be lost and deletion would skip reverting the patch.
+		if err := r.patchConfigStatus(ctx, config, baselineStatus, func(*networkingv1alpha1.CUDNBgpConfig) {}); err != nil {
+			return ctrl.Result{}, true, err
+		}
+	}
+	meta.SetStatusCondition(&config.Status.Conditions, metav1.Condition{
+		Type:               networkingv1alpha1.ConditionNetworkOperatorPatched,
+		Status:             metav1.ConditionTrue,
+		Reason:             "Patched",
+		Message:            "Network operator patched with FRR and routeAdvertisements",
+		ObservedGeneration: config.Generation,
+	})
+	return ctrl.Result{}, false, nil
+}
+
 func (r *CUDNBgpConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -103,38 +162,9 @@ func (r *CUDNBgpConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	config.Status.ObservedGeneration = config.Generation
 
 	// Phase 1: Patch Network Operator
-	log.Info("Phase 1: patching Network operator")
-	var claimFRRProvider, claimRouteAds bool
-	if !config.Status.FRRProviderOwned || !config.Status.RouteAdsOwned {
-		frrPresent, routeAdsOn, err := ReadNetworkOwnership(ctx, r.Client)
-		if err != nil {
-			return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionNetworkOperatorPatched,
-				"NetworkReadFailed", fmt.Sprintf("failed to read Network/cluster: %v", err))
-		}
-		if !frrPresent && !config.Status.FRRProviderOwned {
-			claimFRRProvider = true
-		}
-		if !routeAdsOn && !config.Status.RouteAdsOwned {
-			claimRouteAds = true
-		}
+	if res, done, err := r.reconcileNetworkOperatorPatch(ctx, config, *baselineStatus); done {
+		return res, err
 	}
-	if err := PatchNetworkOperator(ctx, r.Client); err != nil {
-		return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionNetworkOperatorPatched,
-			"PatchFailed", fmt.Sprintf("failed to patch Network operator: %v", err))
-	}
-	if claimFRRProvider {
-		config.Status.FRRProviderOwned = true
-	}
-	if claimRouteAds {
-		config.Status.RouteAdsOwned = true
-	}
-	meta.SetStatusCondition(&config.Status.Conditions, metav1.Condition{
-		Type:               networkingv1alpha1.ConditionNetworkOperatorPatched,
-		Status:             metav1.ConditionTrue,
-		Reason:             "Patched",
-		Message:            "Network operator patched with FRR and routeAdvertisements",
-		ObservedGeneration: config.Generation,
-	})
 
 	// Phase 2: Wait for FRR
 	log.Info("Phase 2: checking FRR readiness")
@@ -593,26 +623,51 @@ func (r *CUDNBgpConfigReconciler) reconcileDelete(ctx context.Context, config *n
 	}
 
 	log.Info("cleaning up FRR configurations")
-	if err := DeleteFRRConfigurations(ctx, r.Client); err != nil {
+	if err := DeleteFRRConfigurations(ctx, r.Client, config); err != nil {
 		return ctrl.Result{}, err
 	}
 
 	// Revert the Network/cluster patch only for fields this controller owned,
 	// and only when no other FRRConfiguration consumers remain in the cluster.
+	//
+	// Reverting is best-effort: a failure here must not wedge the finalizer and
+	// leave the CUDNBgpConfig stuck Terminating forever. A leaked Network/cluster
+	// patch is administrator-recoverable, whereas a stuck finalizer is not. On
+	// failure we log and still remove the finalizer so deletion can complete.
 	if config.Status.FRRProviderOwned || config.Status.RouteAdsOwned {
-		others, err := anyFRRConfigurationsExist(ctx, r.Client)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("listing FRRConfigurations: %w", err)
-		}
-		if others {
-			log.Info("skipping Network unpatch: external FRRConfiguration objects still exist")
-		} else {
+		others, err := anyFRRConfigurationsExist(ctx, r.Client, config)
+		switch {
+		case err != nil:
+			// Fail safe: if we cannot determine whether external consumers exist,
+			// do not revert (avoid breaking unrelated routing) and do not block deletion.
+			log.Error(err, "skipping Network unpatch: unable to list FRRConfigurations")
+		case others:
+			// External FRRConfiguration consumers still rely on the Network patch.
+			// Retain the finalizer and requeue instead of completing deletion: the
+			// ownership flags live in this CUDNBgpConfig's status, so if we let it
+			// go now nothing could ever revert the patch once the external consumers
+			// are removed. A later reconcile reverts and finishes deletion then.
+			log.Info("deletion blocked: external FRRConfiguration objects still exist; retaining finalizer until they are removed")
+			if err := r.patchConfigStatus(ctx, config, *baselineStatus, func(c *networkingv1alpha1.CUDNBgpConfig) {
+				meta.SetStatusCondition(&c.Status.Conditions, metav1.Condition{
+					Type:               ConditionDeletionBlocked,
+					Status:             metav1.ConditionTrue,
+					Reason:             ReasonExternalFRRConfigsExist,
+					Message:            "external FRRConfiguration objects still consume the Network/cluster FRR patch; deletion is blocked until they are removed",
+					ObservedGeneration: c.Generation,
+				})
+			}); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		default:
 			log.Info("reverting Network operator patch")
 			if err := UnpatchNetworkOperator(ctx, r.Client,
 				config.Status.FRRProviderOwned, config.Status.RouteAdsOwned); err != nil {
-				return ctrl.Result{}, fmt.Errorf("reverting Network operator patch: %w", err)
+				log.Error(err, "failed to revert Network operator patch; removing finalizer anyway to avoid a stuck deletion")
+			} else {
+				log.Info("Network operator patch reverted")
 			}
-			log.Info("Network operator patch reverted")
 		}
 	} else {
 		log.Info("skipping Network unpatch: no fields owned by this controller")
