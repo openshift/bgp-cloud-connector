@@ -324,6 +324,16 @@ func createOrUpdate(ctx context.Context, c client.Client, obj *unstructured.Unst
 		return err
 	}
 
+	// Never adopt a same-name object we don't already own. When we intend
+	// ownership (desired carries an owner ref) but the existing object lacks it,
+	// it's an external object squatting our name; overwriting it would stamp our
+	// owner ref and let DeleteFRRConfigurations later delete a config we never
+	// created. Refuse instead, reporting the collision.
+	if len(obj.GetOwnerReferences()) > 0 && !ownerRefsSatisfied(existing, obj) {
+		return fmt.Errorf("refusing to adopt existing %s %s/%s: it lacks this CUDNBgpConfig's owner reference (name collision)",
+			obj.GetKind(), obj.GetNamespace(), obj.GetName())
+	}
+
 	obj.SetResourceVersion(existing.GetResourceVersion())
 	// Both controllers watch what they write here, so skip the write when nothing we manage changed to avoid re-triggering reconcile.
 	if specEqual(existing, obj) && labelsSatisfied(existing.GetLabels(), obj.GetLabels()) && ownerRefsSatisfied(existing, obj) {
