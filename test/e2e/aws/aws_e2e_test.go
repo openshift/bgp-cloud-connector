@@ -36,6 +36,7 @@ import (
 
 	networkingv1alpha1 "github.com/openshift/bgp-cloud-connector/api/v1alpha1"
 	awsplatform "github.com/openshift/bgp-cloud-connector/internal/platform/aws"
+	e2e "github.com/openshift/bgp-cloud-connector/test/e2e"
 )
 
 const (
@@ -70,6 +71,9 @@ var _ = Describe("AWS E2E", Ordered, func() {
 				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: configCR.Name}, cfg)).To(Succeed())
 				g.Expect(cfg.Status.Phase).To(Equal(networkingv1alpha1.PhaseReady))
 			}).WithTimeout(reconcileTimeout).WithPolling(pollInterval).Should(Succeed())
+
+			By("verifying Network/cluster ownership is External (hack/enable-frr.sh pre-enabled FRR)")
+			Expect(e2e.CheckConfigNetworkOwnershipExternal(ctx, k8sClient, configCR.Name)).To(Succeed())
 
 			By("verifying FRRConfigurations exist")
 			azCount := len(endpointsByAZ)
@@ -380,6 +384,9 @@ var _ = Describe("AWS E2E", Ordered, func() {
 				g.Expect(client.IgnoreNotFound(err)).To(Succeed())
 				g.Expect(err).To(HaveOccurred(), "config CR should be gone")
 			}).WithTimeout(reconcileTimeout).WithPolling(pollInterval).Should(Succeed())
+
+			By("verifying Network/cluster FRR patch was not reverted on config delete")
+			Expect(e2e.CheckNetworkFRREnabled(ctx, k8sClient)).To(Succeed())
 
 			By("verifying AWS peers are deleted")
 			Eventually(func(g Gomega) {

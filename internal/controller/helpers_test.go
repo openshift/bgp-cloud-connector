@@ -522,11 +522,11 @@ func networkHasFRRProvider(t *testing.T, network *unstructured.Unstructured) boo
 	return false
 }
 
-// --- ReadNetworkOwnership ---
+// --- ReadNetworkOperatorState ---
 
-func TestReadNetworkOwnership_NetworkNotFound(t *testing.T) {
+func TestReadNetworkOperatorState_NetworkNotFound(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(configTestScheme()).Build()
-	frrPresent, routeAdsOn, err := ReadNetworkOwnership(context.Background(), c)
+	frrPresent, routeAdsOn, err := ReadNetworkOperatorState(context.Background(), c)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -535,10 +535,10 @@ func TestReadNetworkOwnership_NetworkNotFound(t *testing.T) {
 	}
 }
 
-func TestReadNetworkOwnership_NoProviders(t *testing.T) {
+func TestReadNetworkOperatorState_NoProviders(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(configTestScheme()).
 		WithObjects(newNetworkObject(map[string]interface{}{})).Build()
-	frrPresent, routeAdsOn, err := ReadNetworkOwnership(context.Background(), c)
+	frrPresent, routeAdsOn, err := ReadNetworkOperatorState(context.Background(), c)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -547,14 +547,14 @@ func TestReadNetworkOwnership_NoProviders(t *testing.T) {
 	}
 }
 
-func TestReadNetworkOwnership_FRRProviderPresentRouteAdsDisabled(t *testing.T) {
+func TestReadNetworkOperatorState_FRRProviderPresentRouteAdsDisabled(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(configTestScheme()).
 		WithObjects(newNetworkObject(map[string]interface{}{
 			"additionalRoutingCapabilities": map[string]interface{}{
 				"providers": []interface{}{FRRProviderName},
 			},
 		})).Build()
-	frrPresent, routeAdsOn, err := ReadNetworkOwnership(context.Background(), c)
+	frrPresent, routeAdsOn, err := ReadNetworkOperatorState(context.Background(), c)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -566,10 +566,10 @@ func TestReadNetworkOwnership_FRRProviderPresentRouteAdsDisabled(t *testing.T) {
 	}
 }
 
-func TestReadNetworkOwnership_FullyEnabled(t *testing.T) {
+func TestReadNetworkOperatorState_FullyEnabled(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(configTestScheme()).
 		WithObjects(newFRREnabledNetwork()).Build()
-	frrPresent, routeAdsOn, err := ReadNetworkOwnership(context.Background(), c)
+	frrPresent, routeAdsOn, err := ReadNetworkOperatorState(context.Background(), c)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -691,10 +691,10 @@ func TestUnpatchNetworkOperator_OnlyClearsRouteAdsWhenNotOwningProvider(t *testi
 		}
 	}
 	if !hasFRR {
-		t.Error("FRR should remain in providers when FRRProviderOwned=false")
+		t.Error("FRR should remain in providers when FRR provider is not Owned")
 	}
 	if got := mustNetworkRouteAds(t, network); got != RouteAdvertisementsDisabled {
-		t.Errorf("routeAdvertisements = %q, want %q when RouteAdsOwned=true", got, RouteAdvertisementsDisabled)
+		t.Errorf("routeAdvertisements = %q, want %q when RouteAds is Owned", got, RouteAdvertisementsDisabled)
 	}
 }
 
@@ -710,10 +710,10 @@ func TestUnpatchNetworkOperator_OnlyRemovesFRRWhenNotOwningRouteAds(t *testing.T
 		t.Fatalf("failed to read Network: %v", err)
 	}
 	if networkHasFRRProvider(t, network) {
-		t.Error("FRR should be removed when FRRProviderOwned=true")
+		t.Error("FRR should be removed when FRR provider is Owned")
 	}
 	if mustNetworkRouteAds(t, network) != RouteAdvertisementsOn {
-		t.Error("routeAdvertisements should remain Enabled when RouteAdsOwned=false")
+		t.Error("routeAdvertisements should remain Enabled when RouteAds is not Owned")
 	}
 }
 

@@ -42,6 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	networkingv1alpha1 "github.com/openshift/bgp-cloud-connector/api/v1alpha1"
+	e2e "github.com/openshift/bgp-cloud-connector/test/e2e"
 )
 
 var (
@@ -157,6 +158,7 @@ func addUnstructuredTypes(s *runtime.Scheme) {
 		{Group: "frrk8s.metallb.io", Version: "v1beta1", Kind: "FRRConfiguration"},
 		{Group: "k8s.ovn.org", Version: "v1", Kind: "ClusterUserDefinedNetwork"},
 		{Group: "k8s.ovn.org", Version: "v1", Kind: "RouteAdvertisements"},
+		e2e.NetworkOperatorGVK,
 	} {
 		s.AddKnownTypeWithName(gvk, &unstructured.Unstructured{})
 		s.AddKnownTypeWithName(gvk.GroupVersion().WithKind(gvk.Kind+"List"), &unstructured.UnstructuredList{})

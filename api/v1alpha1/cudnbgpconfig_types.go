@@ -40,6 +40,20 @@ const (
 	PhaseDegraded    PhaseType = "Degraded"
 )
 
+// NetworkPatchOwnership records whether this controller owns a Network/cluster
+// field it may revert on deletion, or whether it was already set externally.
+// +kubebuilder:validation:Enum=External;Owned
+type NetworkPatchOwnership string
+
+const (
+	// NetworkPatchOwnershipExternal means the field was already set before this
+	// controller patched Network/cluster (e.g. hack/enable-frr.sh in e2e).
+	NetworkPatchOwnershipExternal NetworkPatchOwnership = "External"
+	// NetworkPatchOwnershipOwned means this controller enabled the field and may
+	// revert it on CUDNBgpConfig deletion.
+	NetworkPatchOwnershipOwned NetworkPatchOwnership = "Owned"
+)
+
 // PlatformType selects which cloud the operator reconciles BGP peering
 // against. It is the discriminator for the cloud-specific block in the spec.
 // +kubebuilder:validation:Enum=AWS;Azure;GCP;Manual
@@ -300,14 +314,16 @@ type CUDNBgpConfigStatus struct {
 	// +listType=atomic
 	// +kubebuilder:validation:MaxItems=16
 	PeerGroups []PeerGroupStatus `json:"peerGroups,omitempty"`
-	// FRRProviderOwned is true when this controller added FRR to Network/cluster
-	// additionalRoutingCapabilities.providers.
+	// FRRProviderOwnership is External when FRR was already in
+	// additionalRoutingCapabilities.providers before this controller patched
+	// Network/cluster, or Owned when this controller added it.
 	// +optional
-	FRRProviderOwned bool `json:"frrProviderOwned,omitempty"`
-	// RouteAdsOwned is true when this controller set routeAdvertisements to
-	// Enabled on Network/cluster.
+	FRRProviderOwnership NetworkPatchOwnership `json:"frrProviderOwnership,omitempty"`
+	// RouteAdsOwnership is External when routeAdvertisements was already
+	// Enabled before this controller patched Network/cluster, or Owned when
+	// this controller enabled it.
 	// +optional
-	RouteAdsOwned bool `json:"routeAdsOwned,omitempty"`
+	RouteAdsOwnership NetworkPatchOwnership `json:"routeAdsOwnership,omitempty"`
 }
 
 // +kubebuilder:object:root=true

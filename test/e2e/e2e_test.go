@@ -57,6 +57,9 @@ var _ = Describe("E2E", Ordered, func() {
 				g.Expect(cfg.Status.Phase).To(Equal(networkingv1alpha1.PhaseReady))
 			}).WithTimeout(reconcileTimeout).WithPolling(pollInterval).Should(Succeed())
 
+			By("verifying Network/cluster ownership is External (hack/enable-frr.sh pre-enabled FRR)")
+			Expect(CheckConfigNetworkOwnershipExternal(ctx, k8sClient, configCR.Name)).To(Succeed())
+
 			By("verifying FRRConfigurations exist")
 			azCount := len(bgpConfig.Spec.BGP.PeerGroups)
 			for i := 1; i <= azCount; i++ {
@@ -243,6 +246,9 @@ var _ = Describe("E2E", Ordered, func() {
 				g.Expect(client.IgnoreNotFound(err)).To(Succeed())
 				g.Expect(err).To(HaveOccurred(), "config CR should be gone")
 			}).WithTimeout(reconcileTimeout).WithPolling(pollInterval).Should(Succeed())
+
+			By("verifying Network/cluster FRR patch was not reverted on config delete")
+			Expect(CheckNetworkFRREnabled(ctx, k8sClient)).To(Succeed())
 
 			By("verifying FRRConfigurations are deleted")
 			azCount := len(bgpConfig.Spec.BGP.PeerGroups)

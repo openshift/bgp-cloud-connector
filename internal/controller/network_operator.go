@@ -60,11 +60,11 @@ func readRouteAds(network *unstructured.Unstructured) (string, error) {
 	return ra, nil
 }
 
-// ReadNetworkOwnership returns the pre-existing state of the two fields this
-// controller manages. Use the return values to decide which fields the controller
-// needs to claim ownership of before calling PatchNetworkOperator.
+// ReadNetworkOperatorState returns whether FRR is in additionalRoutingCapabilities.providers
+// and whether routeAdvertisements is Enabled on Network/cluster.
+// Use the return values to decide which fields this controller should claim before patching.
 // Returns (false, false, nil) when Network/cluster does not exist.
-func ReadNetworkOwnership(ctx context.Context, c client.Client) (frrInProviders bool, routeAdsEnabled bool, err error) {
+func ReadNetworkOperatorState(ctx context.Context, c client.Client) (frrInProviders bool, routeAdsEnabled bool, err error) {
 	network, err := getNetworkCluster(ctx, c)
 	if err != nil || network == nil {
 		return false, false, err
