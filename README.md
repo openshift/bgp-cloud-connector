@@ -113,6 +113,7 @@ Setting `ROLEARN` after the operator has already asked is fine: it reconciles it
 # Get the cluster's OIDC provider details
 OIDC_PROVIDER=$(rosa describe cluster -c <cluster-name> -o json | jq -r '.aws.sts.oidc_endpoint_url' | sed 's|https://||')
 AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+AWS_REGION=$(rosa describe cluster -c <cluster-name> -o json | jq -r '.region.id // .region')
 
 aws iam create-role --role-name cudn-bgp-operator \
   --assume-role-policy-document '{
@@ -139,6 +140,7 @@ aws iam put-role-policy --role-name cudn-bgp-operator \
     "Version": "2012-10-17",
     "Statement": [
       {
+        "Sid": "ReadOnly",
         "Effect": "Allow",
         "Action": [
           "sts:GetCallerIdentity",
@@ -146,13 +148,28 @@ aws iam put-role-policy --role-name cudn-bgp-operator \
           "ec2:DescribeRouteServerEndpoints",
           "ec2:DescribeSubnets",
           "ec2:DescribeRouteServerPeers",
-          "ec2:CreateRouteServerPeer",
-          "ec2:DeleteRouteServerPeer",
-          "ec2:CreateTags",
-          "ec2:DescribeInstances",
-          "ec2:ModifyNetworkInterfaceAttribute"
+          "ec2:DescribeInstances"
         ],
         "Resource": "*"
+      },
+      {
+        "Sid": "RouteServerPeerManagement",
+        "Effect": "Allow",
+        "Action": [
+          "ec2:CreateRouteServerPeer",
+          "ec2:DeleteRouteServerPeer",
+          "ec2:CreateTags"
+        ],
+        "Resource": [
+          "arn:aws:ec2:'$AWS_REGION':'$AWS_ACCOUNT_ID':route-server-endpoint/*",
+          "arn:aws:ec2:'$AWS_REGION':'$AWS_ACCOUNT_ID':route-server-peer/*"
+        ]
+      },
+      {
+        "Sid": "DisableSourceDestCheck",
+        "Effect": "Allow",
+        "Action": "ec2:ModifyNetworkInterfaceAttribute",
+        "Resource": "arn:aws:ec2:'$AWS_REGION':'$AWS_ACCOUNT_ID':network-interface/*"
       }
     ]
   }'
