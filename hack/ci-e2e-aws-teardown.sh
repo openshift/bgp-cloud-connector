@@ -95,8 +95,8 @@ if [[ "${cluster_reachable}" == true ]]; then
     # running one is a race we do not need to have. The job installs it
     # from its bundle, and a cluster where that never happened has no
     # deployment to scale, which is not a failure.
-    if oc -n openshift-cudn-bgp-routing get deployment/openshift-cudn-bgp-routing-controller-manager >/dev/null 2>&1; then
-        if ! oc -n openshift-cudn-bgp-routing scale deployment/openshift-cudn-bgp-routing-controller-manager --replicas=0; then
+    if oc -n openshift-bgp-cloud-connector get deployment/openshift-bgp-cloud-connector-controller-manager >/dev/null 2>&1; then
+        if ! oc -n openshift-bgp-cloud-connector scale deployment/openshift-bgp-cloud-connector-controller-manager --replicas=0; then
             warn "scaling the operator down failed; continuing to the cloud resources"
             cluster_side_failed=true
         fi

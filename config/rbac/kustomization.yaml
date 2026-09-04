@@ -26,12 +26,12 @@ resources:
 - prometheus_k8s_role_binding.yaml
 # For each CRD, "Admin", "Editor" and "Viewer" roles are scaffolded by
 # default, aiding admins in cluster management. Those roles are
-# not used by the openshift-cudn-bgp-routing itself. You can comment the following lines
+# not used by the bgp-cloud-connector itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
-- cudnbgprouting_admin_role.yaml
-- cudnbgprouting_editor_role.yaml
-- cudnbgprouting_viewer_role.yaml
-- cudnbgpconfig_admin_role.yaml
-- cudnbgpconfig_editor_role.yaml
-- cudnbgpconfig_viewer_role.yaml
+- bgprouting_admin_role.yaml
+- bgprouting_editor_role.yaml
+- bgprouting_viewer_role.yaml
+- bgpcloudconfiguration_admin_role.yaml
+- bgpcloudconfiguration_editor_role.yaml
+- bgpcloudconfiguration_viewer_role.yaml
 

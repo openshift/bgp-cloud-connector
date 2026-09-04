@@ -1,0 +1,478 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: bgpcloudconfigurations.networking.openshift.io
+spec:
+  group: networking.openshift.io
+  names:
+    categories:
+    - networking
+    kind: BGPCloudConfiguration
+    listKind: BGPCloudConfigurationList
+    plural: bgpcloudconfigurations
+    shortNames:
+    - bgpcc
+    singular: bgpcloudconfiguration
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.platform
+      name: Platform
+      type: string
+    - jsonPath: .spec.bgp.localASN
+      name: LocalASN
+      type: integer
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: BGPCloudConfiguration is the singleton cluster-scoped BGP infrastructure
+          configuration.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              BGPCloudConfigurationSpec defines the desired BGP infrastructure configuration for the
+              cluster: which cloud platform to integrate with, which nodes act as BGP
+              routers, and how BGP sessions are established.
+            properties:
+              aws:
+                description: |-
+                  AWS holds the AWS-specific configuration for auto-discovery of BGP
+                  infrastructure. Required when platform is AWS; must not be set otherwise.
+                properties:
+                  region:
+                    description: Region is the AWS region where the ROSA cluster and
+                      Route Servers are deployed.
+                    minLength: 1
+                    type: string
+                  routeServerIDs:
+                    description: |-
+                      RouteServerIDs is the list of VPC Route Server IDs used for auto-discovery
+                      of BGP endpoints, neighbor IPs, availability zones, and remote ASN.
+                    items:
+                      type: string
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-type: atomic
+                required:
+                - region
+                - routeServerIDs
+                type: object
+              azure:
+                description: |-
+                  AzureConfig names the Route Server. Its addresses and ASN are read from it
+                  rather than declared: there is exactly one per virtual network, so there is
+                  nothing to enumerate, and Azure fixes the far-side ASN with no flag to
+                  change it.
+                properties:
+                  networkInterfaceClientID:
+                    description: |-
+                      NetworkInterfaceClientID is the managed identity to use for network
+                      interface calls, where that differs from the identity the operator
+                      otherwise runs as.
+
+                      A router node's interface and the Route Server can sit in resource
+                      groups reachable by different identities. On ARO the interfaces are in a
+                      resource group the cluster does not own, and the identity with write
+                      access there is the cluster's own machine-api identity, which cannot be
+                      granted to this operator. Naming it here exchanges the operator's
+                      projected service account token for that identity, for interface calls
+                      only; Route Server calls continue to use the identity the operator runs
+                      as.
+
+                      The identity named here must carry a federated credential trusting this
+                      operator's service account. Unset means one identity reaches both, which
+                      is the case wherever the cluster owns the resource group holding its own
+                      interfaces.
+                    type: string
+                  resourceGroup:
+                    minLength: 1
+                    type: string
+                  routeServerName:
+                    description: |-
+                      RouteServerName is the Azure Route Server whose BGP connections this
+                      operator manages. Azure models it as a Virtual Hub, and its
+                      virtualRouterIps become the BGP neighbours.
+                    minLength: 1
+                    type: string
+                  subscriptionID:
+                    minLength: 1
+                    type: string
+                required:
+                - resourceGroup
+                - routeServerName
+                - subscriptionID
+                type: object
+              bgp:
+                description: |-
+                  BGP holds the BGP speaker configuration, including local ASN,
+                  liveness detection, and (under Manual platform) peer groups.
+                properties:
+                  livenessDetection:
+                    default: bgp-keepalive
+                    description: |-
+                      LivenessDetection selects the mechanism used to detect BGP peer failure.
+                      BFD detects failure in ~1s; bgp-keepalive relies on the BGP hold timer (~90s).
+                    enum:
+                    - bfd
+                    - bgp-keepalive
+                    type: string
+                  localASN:
+                    description: LocalASN is the autonomous system number for the
+                      cluster's FRR routers.
+                    format: int64
+                    maximum: 4294967295
+                    minimum: 0
+                    type: integer
+                  peerGroups:
+                    description: |-
+                      PeerGroups defines explicit BGP peer groups with neighbor addresses.
+                      Required when platform is Manual; must not be set on other platforms
+                      where peer groups are auto-discovered.
+                    items:
+                      description: |-
+                        PeerGroup is a set of router nodes sharing a neighbour set, and becomes one
+                        FRRConfiguration.
+
+                        How many groups a cluster has is a property of its cloud. Endpoints that are
+                        per subnet give one group per availability zone, because a node peers with
+                        the ones in its own; endpoints presented once for a region give a single
+                        group covering every router node.
+                      properties:
+                        neighbors:
+                          description: Neighbors is the list of BGP peers that nodes
+                            in this group establish sessions with.
+                          items:
+                            description: BGPNeighbor identifies a single BGP peer
+                              by its IP address and AS number.
+                            properties:
+                              address:
+                                description: Address is the IP address of the BGP
+                                  neighbor.
+                                maxLength: 45
+                                minLength: 2
+                                type: string
+                                x-kubernetes-validations:
+                                - message: must be a valid IP address
+                                  rule: isIP(self)
+                              ebgpMultiHop:
+                                description: |-
+                                  EBGPMultiHop allows the session to be established with a peer that is
+                                  not on this node's link.
+
+                                  An Azure Route Server needs it, because it sits in its own subnet rather
+                                  than on the node's; an AWS Route Server endpoint does not. Declared here
+                                  rather than inferred, because whether a neighbour is on the link is a
+                                  property of the cloud's topology and not something this operator can
+                                  work out.
+                                type: boolean
+                              remoteASN:
+                                description: RemoteASN is the autonomous system number
+                                  of the BGP neighbor.
+                                format: int64
+                                maximum: 4294967295
+                                minimum: 0
+                                type: integer
+                            required:
+                            - address
+                            - remoteASN
+                            type: object
+                          maxItems: 8
+                          minItems: 1
+                          type: array
+                          x-kubernetes-list-type: atomic
+                        nodeSelector:
+                          additionalProperties:
+                            type: string
+                          description: |-
+                            NodeSelector is a set of labels used to select the router nodes
+                            that belong to this peer group.
+                          type: object
+                      required:
+                      - neighbors
+                      - nodeSelector
+                      type: object
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-type: atomic
+                required:
+                - localASN
+                type: object
+              gcp:
+                description: |-
+                  GCPConfig names the Cloud Router carrying the BGP, and the hub and spoke
+                  that make a node eligible to peer with it.
+                properties:
+                  cloudRouterName:
+                    description: |-
+                      CloudRouterName is the Cloud Router the router nodes peer with; its
+                      interface addresses become the BGP neighbors. It must not be the
+                      installer's Cloud NAT router, which has no interfaces and carries the
+                      cluster's egress.
+                    minLength: 1
+                    type: string
+                  enableNestedVirtualization:
+                    default: true
+                    description: |-
+                      EnableNestedVirtualization turns on nested virtualization on the router
+                      instances, which KubeVirt needs. Enabling it restarts the instance.
+                    type: boolean
+                  ncc:
+                    description: |-
+                      NCCConfig identifies the Network Connectivity Center hub the router nodes
+                      attach to as spokes. On GCP, membership is a precondition of peering rather
+                      than part of it: a VM cannot peer with a Cloud Router until it belongs to a
+                      router appliance spoke.
+                    properties:
+                      hubName:
+                        minLength: 1
+                        type: string
+                      siteToSiteDataTransfer:
+                        description: |-
+                          SiteToSiteDataTransfer enables NCC site-to-site data transfer on the
+                          managed spokes.
+                        type: boolean
+                      spokePrefix:
+                        description: |-
+                          SpokePrefix names the spokes this operator manages. Spokes are numbered
+                          from it, because a spoke holds a limited number of instances.
+                        minLength: 1
+                        type: string
+                    required:
+                    - hubName
+                    - spokePrefix
+                    type: object
+                  project:
+                    minLength: 1
+                    type: string
+                  region:
+                    minLength: 1
+                    type: string
+                required:
+                - cloudRouterName
+                - ncc
+                - project
+                - region
+                type: object
+              platform:
+                description: |-
+                  Platform selects the cloud provider integration mode.
+                  AWS auto-discovers BGP endpoints from VPC Route Servers.
+                  Manual requires explicit peer groups in spec.bgp.peerGroups.
+                enum:
+                - AWS
+                - Azure
+                - GCP
+                - Manual
+                type: string
+              routerNodeSelector:
+                additionalProperties:
+                  type: string
+                description: |-
+                  RouterNodeSelector is a set of labels that identify which cluster nodes
+                  act as BGP routers. Must match labels applied to BGP router machine pools.
+                type: object
+            required:
+            - bgp
+            - platform
+            - routerNodeSelector
+            type: object
+            x-kubernetes-validations:
+            - message: spec.aws must be set when spec.platform is AWS, and must be
+                absent otherwise
+              rule: (self.platform == 'AWS') == has(self.aws)
+            - message: spec.azure must be set when spec.platform is Azure, and must
+                be absent otherwise
+              rule: (self.platform == 'Azure') == has(self.azure)
+            - message: spec.gcp must be set when spec.platform is GCP, and must be
+                absent otherwise
+              rule: (self.platform == 'GCP') == has(self.gcp)
+            - message: spec.bgp.peerGroups is required when spec.platform is Manual
+              rule: self.platform != 'Manual' || (has(self.bgp.peerGroups) && size(self.bgp.peerGroups)
+                > 0)
+            - message: spec.bgp.peerGroups may only be set when spec.platform is Manual
+              rule: self.platform == 'Manual' || !has(self.bgp.peerGroups) || size(self.bgp.peerGroups)
+                == 0
+          status:
+            description: BGPCloudConfigurationStatus defines the observed state of
+              BGPCloudConfiguration.
+            properties:
+              conditions:
+                description: Conditions represent the latest available observations
+                  of the resource's state.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: ObservedGeneration is the most recent generation observed
+                  by the controller.
+                format: int64
+                type: integer
+              peerGroups:
+                description: |-
+                  PeerGroups is the discovered peering plan: what the operator found in
+                  the cloud and rendered into FRRConfigurations. Empty under
+                  platform: Manual, where the plan is declared in spec.bgp.peerGroups
+                  rather than discovered.
+                items:
+                  description: |-
+                    PeerGroupStatus reports one group of the peering plan the operator
+                    discovered, and therefore what FRR was configured to peer with.
+
+                    Every cloud populates it, which is the bar a shared status block has to
+                    clear: one shaped around a single provider's resources leaves every other
+                    cloud reconciling peerings and reporting nothing about them, and a sibling
+                    block per cloud is worse.
+                  properties:
+                    key:
+                      description: |-
+                        Key names the group in cloud-meaningful terms: an availability zone on
+                        AWS, and whatever names the single regional endpoint elsewhere.
+                      type: string
+                    neighbors:
+                      description: Neighbors are the addresses the router nodes in
+                        this group peer with.
+                      items:
+                        description: BGPNeighbor identifies a single BGP peer by its
+                          IP address and AS number.
+                        properties:
+                          address:
+                            description: Address is the IP address of the BGP neighbor.
+                            maxLength: 45
+                            minLength: 2
+                            type: string
+                            x-kubernetes-validations:
+                            - message: must be a valid IP address
+                              rule: isIP(self)
+                          ebgpMultiHop:
+                            description: |-
+                              EBGPMultiHop allows the session to be established with a peer that is
+                              not on this node's link.
+
+                              An Azure Route Server needs it, because it sits in its own subnet rather
+                              than on the node's; an AWS Route Server endpoint does not. Declared here
+                              rather than inferred, because whether a neighbour is on the link is a
+                              property of the cloud's topology and not something this operator can
+                              work out.
+                            type: boolean
+                          remoteASN:
+                            description: RemoteASN is the autonomous system number
+                              of the BGP neighbor.
+                            format: int64
+                            maximum: 4294967295
+                            minimum: 0
+                            type: integer
+                        required:
+                        - address
+                        - remoteASN
+                        type: object
+                      maxItems: 8
+                      type: array
+                      x-kubernetes-list-type: atomic
+                    nodeSelector:
+                      additionalProperties:
+                        type: string
+                      description: |-
+                        NodeSelector narrows spec.routerNodeSelector to this group. Empty means
+                        every router node.
+                      type: object
+                  required:
+                  - key
+                  type: object
+                maxItems: 16
+                type: array
+                x-kubernetes-list-type: atomic
+              phase:
+                description: Phase is the current lifecycle phase of the BGP configuration.
+                enum:
+                - Pending
+                - Configuring
+                - Ready
+                - Degraded
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

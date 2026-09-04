@@ -19,8 +19,8 @@ package controller
 import "k8s.io/apimachinery/pkg/runtime/schema"
 
 const (
-	ConfigFinalizerName  = "networking.openshift.io/cudnbgpconfig"
-	RoutingFinalizerName = "networking.openshift.io/cudnbgprouting"
+	ConfigFinalizerName  = "networking.openshift.io/bgpcloudconfiguration"
+	RoutingFinalizerName = "networking.openshift.io/bgprouting"
 
 	ConditionDeletionBlocked = "DeletionBlocked"
 
@@ -28,10 +28,10 @@ const (
 	FRRNamespace  = "openshift-frr-k8s"
 	// DefaultOperatorNamespace is where the operator runs unless the
 	// Deployment says otherwise through POD_NAMESPACE.
-	DefaultOperatorNamespace = "openshift-cudn-bgp-routing"
-	FRRConfigNamePrefix      = "cudn-bgp-"
-	CUDNNamePrefix           = "cluster-udn-"
-	RouteAdvertisementName   = "cudn-bgp-route-advertisements"
+	DefaultOperatorNamespace = "bgp-cloud-connector"
+	FRRConfigNamePrefix      = "bgp-cc-"
+	ClusterUDNNamePrefix     = "cluster-udn-"
+	RouteAdvertisementName   = "bgp-cc-route-advertisements"
 
 	// RawFRRConfigPriority orders this raw block against the raw blocks of
 	// other FRRConfigurations, a higher value being appended later. It says
@@ -41,8 +41,8 @@ const (
 	RawFRRConfigPriority = 20
 
 	LabelManagedBy    = "app.kubernetes.io/managed-by"
-	LabelManagedByVal = "cudn-bgp-routing-operator"
-	LabelCUDN         = "cluster-udn"
+	LabelManagedByVal = "bgp-cloud-connector"
+	LabelClusterUDN   = "cluster-udn"
 	LabelAdvertise    = "advertise"
 	LabelPrimaryUDN   = "k8s.ovn.org/primary-user-defined-network"
 )
@@ -101,7 +101,7 @@ var (
 	FRRConfigurationGVK = schema.GroupVersionKind{
 		Group: "frrk8s.metallb.io", Version: "v1beta1", Kind: "FRRConfiguration",
 	}
-	CUDNNetworkGVK = schema.GroupVersionKind{
+	ClusterUDNGVK = schema.GroupVersionKind{
 		Group: "k8s.ovn.org", Version: "v1", Kind: "ClusterUserDefinedNetwork",
 	}
 	RouteAdvertisementsGVK = schema.GroupVersionKind{

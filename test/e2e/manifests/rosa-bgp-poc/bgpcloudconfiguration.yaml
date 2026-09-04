@@ -1,0 +1,17 @@
+apiVersion: networking.openshift.io/v1beta1
+kind: BGPCloudConfiguration
+metadata:
+  name: cluster
+spec:
+  platform: AWS
+  bgp:
+    localASN: 65001
+    livenessDetection: bgp-keepalive
+
+  routerNodeSelector:
+    bgp_router: "true"
+
+  aws:
+    region: us-east-1
+    routeServerIDs:               # terraform output vpc1_route_server_ids
+      - rs-0abc123456789abcd

@@ -28,7 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	networkingv1alpha1 "github.com/openshift/bgp-cloud-connector/api/v1alpha1"
+	networkingapi "github.com/openshift/bgp-cloud-connector/api/v1beta1"
 	"github.com/openshift/bgp-cloud-connector/internal/platform"
 )
 
@@ -61,7 +61,7 @@ func IsFRRReady(ctx context.Context, c client.Client) (bool, error) {
 	return true, nil
 }
 
-func EnsureFRRConfigurations(ctx context.Context, c client.Client, config *networkingv1alpha1.CUDNBgpConfig) error {
+func EnsureFRRConfigurations(ctx context.Context, c client.Client, config *networkingapi.BGPCloudConfiguration) error {
 	_, err := EnsureFRRConfigurationsFromGroups(ctx, c, config, peerGroupsFromSpec(config))
 	return err
 }
@@ -70,7 +70,7 @@ func EnsureFRRConfigurations(ctx context.Context, c client.Client, config *netwo
 // discovers, so both paths render through one code path and cannot drift.
 //
 // The key is the group's position, which is what names the object it becomes.
-func peerGroupsFromSpec(config *networkingv1alpha1.CUDNBgpConfig) []platform.PeerGroup {
+func peerGroupsFromSpec(config *networkingapi.BGPCloudConfiguration) []platform.PeerGroup {
 	groups := make([]platform.PeerGroup, 0, len(config.Spec.BGP.PeerGroups))
 	for i, g := range config.Spec.BGP.PeerGroups {
 		group := platform.PeerGroup{
@@ -97,7 +97,7 @@ func peerGroupsFromSpec(config *networkingv1alpha1.CUDNBgpConfig) []platform.Pee
 func EnsureFRRConfigurationsFromGroups(
 	ctx context.Context,
 	c client.Client,
-	config *networkingv1alpha1.CUDNBgpConfig,
+	config *networkingapi.BGPCloudConfiguration,
 	groups []platform.PeerGroup,
 ) (int, error) {
 	expected := make(map[string]bool, len(groups))
@@ -130,7 +130,7 @@ func EnsureFRRConfigurationsFromGroups(
 func ensureSingleFRRConfiguration(
 	ctx context.Context,
 	c client.Client,
-	config *networkingv1alpha1.CUDNBgpConfig,
+	config *networkingapi.BGPCloudConfiguration,
 	group platform.PeerGroup,
 	name string,
 ) error {
@@ -153,7 +153,7 @@ func ensureSingleFRRConfiguration(
 		if n.EBGPMultiHop {
 			neighbor["ebgpMultiHop"] = true
 		}
-		if config.Spec.BGP.LivenessDetection == networkingv1alpha1.LivenessDetectionBFD {
+		if config.Spec.BGP.LivenessDetection == networkingapi.LivenessDetectionBFD {
 			neighbor["bfdProfile"] = "default"
 		}
 		neighbors = append(neighbors, neighbor)
@@ -168,7 +168,7 @@ func ensureSingleFRRConfiguration(
 		"routers": []interface{}{router},
 	}
 
-	if config.Spec.BGP.LivenessDetection == networkingv1alpha1.LivenessDetectionBFD {
+	if config.Spec.BGP.LivenessDetection == networkingapi.LivenessDetectionBFD {
 		bgpSpec["bfdProfiles"] = []interface{}{
 			map[string]interface{}{
 				"name":             "default",
@@ -267,7 +267,7 @@ func createOrUpdate(ctx context.Context, c client.Client, obj *unstructured.Unst
 	if specEqual(existing, obj) && labelsSatisfied(existing.GetLabels(), obj.GetLabels()) {
 		return nil
 	}
-	// The write replaces metadata wholesale, so carry forward anything we don't manage ourselves (e.g. a foreign label, or ovn-kubernetes' own finalizer/annotations on a CUDN).
+	// The write replaces metadata wholesale, so carry forward anything we don't manage ourselves (e.g. a foreign label, or ovn-kubernetes' own finalizer/annotations on a ClusterUDN).
 	obj.SetLabels(mergeLabels(existing.GetLabels(), obj.GetLabels()))
 	obj.SetAnnotations(mergeLabels(existing.GetAnnotations(), obj.GetAnnotations()))
 	return c.Update(ctx, obj)

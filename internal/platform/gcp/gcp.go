@@ -29,7 +29,7 @@ type Config struct {
 	ClusterID string
 }
 
-// Platform reconciles GCP Cloud Router peering and NCC spokes for the CUDN
+// Platform reconciles GCP Cloud Router peering and NCC spokes for the
 // BGP router nodes.
 type Platform struct {
 	cfg     Config

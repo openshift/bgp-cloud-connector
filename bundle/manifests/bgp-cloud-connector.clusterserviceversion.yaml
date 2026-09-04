@@ -5,8 +5,8 @@ metadata:
     alm-examples: |-
       [
         {
-          "apiVersion": "networking.openshift.io/v1alpha1",
-          "kind": "CUDNBgpConfig",
+          "apiVersion": "networking.openshift.io/v1beta1",
+          "kind": "BGPCloudConfiguration",
           "metadata": {
             "name": "cluster"
           },
@@ -28,8 +28,8 @@ metadata:
           }
         },
         {
-          "apiVersion": "networking.openshift.io/v1alpha1",
-          "kind": "CUDNBgpRouting",
+          "apiVersion": "networking.openshift.io/v1beta1",
+          "kind": "BGPRouting",
           "metadata": {
             "name": "cudn1"
           },
@@ -46,7 +46,7 @@ metadata:
     capabilities: Basic Install
     categories: Networking
     containerImage: controller:latest
-    createdAt: "2026-09-02T13:43:06Z"
+    createdAt: "2026-09-03T12:48:56Z"
     description: Automates L3 direct routing between CUDN Pod networks and external
       networks via BGP on OpenShift. Cloud platform aware — auto-discovers BGP infrastructure
       on AWS (VPC Route Server) and works on-premise with explicit configuration.
@@ -57,7 +57,7 @@ metadata:
     features.operators.openshift.io/token-auth-aws: "true"
     features.operators.openshift.io/token-auth-azure: "false"
     features.operators.openshift.io/token-auth-gcp: "false"
-    operatorframework.io/suggested-namespace: openshift-cudn-bgp-routing
+    operatorframework.io/suggested-namespace: bgp-cloud-connector
     operators.openshift.io/valid-subscription: '["OpenShift Kubernetes Engine", "OpenShift
       Container Platform", "OpenShift Platform Plus"]'
     operators.operatorframework.io/builder: operator-sdk-v1.42.2
@@ -68,20 +68,20 @@ spec:
   apiservicedefinitions: {}
   customresourcedefinitions:
     owned:
-    - description: CUDNBgpConfig is the singleton cluster-scoped BGP infrastructure
+    - description: BGPCloudConfiguration is the singleton cluster-scoped BGP infrastructure
         configuration.
-      displayName: CUDNBgp Config
-      kind: CUDNBgpConfig
-      name: cudnbgpconfigs.networking.openshift.io
-      version: v1alpha1
+      displayName: BGP Cloud Configuration
+      kind: BGPCloudConfiguration
+      name: bgpcloudconfigurations.networking.openshift.io
+      version: v1beta1
     - description: |-
-        CUDNBgpRouting declares a single network to advertise via BGP.
+        BGPRouting declares a single network to advertise via BGP.
         Users must pre-create and label namespaces; the operator manages only the
         ClusterUserDefinedNetwork and RouteAdvertisements.
-      displayName: CUDNBgp Routing
-      kind: CUDNBgpRouting
-      name: cudnbgproutings.networking.openshift.io
-      version: v1alpha1
+      displayName: BGP Routing
+      kind: BGPRouting
+      name: bgproutings.networking.openshift.io
+      version: v1beta1
   description: |
     **Important:** This is a preview release for internal testing purposes only.
     It is not supported by Red Hat and is not intended for production use by customers.
@@ -166,8 +166,8 @@ spec:
         - apiGroups:
           - networking.openshift.io
           resources:
-          - cudnbgpconfigs
-          - cudnbgproutings
+          - bgpcloudconfigurations
+          - bgproutings
           verbs:
           - create
           - delete
@@ -179,15 +179,15 @@ spec:
         - apiGroups:
           - networking.openshift.io
           resources:
-          - cudnbgpconfigs/finalizers
-          - cudnbgproutings/finalizers
+          - bgpcloudconfigurations/finalizers
+          - bgproutings/finalizers
           verbs:
           - update
         - apiGroups:
           - networking.openshift.io
           resources:
-          - cudnbgpconfigs/status
-          - cudnbgproutings/status
+          - bgpcloudconfigurations/status
+          - bgproutings/status
           verbs:
           - get
           - patch
@@ -213,18 +213,18 @@ spec:
           - subjectaccessreviews
           verbs:
           - create
-        serviceAccountName: openshift-cudn-bgp-routing-controller-manager
+        serviceAccountName: openshift-bgp-cloud-connector-controller-manager
       deployments:
       - label:
           app.kubernetes.io/managed-by: kustomize
-          app.kubernetes.io/name: openshift-cudn-bgp-routing
+          app.kubernetes.io/name: openshift-bgp-cloud-connector
           control-plane: controller-manager
-        name: openshift-cudn-bgp-routing-controller-manager
+        name: openshift-bgp-cloud-connector-controller-manager
         spec:
           replicas: 1
           selector:
             matchLabels:
-              app.kubernetes.io/name: openshift-cudn-bgp-routing
+              app.kubernetes.io/name: openshift-bgp-cloud-connector
               control-plane: controller-manager
           strategy: {}
           template:
@@ -232,7 +232,7 @@ spec:
               annotations:
                 kubectl.kubernetes.io/default-container: manager
               labels:
-                app.kubernetes.io/name: openshift-cudn-bgp-routing
+                app.kubernetes.io/name: openshift-bgp-cloud-connector
                 control-plane: controller-manager
             spec:
               containers:
@@ -288,7 +288,7 @@ spec:
                 runAsNonRoot: true
                 seccompProfile:
                   type: RuntimeDefault
-              serviceAccountName: openshift-cudn-bgp-routing-controller-manager
+              serviceAccountName: openshift-bgp-cloud-connector-controller-manager
               terminationGracePeriodSeconds: 10
               volumes:
               - emptyDir: {}
@@ -339,12 +339,12 @@ spec:
         - apiGroups:
           - ""
           resourceNames:
-          - cudn-bgp-routing-aws-credentials
+          - bgp-cloud-connector-aws-credentials
           resources:
           - secrets
           verbs:
           - get
-        serviceAccountName: openshift-cudn-bgp-routing-controller-manager
+        serviceAccountName: openshift-bgp-cloud-connector-controller-manager
     strategy: deployment
   installModes:
   - supported: true

@@ -150,7 +150,7 @@ func managedByTagKey() string {
 }
 
 func (p *Platform) peerTagValue() string {
-	return "cudn-bgp-routing-operator/" + p.clusterID
+	return "bgp-cloud-connector/" + p.clusterID
 }
 
 func (p *Platform) peerTags() []ec2types.Tag {

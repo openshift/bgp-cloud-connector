@@ -10,7 +10,7 @@
 # --wait-only skips the patch and waits for the unwind somebody else
 # started -- another shell, or a run of this that was interrupted after
 # it patched, which otherwise leaves the cluster mid-rollout with nothing
-# watching it. The refusal guards below still apply: with a CUDNBgpConfig
+# watching it. The refusal guards below still apply: with a BGPCloudConfiguration
 # in place the operator re-patches and the unwind never completes, so
 # failing on that up front beats waiting out the timeout.
 #
@@ -31,7 +31,7 @@
 # not rely on a CRD being present or absent as a signal in either
 # direction.
 #
-# It refuses while a CUDNBgpConfig or a RouteAdvertisements exists,
+# It refuses while a BGPCloudConfiguration or a RouteAdvertisements exists,
 # because the operator patches the Network CR straight back during
 # reconcile and you would be undoing this every thirty seconds without
 # seeing why.
@@ -79,8 +79,8 @@ count_if_crd_present() {
     oc get "${kind}" -o name | wc -l
 }
 
-configs="$(count_if_crd_present cudnbgpconfigs.networking.openshift.io cudnbgpconfig)"
-[[ "${configs}" == "0" ]] || die "${configs} CUDNBgpConfig still exists" \
+configs="$(count_if_crd_present bgpcloudconfigurations.networking.openshift.io bgpcloudconfiguration)"
+[[ "${configs}" == "0" ]] || die "${configs} BGPCloudConfiguration still exists" \
     "The operator re-applies the FRR patch on every reconcile, so this" \
     "would be undone immediately. Delete the CR first."
 

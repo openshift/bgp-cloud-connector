@@ -1,0 +1,52 @@
+apiVersion: networking.openshift.io/v1beta1
+kind: BGPCloudConfiguration
+metadata:
+  name: cluster
+spec:
+  platform: AWS
+  bgp:
+    localASN: 65001                  # terraform output rosa_bgp_asn
+    livenessDetection: bgp-keepalive # bfd | bgp-keepalive (default)
+
+  routerNodeSelector:
+    bgp_router: "true"
+
+  # --- AWS auto-discovery mode ---
+  # Under platform: AWS the operator discovers Route Server endpoints,
+  # neighbor IPs, and remote ASN automatically. spec.bgp.peerGroups is
+  # rejected in this mode.
+  aws:
+    region: us-east-1                # terraform output aws_region
+    routeServerIDs:                  # terraform output vpc1_route_server_ids
+      - rs-0abc123456789abcd
+
+  # --- Without cloud integration ---
+  # Change platform above to Manual, drop the spec.aws block, and replace
+  # the bgp block above with this one, which names the neighbours itself.
+  # bgp:
+  #   localASN: 65001
+  #   peerGroups:
+  #     - nodeSelector:
+  #         topology.kubernetes.io/zone: us-east-1a
+  #         bgp_router_subnet: "1"
+  #       neighbors:
+  #         - address: 10.0.1.47
+  #           remoteASN: 64512
+  #         - address: 10.0.1.183
+  #           remoteASN: 64512
+  #     - nodeSelector:
+  #         topology.kubernetes.io/zone: us-east-1b
+  #         bgp_router_subnet: "2"
+  #       neighbors:
+  #         - address: 10.0.2.91
+  #           remoteASN: 64512
+  #         - address: 10.0.2.204
+  #           remoteASN: 64512
+  #     - nodeSelector:
+  #         topology.kubernetes.io/zone: us-east-1c
+  #         bgp_router_subnet: "3"
+  #       neighbors:
+  #         - address: 10.0.3.62
+  #           remoteASN: 64512
+  #         - address: 10.0.3.178
+  #           remoteASN: 64512

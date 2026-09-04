@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Create the AWS VPC Route Server estate a CUDNBgpConfig expects to
+# Create the AWS VPC Route Server estate a BGPCloudConfiguration expects to
 # discover.
 #
 # The operator discovers route servers and endpoints; it never creates
@@ -29,7 +29,7 @@
 # redundancy the reference has.
 #
 # ASN sets the Amazon-side ASN and must differ from the localASN in your
-# CUDNBgpConfig, or the session is not eBGP.
+# BGPCloudConfiguration, or the session is not eBGP.
 #
 # Rerunning adopts what already exists rather than creating a second
 # set, so it is safe as a check on the current state.
@@ -101,7 +101,7 @@ if [[ -n "${clash}" ]]; then
     warn "Fine while the VPCs stay separate. If they are ever peered or"
     warn "joined by a Transit Gateway, routes will be silently discarded."
     warn "Set ASN=<other> to avoid it. The private range is 64512-65534,"
-    warn "and it must differ from localASN in your CUDNBgpConfig."
+    warn "and it must differ from localASN in your BGPCloudConfiguration."
 fi
 
 # One endpoint per AZ, so take the first private subnet in each.
@@ -278,7 +278,7 @@ fi
 print_endpoints
 
 cat <<EOF
-Put this in your CUDNBgpConfig:
+Put this in your BGPCloudConfiguration:
 
   spec:
     platform: AWS

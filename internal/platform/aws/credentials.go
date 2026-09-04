@@ -47,7 +47,7 @@ var CredentialsRequestGVK = schema.GroupVersionKind{
 
 const (
 	// CredentialsRequestName is the request the operator makes for itself.
-	CredentialsRequestName = "cudn-bgp-routing-aws"
+	CredentialsRequestName = "bgp-cloud-connector-aws"
 
 	// CredentialsRequestNamespace is where the cloud credential operator
 	// looks for requests. It is not where the secret lands.
@@ -55,11 +55,11 @@ const (
 
 	// CredentialsSecretName is the secret CCO writes, in the operator's
 	// own namespace.
-	CredentialsSecretName = "cudn-bgp-routing-aws-credentials"
+	CredentialsSecretName = "bgp-cloud-connector-aws-credentials"
 
 	// ServiceAccountName is the operator's ServiceAccount. On an STS
 	// cluster it is the subject the IAM role's trust policy names.
-	ServiceAccountName = "openshift-cudn-bgp-routing-controller-manager"
+	ServiceAccountName = "openshift-bgp-cloud-connector-controller-manager"
 
 	// credentialsKey is the one part of the secret worth reading. CCO
 	// writes it in every mode it operates in -- an ini file holding
@@ -73,7 +73,7 @@ const (
 	// The name is fixed rather than random because this runs on every
 	// reconcile, and a fresh temporary file each time would be a leak
 	// with a five minute period.
-	credentialsFileName = "cudn-bgp-routing-aws-credentials.ini"
+	credentialsFileName = "bgp-cloud-connector-aws-credentials.ini"
 
 	// roleARNEnvVar carries the IAM role the operator should assume on
 	// an STS cluster. OLM sets it from the Subscription, which is what

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # Remove the cluster-side objects an e2e run leaves behind: the
-# CUDNBgpRouting, the CUDNBgpConfig, and the namespace the suite made
-# for the CUDN.
+# BGPRouting, the BGPCloudConfiguration, and the namespace the suite
+# made for the ClusterUDN.
 #
 #   KUBECONFIG=<cluster>/auth/kubeconfig hack/delete-e2e-crs.sh
 #
@@ -104,11 +104,11 @@ delete_and_wait() {
 
 # Routing first: it is the narrower object and the config is what
 # describes the cloud the routing depends on.
-for name in $(names_if_crd_present cudnbgproutings.networking.openshift.io cudnbgprouting); do
+for name in $(names_if_crd_present bgproutings.networking.openshift.io bgprouting); do
     delete_and_wait "${name}"
 done
 
-for name in $(names_if_crd_present cudnbgpconfigs.networking.openshift.io cudnbgpconfig); do
+for name in $(names_if_crd_present bgpcloudconfigurations.networking.openshift.io bgpcloudconfiguration); do
     delete_and_wait "${name}"
 done
 

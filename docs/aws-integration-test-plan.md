@@ -67,8 +67,8 @@ Test the AWS platform package in isolation using a mocked EC2 client interface. 
 
 | ID | Test Case | Setup | Expected Result |
 |:---|:---|:---|:---|
-| UT-AWS-09 | Multi-AZ create | Empty peer list, nodes across 3 AZs, endpoints from discovery | Peers created only on correct AZ endpoints, correct ASN, tagged `managed-by: cudn-bgp-routing-operator/<infrastructureName>` |
-| UT-AWS-10 | Adopt pre-existing untagged peer | Untagged peer exists with same IP as a desired node | No create call; peer adopted via CreateTags with `managed-by: cudn-bgp-routing-operator/<infrastructureName>` |
+| UT-AWS-09 | Multi-AZ create | Empty peer list, nodes across 3 AZs, endpoints from discovery | Peers created only on correct AZ endpoints, correct ASN, tagged `managed-by: bgp-cloud-connector/<infrastructureName>` |
+| UT-AWS-10 | Adopt pre-existing untagged peer | Untagged peer exists with same IP as a desired node | No create call; peer adopted via CreateTags with `managed-by: bgp-cloud-connector/<infrastructureName>` |
 | UT-AWS-11 | Delete stale peer | 1 managed peer, no desired nodes | Peer deleted, no create calls |
 | UT-AWS-12 | BFD liveness detection | livenessDetection=bfd | CreateRouteServerPeer includes BFD peer liveness mode |
 | UT-AWS-13 | Cleanup deletes all managed peers | 6 managed peers across 3 AZs | All 6 deleted |

@@ -1,5 +1,5 @@
 ## Append samples of your project ##
 resources:
-- networking_v1alpha1_cudnbgpconfig.yaml
-- networking_v1alpha1_cudnbgprouting.yaml
+- networking_v1beta1_bgpcloudconfiguration.yaml
+- networking_v1beta1_bgprouting.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

@@ -26,26 +26,26 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	networkingv1alpha1 "github.com/openshift/bgp-cloud-connector/api/v1alpha1"
+	networkingapi "github.com/openshift/bgp-cloud-connector/api/v1beta1"
 )
 
 // configStatusEqual reports whether two Config status values are semantically equal.
-func configStatusEqual(a, b networkingv1alpha1.CUDNBgpConfigStatus) bool {
+func configStatusEqual(a, b networkingapi.BGPCloudConfigurationStatus) bool {
 	return apiequality.Semantic.DeepEqual(a, b)
 }
 
 // routingStatusEqual reports whether two Routing status values are semantically equal.
-func routingStatusEqual(a, b networkingv1alpha1.CUDNBgpRoutingStatus) bool {
+func routingStatusEqual(a, b networkingapi.BGPRoutingStatus) bool {
 	return apiequality.Semantic.DeepEqual(a, b)
 }
 
 // patchConfigStatus updates status when desired differs from the etcd baseline.
 // baselineStatus must be a DeepCopy of status as read from the API server at reconcile start.
-func (r *CUDNBgpConfigReconciler) patchConfigStatus(
+func (r *BGPCloudConfigurationReconciler) patchConfigStatus(
 	ctx context.Context,
-	config *networkingv1alpha1.CUDNBgpConfig,
-	baselineStatus networkingv1alpha1.CUDNBgpConfigStatus,
-	mutate func(*networkingv1alpha1.CUDNBgpConfig),
+	config *networkingapi.BGPCloudConfiguration,
+	baselineStatus networkingapi.BGPCloudConfigurationStatus,
+	mutate func(*networkingapi.BGPCloudConfiguration),
 ) error {
 	desired := config.DeepCopy()
 	mutate(desired)
@@ -62,11 +62,11 @@ func (r *CUDNBgpConfigReconciler) patchConfigStatus(
 
 // patchRoutingStatus updates status when desired differs from the etcd baseline.
 // baselineStatus must be a DeepCopy of status as read from the API server at reconcile start.
-func (r *CUDNBgpRoutingReconciler) patchRoutingStatus(
+func (r *BGPRoutingReconciler) patchRoutingStatus(
 	ctx context.Context,
-	routing *networkingv1alpha1.CUDNBgpRouting,
-	baselineStatus networkingv1alpha1.CUDNBgpRoutingStatus,
-	mutate func(*networkingv1alpha1.CUDNBgpRouting),
+	routing *networkingapi.BGPRouting,
+	baselineStatus networkingapi.BGPRoutingStatus,
+	mutate func(*networkingapi.BGPRouting),
 ) error {
 	desired := routing.DeepCopy()
 	mutate(desired)
@@ -82,11 +82,11 @@ func (r *CUDNBgpRoutingReconciler) patchRoutingStatus(
 }
 
 // reportDeletionBlocked sets DeletionBlocked condition when routing CRs block config deletion.
-func (r *CUDNBgpConfigReconciler) reportDeletionBlocked(
+func (r *BGPCloudConfigurationReconciler) reportDeletionBlocked(
 	ctx context.Context,
-	config *networkingv1alpha1.CUDNBgpConfig,
-	baselineStatus networkingv1alpha1.CUDNBgpConfigStatus,
-	routings []networkingv1alpha1.CUDNBgpRouting,
+	config *networkingapi.BGPCloudConfiguration,
+	baselineStatus networkingapi.BGPCloudConfigurationStatus,
+	routings []networkingapi.BGPRouting,
 ) error {
 	names := make([]string, len(routings))
 	for i := range routings {
@@ -94,10 +94,10 @@ func (r *CUDNBgpConfigReconciler) reportDeletionBlocked(
 	}
 	sort.Strings(names)
 
-	condMessage := fmt.Sprintf("%d CUDNBgpRouting CR(s) must be deleted first: %s",
+	condMessage := fmt.Sprintf("%d BGPRouting CR(s) must be deleted first: %s",
 		len(names), strings.Join(names, ", "))
 
-	return r.patchConfigStatus(ctx, config, baselineStatus, func(c *networkingv1alpha1.CUDNBgpConfig) {
+	return r.patchConfigStatus(ctx, config, baselineStatus, func(c *networkingapi.BGPCloudConfiguration) {
 		meta.SetStatusCondition(&c.Status.Conditions, metav1.Condition{
 			Type:               ConditionDeletionBlocked,
 			Status:             metav1.ConditionTrue,

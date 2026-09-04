@@ -4,7 +4,7 @@ kind: ServiceMonitor
 metadata:
   labels:
     control-plane: controller-manager
-    app.kubernetes.io/name: openshift-cudn-bgp-routing
+    app.kubernetes.io/name: openshift-bgp-cloud-connector
     app.kubernetes.io/managed-by: kustomize
   name: controller-manager-metrics-monitor
   namespace: system
@@ -21,11 +21,11 @@ spec:
         # The serving certificate is minted by the OpenShift service-ca operator;
         # verify it against the service-ca bundle that platform Prometheus mounts.
         caFile: /etc/prometheus/configmaps/serving-certs-ca-bundle/service-ca.crt
-        serverName: openshift-cudn-bgp-routing-controller-manager-metrics-service.openshift-cudn-bgp-routing.svc
+        serverName: openshift-bgp-cloud-connector-controller-manager-metrics-service.openshift-bgp-cloud-connector.svc
   namespaceSelector:
     matchNames:
-      - openshift-cudn-bgp-routing
+      - openshift-bgp-cloud-connector
   selector:
     matchLabels:
       control-plane: controller-manager
-      app.kubernetes.io/name: openshift-cudn-bgp-routing
+      app.kubernetes.io/name: openshift-bgp-cloud-connector

@@ -3,7 +3,7 @@ kind: Namespace
 metadata:
   labels:
     control-plane: controller-manager
-    app.kubernetes.io/name: openshift-cudn-bgp-routing
+    app.kubernetes.io/name: openshift-bgp-cloud-connector
     app.kubernetes.io/managed-by: kustomize
     # Let the OpenShift platform Prometheus discover ServiceMonitors here.
     openshift.io/cluster-monitoring: "true"
@@ -16,13 +16,13 @@ metadata:
   namespace: system
   labels:
     control-plane: controller-manager
-    app.kubernetes.io/name: openshift-cudn-bgp-routing
+    app.kubernetes.io/name: openshift-bgp-cloud-connector
     app.kubernetes.io/managed-by: kustomize
 spec:
   selector:
     matchLabels:
       control-plane: controller-manager
-      app.kubernetes.io/name: openshift-cudn-bgp-routing
+      app.kubernetes.io/name: openshift-bgp-cloud-connector
   replicas: 1
   template:
     metadata:
@@ -30,7 +30,7 @@ spec:
         kubectl.kubernetes.io/default-container: manager
       labels:
         control-plane: controller-manager
-        app.kubernetes.io/name: openshift-cudn-bgp-routing
+        app.kubernetes.io/name: openshift-bgp-cloud-connector
     spec:
       # TODO(user): Uncomment the following code to configure the nodeAffinity expression
       # according to the platforms which are supported by your solution.

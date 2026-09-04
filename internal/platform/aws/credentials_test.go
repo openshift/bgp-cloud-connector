@@ -40,7 +40,7 @@ import (
 	"github.com/openshift/bgp-cloud-connector/internal/platform"
 )
 
-const testNamespace = "openshift-cudn-bgp-routing"
+const testNamespace = "openshift-bgp-cloud-connector"
 
 // The two shapes the cloud credential operator writes into the
 // credentials key. Which one you get says which mode the cluster is in,
@@ -53,7 +53,7 @@ aws_secret_access_key = mintedsecret`
 
 	stsINI = `[default]
 sts_regional_endpoints = regional
-role_arn = arn:aws:iam::123456789012:role/cudn-bgp-routing
+role_arn = arn:aws:iam::123456789012:role/bgp-cloud-connector
 web_identity_token_file = /var/run/secrets/openshift/serviceaccount/token`
 )
 
@@ -227,7 +227,7 @@ func TestResolveCredentials_RequestOmitsSTSFieldsWithoutRoleARN(t *testing.T) {
 func TestResolveCredentials_RequestCarriesSTSFieldsWithRoleARN(t *testing.T) {
 	isolateTempDir(t)
 	withAmbient(t, nil)
-	const roleARN = "arn:aws:iam::123456789012:role/cudn-bgp-routing"
+	const roleARN = "arn:aws:iam::123456789012:role/bgp-cloud-connector"
 	t.Setenv(roleARNEnvVar, roleARN)
 
 	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).Build()
@@ -253,7 +253,7 @@ func TestResolveCredentials_ExistingRequestGainsRoleARN(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).Build()
 	resolvePending(t, c)
 
-	const roleARN = "arn:aws:iam::123456789012:role/cudn-bgp-routing"
+	const roleARN = "arn:aws:iam::123456789012:role/bgp-cloud-connector"
 	t.Setenv(roleARNEnvVar, roleARN)
 	resolvePending(t, c)
 
@@ -318,7 +318,7 @@ func TestResolveCredentials_STSSecret(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the SDK could not parse the file: %v", err)
 	}
-	if shared.RoleARN != "arn:aws:iam::123456789012:role/cudn-bgp-routing" {
+	if shared.RoleARN != "arn:aws:iam::123456789012:role/bgp-cloud-connector" {
 		t.Errorf("RoleARN is %q", shared.RoleARN)
 	}
 	if shared.WebIdentityTokenFile != cloudTokenPath {
@@ -386,7 +386,7 @@ func TestResolveCredentials_PendingWithoutRoleARNNamesIt(t *testing.T) {
 func TestResolveCredentials_PendingWithRoleARNIsAnOrdinaryWait(t *testing.T) {
 	isolateTempDir(t)
 	withAmbient(t, nil)
-	t.Setenv(roleARNEnvVar, "arn:aws:iam::123456789012:role/cudn-bgp-routing")
+	t.Setenv(roleARNEnvVar, "arn:aws:iam::123456789012:role/bgp-cloud-connector")
 
 	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).Build()
 

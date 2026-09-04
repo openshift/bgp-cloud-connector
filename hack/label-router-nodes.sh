@@ -5,7 +5,7 @@
 #   hack/label-router-nodes.sh
 #   hack/label-router-nodes.sh --remove
 #
-# The label has to match spec.routerNodeSelector in the CUDNBgpConfig
+# The label has to match spec.routerNodeSelector in the BGPCloudConfiguration
 # being used, or the operator selects nothing, builds no peers, and
 # reports a plan with no groups in it -- which looks like a discovery
 # failure rather than a cluster nobody labelled. hack/aws/write-e2e-profile.sh

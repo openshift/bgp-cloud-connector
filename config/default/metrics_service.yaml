@@ -5,7 +5,7 @@ metadata:
     service.beta.openshift.io/serving-cert-secret-name: bgp-cloud-connector-metrics-tls
   labels:
     control-plane: controller-manager
-    app.kubernetes.io/name: openshift-cudn-bgp-routing
+    app.kubernetes.io/name: openshift-bgp-cloud-connector
     app.kubernetes.io/managed-by: kustomize
   name: controller-manager-metrics-service
   namespace: system
@@ -17,4 +17,4 @@ spec:
     targetPort: 8443
   selector:
     control-plane: controller-manager
-    app.kubernetes.io/name: openshift-cudn-bgp-routing
+    app.kubernetes.io/name: openshift-bgp-cloud-connector

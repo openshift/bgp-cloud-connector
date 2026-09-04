@@ -1,0 +1,22 @@
+# Pre-create a namespace with required labels before applying this CR
+# (the primary-udn label must be set at creation time — OCP admission policy
+# prevents adding it after the namespace exists):
+#
+#   cat <<EOF | oc apply -f -
+#   apiVersion: v1
+#   kind: Namespace
+#   metadata:
+#     name: app1
+#     labels:
+#       k8s.ovn.org/primary-user-defined-network: ""
+#       cluster-udn: prod
+#   EOF
+apiVersion: networking.openshift.io/v1beta1
+kind: BGPRouting
+metadata:
+  name: cudn1
+spec:
+  network:
+    name: prod                       # CUDN selects namespaces with label cluster-udn=prod
+    subnets:
+      - 10.100.0.0/16

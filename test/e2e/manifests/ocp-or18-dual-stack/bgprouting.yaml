@@ -1,0 +1,10 @@
+apiVersion: networking.openshift.io/v1beta1
+kind: BGPRouting
+metadata:
+  name: cudn1
+spec:
+  network:
+    name: prod
+    subnets:
+      - 10.100.0.0/16
+      - 2001:db8::/64

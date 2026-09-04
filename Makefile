@@ -334,6 +334,7 @@ endif
 
 .PHONY: bundle
 bundle: manifests operator-sdk ## Generate bundle manifests and metadata, then validate generated files.
+	rm -rf bundle/
 	$(OPERATOR_SDK) generate kustomize manifests -q
 	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
 	$(KUSTOMIZE) build config/manifests | $(OPERATOR_SDK) generate bundle $(BUNDLE_GEN_FLAGS)
@@ -347,7 +348,7 @@ bundle-build: bundle ## Build the bundle image.
 bundle-push: ## Push the bundle image.
 	$(CONTAINER_TOOL) push $(BUNDLE_IMG)
 
-BUNDLE_NAMESPACE ?= openshift-cudn-bgp-routing
+BUNDLE_NAMESPACE ?= openshift-bgp-cloud-connector
 BUNDLE_RUN_FLAGS ?= --namespace=$(BUNDLE_NAMESPACE) --install-mode=OwnNamespace
 BUNDLE_CLEANUP_FLAGS ?= --namespace=$(BUNDLE_NAMESPACE)
 

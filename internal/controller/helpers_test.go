@@ -29,14 +29,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	networkingv1alpha1 "github.com/openshift/bgp-cloud-connector/api/v1alpha1"
+	networkingapi "github.com/openshift/bgp-cloud-connector/api/v1beta1"
 	"github.com/openshift/bgp-cloud-connector/internal/platform"
 )
 
 func testScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(s)
-	_ = networkingv1alpha1.AddToScheme(s)
+	_ = networkingapi.AddToScheme(s)
 	return s
 }
 
@@ -46,7 +46,7 @@ func TestValidateNamespaceLabels_Found(t *testing.T) {
 			Name: "app1",
 			Labels: map[string]string{
 				LabelPrimaryUDN: "",
-				LabelCUDN:       "prod",
+				LabelClusterUDN: "prod",
 			},
 		},
 	}
@@ -75,16 +75,16 @@ func TestEnsureFRRConfigurations_BFDProfile(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(ns).Build()
 	ctx := context.Background()
 
-	config := &networkingv1alpha1.CUDNBgpConfig{
-		Spec: networkingv1alpha1.CUDNBgpConfigSpec{
-			Platform: networkingv1alpha1.PlatformManual,
-			BGP: networkingv1alpha1.BGPConfig{
+	config := &networkingapi.BGPCloudConfiguration{
+		Spec: networkingapi.BGPCloudConfigurationSpec{
+			Platform: networkingapi.PlatformManual,
+			BGP: networkingapi.BGPConfig{
 				LocalASN:          65001,
-				LivenessDetection: networkingv1alpha1.LivenessDetectionBFD,
-				PeerGroups: []networkingv1alpha1.PeerGroup{
+				LivenessDetection: networkingapi.LivenessDetectionBFD,
+				PeerGroups: []networkingapi.PeerGroup{
 					{
 						NodeSelector: map[string]string{"bgp_router_subnet": "1"},
-						Neighbors: []networkingv1alpha1.BGPNeighbor{
+						Neighbors: []networkingapi.BGPNeighbor{
 							{Address: "10.0.1.47", RemoteASN: 64512},
 						},
 					},
@@ -100,7 +100,7 @@ func TestEnsureFRRConfigurations_BFDProfile(t *testing.T) {
 
 	obj := &unstructured.Unstructured{}
 	obj.SetGroupVersionKind(FRRConfigurationGVK)
-	if err := c.Get(ctx, types.NamespacedName{Name: "cudn-bgp-1", Namespace: FRRNamespace}, obj); err != nil {
+	if err := c.Get(ctx, types.NamespacedName{Name: "bgp-cc-1", Namespace: FRRNamespace}, obj); err != nil {
 		t.Fatalf("FRRConfiguration not created: %v", err)
 	}
 
@@ -127,7 +127,7 @@ func TestEnsureFRRConfigurations_PrunesStale(t *testing.T) {
 			"apiVersion": "frrk8s.metallb.io/v1beta1",
 			"kind":       "FRRConfiguration",
 			"metadata": map[string]interface{}{
-				"name":      "cudn-bgp-3",
+				"name":      "bgp-cc-3",
 				"namespace": FRRNamespace,
 				"labels":    map[string]interface{}{LabelManagedBy: LabelManagedByVal},
 			},
@@ -138,16 +138,16 @@ func TestEnsureFRRConfigurations_PrunesStale(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(ns, stale).Build()
 	ctx := context.Background()
 
-	config := &networkingv1alpha1.CUDNBgpConfig{
-		Spec: networkingv1alpha1.CUDNBgpConfigSpec{
-			Platform: networkingv1alpha1.PlatformManual,
-			BGP: networkingv1alpha1.BGPConfig{
+	config := &networkingapi.BGPCloudConfiguration{
+		Spec: networkingapi.BGPCloudConfigurationSpec{
+			Platform: networkingapi.PlatformManual,
+			BGP: networkingapi.BGPConfig{
 				LocalASN:          65001,
-				LivenessDetection: networkingv1alpha1.LivenessDetectionBGPKeepalive,
-				PeerGroups: []networkingv1alpha1.PeerGroup{
+				LivenessDetection: networkingapi.LivenessDetectionBGPKeepalive,
+				PeerGroups: []networkingapi.PeerGroup{
 					{
 						NodeSelector: map[string]string{"bgp_router_subnet": "1"},
-						Neighbors:    []networkingv1alpha1.BGPNeighbor{{Address: "10.0.1.47", RemoteASN: 64512}},
+						Neighbors:    []networkingapi.BGPNeighbor{{Address: "10.0.1.47", RemoteASN: 64512}},
 					},
 				},
 			},
@@ -161,15 +161,15 @@ func TestEnsureFRRConfigurations_PrunesStale(t *testing.T) {
 
 	obj := &unstructured.Unstructured{}
 	obj.SetGroupVersionKind(FRRConfigurationGVK)
-	if err := c.Get(ctx, types.NamespacedName{Name: "cudn-bgp-1", Namespace: FRRNamespace}, obj); err != nil {
-		t.Error("cudn-bgp-1 should exist")
+	if err := c.Get(ctx, types.NamespacedName{Name: "bgp-cc-1", Namespace: FRRNamespace}, obj); err != nil {
+		t.Error("bgp-cc-1 should exist")
 	}
 
 	staleObj := &unstructured.Unstructured{}
 	staleObj.SetGroupVersionKind(FRRConfigurationGVK)
-	err := c.Get(ctx, types.NamespacedName{Name: "cudn-bgp-3", Namespace: FRRNamespace}, staleObj)
+	err := c.Get(ctx, types.NamespacedName{Name: "bgp-cc-3", Namespace: FRRNamespace}, staleObj)
 	if err == nil {
-		t.Error("cudn-bgp-3 should have been pruned")
+		t.Error("bgp-cc-3 should have been pruned")
 	}
 }
 
@@ -196,16 +196,16 @@ func TestEnsureFRRConfigurations_KeepsUnmanagedResources(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(ns, userOwned).Build()
 	ctx := context.Background()
 
-	config := &networkingv1alpha1.CUDNBgpConfig{
-		Spec: networkingv1alpha1.CUDNBgpConfigSpec{
-			Platform: networkingv1alpha1.PlatformManual,
-			BGP: networkingv1alpha1.BGPConfig{
+	config := &networkingapi.BGPCloudConfiguration{
+		Spec: networkingapi.BGPCloudConfigurationSpec{
+			Platform: networkingapi.PlatformManual,
+			BGP: networkingapi.BGPConfig{
 				LocalASN:          65001,
-				LivenessDetection: networkingv1alpha1.LivenessDetectionBGPKeepalive,
-				PeerGroups: []networkingv1alpha1.PeerGroup{
+				LivenessDetection: networkingapi.LivenessDetectionBGPKeepalive,
+				PeerGroups: []networkingapi.PeerGroup{
 					{
 						NodeSelector: map[string]string{"bgp_router_subnet": "1"},
-						Neighbors:    []networkingv1alpha1.BGPNeighbor{{Address: "10.0.1.47", RemoteASN: 64512}},
+						Neighbors:    []networkingapi.BGPNeighbor{{Address: "10.0.1.47", RemoteASN: 64512}},
 					},
 				},
 			},
@@ -242,11 +242,11 @@ func TestEnsureFRRConfigurationsFromGroups_SingleRegionalGroup(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(ns).Build()
 	ctx := context.Background()
 
-	routerNodes := map[string]string{"networking.openshift.io/cudn-bgp-router": ""}
-	config := &networkingv1alpha1.CUDNBgpConfig{
-		Spec: networkingv1alpha1.CUDNBgpConfigSpec{
-			Platform:           networkingv1alpha1.PlatformAWS,
-			BGP:                networkingv1alpha1.BGPConfig{LocalASN: 65001},
+	routerNodes := map[string]string{"networking.openshift.io/bgp-cc-router": ""}
+	config := &networkingapi.BGPCloudConfiguration{
+		Spec: networkingapi.BGPCloudConfigurationSpec{
+			Platform:           networkingapi.PlatformAWS,
+			BGP:                networkingapi.BGPConfig{LocalASN: 65001},
 			RouterNodeSelector: routerNodes,
 		},
 	}
@@ -278,8 +278,8 @@ func TestEnsureFRRConfigurationsFromGroups_SingleRegionalGroup(t *testing.T) {
 		t.Fatalf("got %d FRRConfigurations, want 1", len(list.Items))
 	}
 	obj := list.Items[0]
-	if obj.GetName() != "cudn-bgp-1" {
-		t.Errorf("name = %q, want cudn-bgp-1", obj.GetName())
+	if obj.GetName() != "bgp-cc-1" {
+		t.Errorf("name = %q, want bgp-cc-1", obj.GetName())
 	}
 
 	// The group narrows nothing, so the selector is exactly the router node
@@ -334,10 +334,10 @@ func TestEnsureFRRConfigurationsFromGroups_RawFRRConfig(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(ns).Build()
 	ctx := context.Background()
 
-	config := &networkingv1alpha1.CUDNBgpConfig{
-		Spec: networkingv1alpha1.CUDNBgpConfigSpec{
-			Platform:           networkingv1alpha1.PlatformAWS,
-			BGP:                networkingv1alpha1.BGPConfig{LocalASN: 65001},
+	config := &networkingapi.BGPCloudConfiguration{
+		Spec: networkingapi.BGPCloudConfigurationSpec{
+			Platform:           networkingapi.PlatformAWS,
+			BGP:                networkingapi.BGPConfig{LocalASN: 65001},
 			RouterNodeSelector: map[string]string{"bgp_router": "true"},
 		},
 	}
@@ -361,8 +361,8 @@ func TestEnsureFRRConfigurationsFromGroups_RawFRRConfig(t *testing.T) {
 
 	withRaw := &unstructured.Unstructured{}
 	withRaw.SetGroupVersionKind(FRRConfigurationGVK)
-	if err := c.Get(ctx, types.NamespacedName{Name: "cudn-bgp-1", Namespace: FRRNamespace}, withRaw); err != nil {
-		t.Fatalf("cudn-bgp-1 not created: %v", err)
+	if err := c.Get(ctx, types.NamespacedName{Name: "bgp-cc-1", Namespace: FRRNamespace}, withRaw); err != nil {
+		t.Fatalf("bgp-cc-1 not created: %v", err)
 	}
 	got, found, err := unstructured.NestedString(withRaw.Object, "spec", "raw", "rawConfig")
 	if err != nil || !found {
@@ -381,8 +381,8 @@ func TestEnsureFRRConfigurationsFromGroups_RawFRRConfig(t *testing.T) {
 
 	withoutRaw := &unstructured.Unstructured{}
 	withoutRaw.SetGroupVersionKind(FRRConfigurationGVK)
-	if err := c.Get(ctx, types.NamespacedName{Name: "cudn-bgp-2", Namespace: FRRNamespace}, withoutRaw); err != nil {
-		t.Fatalf("cudn-bgp-2 not created: %v", err)
+	if err := c.Get(ctx, types.NamespacedName{Name: "bgp-cc-2", Namespace: FRRNamespace}, withoutRaw); err != nil {
+		t.Fatalf("bgp-cc-2 not created: %v", err)
 	}
 	if _, found, _ := unstructured.NestedMap(withoutRaw.Object, "spec", "raw"); found {
 		t.Error("spec.raw should be absent when the group asks for no raw config")
@@ -404,10 +404,10 @@ func TestEnsureFRRConfigurationsFromGroups_EBGPMultiHop(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(ns).Build()
 	ctx := context.Background()
 
-	config := &networkingv1alpha1.CUDNBgpConfig{
-		Spec: networkingv1alpha1.CUDNBgpConfigSpec{
-			Platform:           networkingv1alpha1.PlatformAWS,
-			BGP:                networkingv1alpha1.BGPConfig{LocalASN: 65001},
+	config := &networkingapi.BGPCloudConfiguration{
+		Spec: networkingapi.BGPCloudConfigurationSpec{
+			Platform:           networkingapi.PlatformAWS,
+			BGP:                networkingapi.BGPConfig{LocalASN: 65001},
 			RouterNodeSelector: map[string]string{"bgp_router": "true"},
 		},
 	}
@@ -426,8 +426,8 @@ func TestEnsureFRRConfigurationsFromGroups_EBGPMultiHop(t *testing.T) {
 
 	obj := &unstructured.Unstructured{}
 	obj.SetGroupVersionKind(FRRConfigurationGVK)
-	if err := c.Get(ctx, types.NamespacedName{Name: "cudn-bgp-1", Namespace: FRRNamespace}, obj); err != nil {
-		t.Fatalf("cudn-bgp-1 not created: %v", err)
+	if err := c.Get(ctx, types.NamespacedName{Name: "bgp-cc-1", Namespace: FRRNamespace}, obj); err != nil {
+		t.Fatalf("bgp-cc-1 not created: %v", err)
 	}
 	routers, _, _ := unstructured.NestedSlice(obj.Object, "spec", "bgp", "routers")
 	neighbors, _, _ := unstructured.NestedSlice(routers[0].(map[string]interface{}), "neighbors")

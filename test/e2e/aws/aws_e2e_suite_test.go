@@ -41,15 +41,15 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	networkingv1alpha1 "github.com/openshift/bgp-cloud-connector/api/v1alpha1"
+	networkingapi "github.com/openshift/bgp-cloud-connector/api/v1beta1"
 )
 
 var (
 	k8sClient client.Client
 	ec2Client *ec2.Client
 
-	bgpConfig  *networkingv1alpha1.CUDNBgpConfig
-	bgpRouting *networkingv1alpha1.CUDNBgpRouting
+	bgpConfig  *networkingapi.BGPCloudConfiguration
+	bgpRouting *networkingapi.BGPRouting
 
 	clusterID     string
 	managedByTag  string
@@ -76,19 +76,19 @@ var _ = BeforeSuite(func() {
 		manifestDir = filepath.Join("..", "..", "..", "test", "e2e", "manifests", profile)
 	}
 
-	By("loading CUDNBgpConfig manifest from " + manifestDir)
-	bgpConfig = &networkingv1alpha1.CUDNBgpConfig{}
-	loadManifest(filepath.Join(manifestDir, "cudnbgpconfig.yaml"), bgpConfig)
-	Expect(bgpConfig.Spec.AWS).NotTo(BeNil(), "profile CUDNBgpConfig must have spec.aws")
+	By("loading BGPCloudConfiguration manifest from " + manifestDir)
+	bgpConfig = &networkingapi.BGPCloudConfiguration{}
+	loadManifest(filepath.Join(manifestDir, "bgpcloudconfiguration.yaml"), bgpConfig)
+	Expect(bgpConfig.Spec.AWS).NotTo(BeNil(), "profile BGPCloudConfiguration must have spec.aws")
 
-	By("loading CUDNBgpRouting manifest from " + manifestDir)
-	bgpRouting = &networkingv1alpha1.CUDNBgpRouting{}
-	loadManifest(filepath.Join(manifestDir, "cudnbgprouting.yaml"), bgpRouting)
+	By("loading BGPRouting manifest from " + manifestDir)
+	bgpRouting = &networkingapi.BGPRouting{}
+	loadManifest(filepath.Join(manifestDir, "bgprouting.yaml"), bgpRouting)
 
 	By("building kubernetes client")
 	scheme := runtime.NewScheme()
 	Expect(clientgoscheme.AddToScheme(scheme)).To(Succeed())
-	Expect(networkingv1alpha1.AddToScheme(scheme)).To(Succeed())
+	Expect(networkingapi.AddToScheme(scheme)).To(Succeed())
 	addUnstructuredTypes(scheme)
 
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()
@@ -116,7 +116,7 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	Expect(found).To(BeTrue())
 	clusterID = name
-	managedByTag = "cudn-bgp-routing-operator/" + clusterID
+	managedByTag = "bgp-cloud-connector/" + clusterID
 
 	By("discovering route server endpoints from AWS")
 	endpointsByAZ = make(map[string][]string)

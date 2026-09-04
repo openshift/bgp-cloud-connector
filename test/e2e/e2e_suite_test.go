@@ -36,23 +36,23 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	networkingv1alpha1 "github.com/openshift/bgp-cloud-connector/api/v1alpha1"
+	networkingapi "github.com/openshift/bgp-cloud-connector/api/v1beta1"
 )
 
 const (
 	frrNamespace        = "openshift-frr-k8s"
-	frrConfigNamePrefix = "cudn-bgp-"
+	frrConfigNamePrefix = "bgp-cc-"
 	labelManagedBy      = "app.kubernetes.io/managed-by"
-	labelManagedByVal   = "cudn-bgp-routing-operator"
+	labelManagedByVal   = "bgp-cloud-connector"
 	labelPrimaryUDN     = "k8s.ovn.org/primary-user-defined-network"
-	labelCUDN           = "cluster-udn"
-	raName              = "cudn-bgp-route-advertisements"
+	labelClusterUDN     = "cluster-udn"
+	raName              = "bgp-cc-route-advertisements"
 )
 
 var (
 	k8sClient  client.Client
-	bgpConfig  *networkingv1alpha1.CUDNBgpConfig
-	bgpRouting *networkingv1alpha1.CUDNBgpRouting
+	bgpConfig  *networkingapi.BGPCloudConfiguration
+	bgpRouting *networkingapi.BGPRouting
 )
 
 var (
@@ -62,7 +62,7 @@ var (
 	frrConfigurationGVK = schema.GroupVersionKind{
 		Group: "frrk8s.metallb.io", Version: "v1beta1", Kind: "FRRConfiguration",
 	}
-	cudnGVK = schema.GroupVersionKind{
+	clusterUDNGVK = schema.GroupVersionKind{
 		Group: "k8s.ovn.org", Version: "v1", Kind: "ClusterUserDefinedNetwork",
 	}
 	raGVK = schema.GroupVersionKind{
@@ -89,21 +89,21 @@ var _ = BeforeSuite(func() {
 		manifestDir = filepath.Join("..", "..", "test", "e2e", "manifests", profile)
 	}
 
-	By("loading CUDNBgpConfig manifest from " + manifestDir)
-	bgpConfig = &networkingv1alpha1.CUDNBgpConfig{}
-	loadManifest(filepath.Join(manifestDir, "cudnbgpconfig.yaml"), bgpConfig)
+	By("loading BGPCloudConfiguration manifest from " + manifestDir)
+	bgpConfig = &networkingapi.BGPCloudConfiguration{}
+	loadManifest(filepath.Join(manifestDir, "bgpcloudconfiguration.yaml"), bgpConfig)
 	Expect(bgpConfig.Spec.AWS).To(BeNil(), "shared E2E profile must not have spec.aws")
 	Expect(bgpConfig.Spec.BGP.PeerGroups).NotTo(BeEmpty(),
 		"shared E2E profile must have spec.bgp.peerGroups")
 
-	By("loading CUDNBgpRouting manifest from " + manifestDir)
-	bgpRouting = &networkingv1alpha1.CUDNBgpRouting{}
-	loadManifest(filepath.Join(manifestDir, "cudnbgprouting.yaml"), bgpRouting)
+	By("loading BGPRouting manifest from " + manifestDir)
+	bgpRouting = &networkingapi.BGPRouting{}
+	loadManifest(filepath.Join(manifestDir, "bgprouting.yaml"), bgpRouting)
 
 	By("building kubernetes client")
 	scheme := runtime.NewScheme()
 	Expect(clientgoscheme.AddToScheme(scheme)).To(Succeed())
-	Expect(networkingv1alpha1.AddToScheme(scheme)).To(Succeed())
+	Expect(networkingapi.AddToScheme(scheme)).To(Succeed())
 	addUnstructuredTypes(scheme)
 
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()
@@ -116,19 +116,19 @@ var _ = BeforeSuite(func() {
 
 	By("checking for pre-existing state that would conflict with tests")
 	ctx := context.Background()
-	config := &networkingv1alpha1.CUDNBgpConfig{}
+	config := &networkingapi.BGPCloudConfiguration{}
 	Expect(client.IgnoreNotFound(
 		k8sClient.Get(ctx, types.NamespacedName{Name: bgpConfig.Name}, config),
 	)).To(Succeed())
 	Expect(config.Name).To(BeEmpty(),
-		"CUDNBgpConfig %q already exists — delete it before running E2E tests", bgpConfig.Name)
+		"BGPCloudConfiguration %q already exists — delete it before running E2E tests", bgpConfig.Name)
 
-	routing := &networkingv1alpha1.CUDNBgpRouting{}
+	routing := &networkingapi.BGPRouting{}
 	Expect(client.IgnoreNotFound(
 		k8sClient.Get(ctx, types.NamespacedName{Name: bgpRouting.Name}, routing),
 	)).To(Succeed())
 	Expect(routing.Name).To(BeEmpty(),
-		"CUDNBgpRouting %q already exists — delete it before running E2E tests", bgpRouting.Name)
+		"BGPRouting %q already exists — delete it before running E2E tests", bgpRouting.Name)
 
 	ns := &corev1.Namespace{}
 	Expect(client.IgnoreNotFound(
@@ -149,7 +149,7 @@ func loadManifest(path string, obj runtime.Object) {
 func addUnstructuredTypes(s *runtime.Scheme) {
 	for _, gvk := range []schema.GroupVersionKind{
 		frrConfigurationGVK,
-		cudnGVK,
+		clusterUDNGVK,
 		raGVK,
 		bgpSessionStateGVK,
 		frrNodeStateGVK,

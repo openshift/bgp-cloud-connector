@@ -16,16 +16,16 @@ resources:
   controller: true
   domain: openshift.io
   group: networking
-  kind: CUDNBgpConfig
-  path: github.com/openshift/bgp-cloud-connector/api/v1alpha1
-  version: v1alpha1
+  kind: BGPCloudConfiguration
+  path: github.com/openshift/bgp-cloud-connector/api/v1beta1
+  version: v1beta1
 - api:
     crdVersion: v1
     namespaced: false
   controller: true
   domain: openshift.io
   group: networking
-  kind: CUDNBgpRouting
-  path: github.com/openshift/bgp-cloud-connector/api/v1alpha1
-  version: v1alpha1
+  kind: BGPRouting
+  path: github.com/openshift/bgp-cloud-connector/api/v1beta1
+  version: v1beta1
 version: "3"

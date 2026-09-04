@@ -30,7 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	networkingv1alpha1 "github.com/openshift/bgp-cloud-connector/api/v1alpha1"
+	networkingapi "github.com/openshift/bgp-cloud-connector/api/v1beta1"
 )
 
 const (
@@ -45,16 +45,16 @@ var _ = Describe("E2E", Ordered, func() {
 	// -----------------------------------------------------------
 	Context("E2E-01: Full stack reconcile", func() {
 		It("should apply CRs and reach Ready with established BGP sessions", func(ctx context.Context) {
-			By("applying CUDNBgpConfig CR")
+			By("applying BGPCloudConfiguration CR")
 			configCR := bgpConfig.DeepCopy()
 			configCR.ResourceVersion = ""
 			Expect(k8sClient.Create(ctx, configCR)).To(Succeed())
 
 			By("waiting for config phase=Ready")
 			Eventually(func(g Gomega) {
-				cfg := &networkingv1alpha1.CUDNBgpConfig{}
+				cfg := &networkingapi.BGPCloudConfiguration{}
 				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: configCR.Name}, cfg)).To(Succeed())
-				g.Expect(cfg.Status.Phase).To(Equal(networkingv1alpha1.PhaseReady))
+				g.Expect(cfg.Status.Phase).To(Equal(networkingapi.PhaseReady))
 			}).WithTimeout(reconcileTimeout).WithPolling(pollInterval).Should(Succeed())
 
 			By("verifying FRRConfigurations exist")
@@ -68,33 +68,33 @@ var _ = Describe("E2E", Ordered, func() {
 				}, frrCfg)).To(Succeed(), "FRRConfiguration %d should exist", i)
 			}
 
-			By("creating labeled namespace for CUDN")
+			By("creating labeled namespace for ClusterUDN")
 			ns := &corev1.Namespace{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "app1",
 					Labels: map[string]string{
 						labelPrimaryUDN: "",
-						labelCUDN:       bgpRouting.Spec.Network.Name,
+						labelClusterUDN: bgpRouting.Spec.Network.Name,
 					},
 				},
 			}
 			Expect(k8sClient.Create(ctx, ns)).To(Succeed())
 
-			By("applying CUDNBgpRouting CR")
+			By("applying BGPRouting CR")
 			routingCR := bgpRouting.DeepCopy()
 			routingCR.ResourceVersion = ""
 			Expect(k8sClient.Create(ctx, routingCR)).To(Succeed())
 
 			By("waiting for routing phase=Ready")
 			Eventually(func(g Gomega) {
-				rt := &networkingv1alpha1.CUDNBgpRouting{}
+				rt := &networkingapi.BGPRouting{}
 				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: routingCR.Name}, rt)).To(Succeed())
-				g.Expect(rt.Status.Phase).To(Equal(networkingv1alpha1.PhaseReady))
+				g.Expect(rt.Status.Phase).To(Equal(networkingapi.PhaseReady))
 			}).WithTimeout(reconcileTimeout).WithPolling(pollInterval).Should(Succeed())
 
-			By("verifying CUDN and RouteAdvertisements exist")
+			By("verifying ClusterUDN and RouteAdvertisements exist")
 			cudn := &unstructured.Unstructured{}
-			cudn.SetGroupVersionKind(cudnGVK)
+			cudn.SetGroupVersionKind(clusterUDNGVK)
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
 				Name: "cluster-udn-" + bgpRouting.Spec.Network.Name,
 			}, cudn)).To(Succeed())
@@ -106,7 +106,7 @@ var _ = Describe("E2E", Ordered, func() {
 			By("verifying BGP sessions are Established on all router nodes")
 			assertBGPEstablished(ctx)
 
-			By("verifying CUDN subnets appear in FRR advertised routes")
+			By("verifying ClusterUDN subnets appear in FRR advertised routes")
 			for _, subnet := range bgpRouting.Spec.Network.Subnets {
 				assertSubnetAdvertised(ctx, subnet)
 			}
@@ -188,18 +188,18 @@ var _ = Describe("E2E", Ordered, func() {
 	Context("E2E-04: Deletion cleanup", func() {
 		It("should block config deletion while routing exists, then clean up everything", func(ctx context.Context) {
 			By("attempting to delete config CR (should be blocked by routing CR)")
-			configCR := &networkingv1alpha1.CUDNBgpConfig{}
+			configCR := &networkingapi.BGPCloudConfiguration{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: bgpConfig.Name}, configCR)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, configCR)).To(Succeed())
 
 			By("verifying config CR still exists (finalizer blocks deletion)")
 			Consistently(func(g Gomega) {
-				cfg := &networkingv1alpha1.CUDNBgpConfig{}
+				cfg := &networkingapi.BGPCloudConfiguration{}
 				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: bgpConfig.Name}, cfg)).To(Succeed())
 				g.Expect(cfg.DeletionTimestamp).NotTo(BeNil(), "should be marked for deletion")
 				hasFinalizer := false
 				for _, f := range cfg.Finalizers {
-					if f == "networking.openshift.io/cudnbgpconfig" {
+					if f == "networking.openshift.io/bgpcloudconfiguration" {
 						hasFinalizer = true
 					}
 				}
@@ -207,27 +207,27 @@ var _ = Describe("E2E", Ordered, func() {
 			}).WithTimeout(30 * time.Second).WithPolling(5 * time.Second).Should(Succeed())
 
 			By("deleting routing CR")
-			routingCR := &networkingv1alpha1.CUDNBgpRouting{}
+			routingCR := &networkingapi.BGPRouting{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: bgpRouting.Name}, routingCR)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, routingCR)).To(Succeed())
 
 			By("waiting for routing CR to be fully removed")
 			Eventually(func(g Gomega) {
-				rt := &networkingv1alpha1.CUDNBgpRouting{}
+				rt := &networkingapi.BGPRouting{}
 				err := k8sClient.Get(ctx, types.NamespacedName{Name: bgpRouting.Name}, rt)
 				g.Expect(client.IgnoreNotFound(err)).To(Succeed())
 				g.Expect(err).To(HaveOccurred(), "routing CR should be gone")
 			}).WithTimeout(reconcileTimeout).WithPolling(pollInterval).Should(Succeed())
 
-			By("verifying CUDN and RouteAdvertisements are deleted")
+			By("verifying ClusterUDN and RouteAdvertisements are deleted")
 			Eventually(func(g Gomega) {
 				cudn := &unstructured.Unstructured{}
-				cudn.SetGroupVersionKind(cudnGVK)
+				cudn.SetGroupVersionKind(clusterUDNGVK)
 				err := k8sClient.Get(ctx, types.NamespacedName{
 					Name: "cluster-udn-" + bgpRouting.Spec.Network.Name,
 				}, cudn)
 				g.Expect(client.IgnoreNotFound(err)).To(Succeed())
-				g.Expect(err).To(HaveOccurred(), "CUDN should be deleted")
+				g.Expect(err).To(HaveOccurred(), "ClusterUDN should be deleted")
 
 				ra := &unstructured.Unstructured{}
 				ra.SetGroupVersionKind(raGVK)
@@ -238,7 +238,7 @@ var _ = Describe("E2E", Ordered, func() {
 
 			By("waiting for config CR to be fully removed")
 			Eventually(func(g Gomega) {
-				cfg := &networkingv1alpha1.CUDNBgpConfig{}
+				cfg := &networkingapi.BGPCloudConfiguration{}
 				err := k8sClient.Get(ctx, types.NamespacedName{Name: bgpConfig.Name}, cfg)
 				g.Expect(client.IgnoreNotFound(err)).To(Succeed())
 				g.Expect(err).To(HaveOccurred(), "config CR should be gone")

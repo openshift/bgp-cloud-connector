@@ -223,7 +223,7 @@ func TestReconcilePeers_MultiAZCreate(t *testing.T) {
 		} else {
 			found := false
 			for _, tag := range call.TagSpecifications[0].Tags {
-				if aws.ToString(tag.Key) == "managed-by" && aws.ToString(tag.Value) == "cudn-bgp-routing-operator/test-cluster" {
+				if aws.ToString(tag.Key) == "managed-by" && aws.ToString(tag.Value) == "bgp-cloud-connector/test-cluster" {
 					found = true
 				}
 			}
@@ -280,7 +280,7 @@ func TestReconcilePeers_DeleteStalePeer(t *testing.T) {
 						RouteServerPeerId:     aws.String(stalePeerID),
 						RouteServerEndpointId: aws.String("ep-a1"),
 						Tags: []ec2types.Tag{
-							{Key: aws.String("managed-by"), Value: aws.String("cudn-bgp-routing-operator/test-cluster")},
+							{Key: aws.String("managed-by"), Value: aws.String("bgp-cloud-connector/test-cluster")},
 						},
 					},
 				},
@@ -342,7 +342,7 @@ func TestReconcilePeers_BFDLivenessDetection(t *testing.T) {
 }
 
 func TestReconcilePeers_SkipsManagedPeerWithNilFields(t *testing.T) {
-	managedTag := []ec2types.Tag{{Key: aws.String("managed-by"), Value: aws.String("cudn-bgp-routing-operator/test-cluster")}}
+	managedTag := []ec2types.Tag{{Key: aws.String("managed-by"), Value: aws.String("bgp-cloud-connector/test-cluster")}}
 	mock := &mockEC2{
 		describePeersFunc: func(_ *ec2.DescribeRouteServerPeersInput) (*ec2.DescribeRouteServerPeersOutput, error) {
 			return &ec2.DescribeRouteServerPeersOutput{
@@ -377,7 +377,7 @@ func TestReconcilePeers_SkipsManagedPeerWithNilFields(t *testing.T) {
 }
 
 func TestCleanup_DeletesAllManagedPeers(t *testing.T) {
-	managedTag := []ec2types.Tag{{Key: aws.String("managed-by"), Value: aws.String("cudn-bgp-routing-operator/test-cluster")}}
+	managedTag := []ec2types.Tag{{Key: aws.String("managed-by"), Value: aws.String("bgp-cloud-connector/test-cluster")}}
 	mock := &mockEC2{
 		describePeersFunc: func(_ *ec2.DescribeRouteServerPeersInput) (*ec2.DescribeRouteServerPeersOutput, error) {
 			return &ec2.DescribeRouteServerPeersOutput{
@@ -404,7 +404,7 @@ func TestCleanup_DeletesAllManagedPeers(t *testing.T) {
 }
 
 func TestCleanup_SkipsManagedPeerWithNilRouteServerPeerId(t *testing.T) {
-	managedTag := []ec2types.Tag{{Key: aws.String("managed-by"), Value: aws.String("cudn-bgp-routing-operator/test-cluster")}}
+	managedTag := []ec2types.Tag{{Key: aws.String("managed-by"), Value: aws.String("bgp-cloud-connector/test-cluster")}}
 	mock := &mockEC2{
 		describePeersFunc: func(_ *ec2.DescribeRouteServerPeersInput) (*ec2.DescribeRouteServerPeersOutput, error) {
 			return &ec2.DescribeRouteServerPeersOutput{
@@ -973,7 +973,7 @@ func TestListAllPeers_Page2Error(t *testing.T) {
 }
 
 func TestReconcilePeers_DeleteStalePeerOnPage2(t *testing.T) {
-	managedTag := []ec2types.Tag{{Key: aws.String("managed-by"), Value: aws.String("cudn-bgp-routing-operator/test-cluster")}}
+	managedTag := []ec2types.Tag{{Key: aws.String("managed-by"), Value: aws.String("bgp-cloud-connector/test-cluster")}}
 	mock := &mockEC2{
 		describePeersFunc: func(input *ec2.DescribeRouteServerPeersInput) (*ec2.DescribeRouteServerPeersOutput, error) {
 			if input.NextToken == nil {
@@ -1015,7 +1015,7 @@ func TestReconcilePeers_DeleteStalePeerOnPage2(t *testing.T) {
 }
 
 func TestCleanup_DeletesManagedPeerOnPage2(t *testing.T) {
-	managedTag := []ec2types.Tag{{Key: aws.String("managed-by"), Value: aws.String("cudn-bgp-routing-operator/test-cluster")}}
+	managedTag := []ec2types.Tag{{Key: aws.String("managed-by"), Value: aws.String("bgp-cloud-connector/test-cluster")}}
 	mock := &mockEC2{
 		describePeersFunc: func(input *ec2.DescribeRouteServerPeersInput) (*ec2.DescribeRouteServerPeersOutput, error) {
 			if input.NextToken == nil {
@@ -1079,7 +1079,7 @@ func managedPeersMock(peers map[string]string) *mockEC2 {
 					RouteServerPeerId:     aws.String("peer-" + endpoint),
 					RouteServerEndpointId: aws.String(endpoint),
 					Tags: []ec2types.Tag{
-						{Key: aws.String("managed-by"), Value: aws.String("cudn-bgp-routing-operator/test-cluster")},
+						{Key: aws.String("managed-by"), Value: aws.String("bgp-cloud-connector/test-cluster")},
 					},
 				})
 			}
@@ -1158,7 +1158,7 @@ func TestReconcileNodes_ShrunkNodeListStillDeletes(t *testing.T) {
 // ever, retrying. Measured on a live cluster at over ten minutes, freed only
 // by removing the finalizer by hand.
 func TestCleanup_SkipsPeersAlreadyGoing(t *testing.T) {
-	managedTag := []ec2types.Tag{{Key: aws.String("managed-by"), Value: aws.String("cudn-bgp-routing-operator/test-cluster")}}
+	managedTag := []ec2types.Tag{{Key: aws.String("managed-by"), Value: aws.String("bgp-cloud-connector/test-cluster")}}
 	mock := &mockEC2{
 		describePeersFunc: func(_ *ec2.DescribeRouteServerPeersInput) (*ec2.DescribeRouteServerPeersOutput, error) {
 			return &ec2.DescribeRouteServerPeersOutput{
@@ -1198,7 +1198,7 @@ func TestCleanup_SkipsPeersAlreadyGoing(t *testing.T) {
 // one that EC2 is already removing fails the whole reconcile with
 // IncorrectState, so no other node is reconciled either.
 func TestReconcilePeers_SkipsPruningPeersAlreadyGoing(t *testing.T) {
-	managedTag := []ec2types.Tag{{Key: aws.String("managed-by"), Value: aws.String("cudn-bgp-routing-operator/test-cluster")}}
+	managedTag := []ec2types.Tag{{Key: aws.String("managed-by"), Value: aws.String("bgp-cloud-connector/test-cluster")}}
 	mock := &mockEC2{
 		describePeersFunc: func(_ *ec2.DescribeRouteServerPeersInput) (*ec2.DescribeRouteServerPeersOutput, error) {
 			return &ec2.DescribeRouteServerPeersOutput{
@@ -1241,7 +1241,7 @@ func TestReconcilePeers_SkipsPruningPeersAlreadyGoing(t *testing.T) {
 // repaired. A deleting peer does still hold its address, so it does count, and
 // the replacement waits for the next pass.
 func TestReconcilePeers_RecreatesOverADeletedPeer(t *testing.T) {
-	managedTag := []ec2types.Tag{{Key: aws.String("managed-by"), Value: aws.String("cudn-bgp-routing-operator/test-cluster")}}
+	managedTag := []ec2types.Tag{{Key: aws.String("managed-by"), Value: aws.String("bgp-cloud-connector/test-cluster")}}
 	mock := &mockEC2{
 		describePeersFunc: func(_ *ec2.DescribeRouteServerPeersInput) (*ec2.DescribeRouteServerPeersOutput, error) {
 			return &ec2.DescribeRouteServerPeersOutput{

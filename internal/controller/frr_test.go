@@ -52,14 +52,14 @@ func TestCreateOrUpdate_CreatesWhenMissing(t *testing.T) {
 
 	c := fake.NewClientBuilder().WithScheme(s).Build()
 
-	desired := newFRRConfigObject("cudn-bgp-1", map[string]interface{}{LabelManagedBy: LabelManagedByVal}, "true")
+	desired := newFRRConfigObject("bgp-cc-1", map[string]interface{}{LabelManagedBy: LabelManagedByVal}, "true")
 	if err := createOrUpdate(ctx, c, desired); err != nil {
 		t.Fatalf("createOrUpdate: %v", err)
 	}
 
 	got := &unstructured.Unstructured{}
 	got.SetGroupVersionKind(FRRConfigurationGVK)
-	if err := c.Get(ctx, types.NamespacedName{Name: "cudn-bgp-1", Namespace: FRRNamespace}, got); err != nil {
+	if err := c.Get(ctx, types.NamespacedName{Name: "bgp-cc-1", Namespace: FRRNamespace}, got); err != nil {
 		t.Fatalf("expected object to be created: %v", err)
 	}
 }
@@ -70,23 +70,23 @@ func TestCreateOrUpdate_SkipsUpdateWhenSpecAndLabelsUnchanged(t *testing.T) {
 	s.AddKnownTypeWithName(FRRConfigurationGVK.GroupVersion().WithKind("FRRConfiguration"), &unstructured.Unstructured{})
 	s.AddKnownTypeWithName(FRRConfigurationGVK.GroupVersion().WithKind("FRRConfigurationList"), &unstructured.UnstructuredList{})
 
-	existing := newFRRConfigObject("cudn-bgp-1", map[string]interface{}{LabelManagedBy: LabelManagedByVal}, "true")
+	existing := newFRRConfigObject("bgp-cc-1", map[string]interface{}{LabelManagedBy: LabelManagedByVal}, "true")
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(existing).Build()
 
 	before := &unstructured.Unstructured{}
 	before.SetGroupVersionKind(FRRConfigurationGVK)
-	if err := c.Get(ctx, types.NamespacedName{Name: "cudn-bgp-1", Namespace: FRRNamespace}, before); err != nil {
+	if err := c.Get(ctx, types.NamespacedName{Name: "bgp-cc-1", Namespace: FRRNamespace}, before); err != nil {
 		t.Fatalf("get before: %v", err)
 	}
 
-	desired := newFRRConfigObject("cudn-bgp-1", map[string]interface{}{LabelManagedBy: LabelManagedByVal}, "true")
+	desired := newFRRConfigObject("bgp-cc-1", map[string]interface{}{LabelManagedBy: LabelManagedByVal}, "true")
 	if err := createOrUpdate(ctx, c, desired); err != nil {
 		t.Fatalf("createOrUpdate: %v", err)
 	}
 
 	after := &unstructured.Unstructured{}
 	after.SetGroupVersionKind(FRRConfigurationGVK)
-	if err := c.Get(ctx, types.NamespacedName{Name: "cudn-bgp-1", Namespace: FRRNamespace}, after); err != nil {
+	if err := c.Get(ctx, types.NamespacedName{Name: "bgp-cc-1", Namespace: FRRNamespace}, after); err != nil {
 		t.Fatalf("get after: %v", err)
 	}
 	if after.GetResourceVersion() != before.GetResourceVersion() {
@@ -101,23 +101,23 @@ func TestCreateOrUpdate_UpdatesWhenSpecChanges(t *testing.T) {
 	s.AddKnownTypeWithName(FRRConfigurationGVK.GroupVersion().WithKind("FRRConfiguration"), &unstructured.Unstructured{})
 	s.AddKnownTypeWithName(FRRConfigurationGVK.GroupVersion().WithKind("FRRConfigurationList"), &unstructured.UnstructuredList{})
 
-	existing := newFRRConfigObject("cudn-bgp-1", map[string]interface{}{LabelManagedBy: LabelManagedByVal}, "true")
+	existing := newFRRConfigObject("bgp-cc-1", map[string]interface{}{LabelManagedBy: LabelManagedByVal}, "true")
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(existing).Build()
 
 	before := &unstructured.Unstructured{}
 	before.SetGroupVersionKind(FRRConfigurationGVK)
-	if err := c.Get(ctx, types.NamespacedName{Name: "cudn-bgp-1", Namespace: FRRNamespace}, before); err != nil {
+	if err := c.Get(ctx, types.NamespacedName{Name: "bgp-cc-1", Namespace: FRRNamespace}, before); err != nil {
 		t.Fatalf("get before: %v", err)
 	}
 
-	desired := newFRRConfigObject("cudn-bgp-1", map[string]interface{}{LabelManagedBy: LabelManagedByVal}, "false")
+	desired := newFRRConfigObject("bgp-cc-1", map[string]interface{}{LabelManagedBy: LabelManagedByVal}, "false")
 	if err := createOrUpdate(ctx, c, desired); err != nil {
 		t.Fatalf("createOrUpdate: %v", err)
 	}
 
 	after := &unstructured.Unstructured{}
 	after.SetGroupVersionKind(FRRConfigurationGVK)
-	if err := c.Get(ctx, types.NamespacedName{Name: "cudn-bgp-1", Namespace: FRRNamespace}, after); err != nil {
+	if err := c.Get(ctx, types.NamespacedName{Name: "bgp-cc-1", Namespace: FRRNamespace}, after); err != nil {
 		t.Fatalf("get after: %v", err)
 	}
 	if after.GetResourceVersion() == before.GetResourceVersion() {
@@ -136,23 +136,23 @@ func TestCreateOrUpdate_UpdatesWhenManagedLabelMissing(t *testing.T) {
 	s.AddKnownTypeWithName(FRRConfigurationGVK.GroupVersion().WithKind("FRRConfigurationList"), &unstructured.UnstructuredList{})
 
 	// Same spec as desired, but missing the managed-by label.
-	existing := newFRRConfigObject("cudn-bgp-1", map[string]interface{}{}, "true")
+	existing := newFRRConfigObject("bgp-cc-1", map[string]interface{}{}, "true")
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(existing).Build()
 
 	before := &unstructured.Unstructured{}
 	before.SetGroupVersionKind(FRRConfigurationGVK)
-	if err := c.Get(ctx, types.NamespacedName{Name: "cudn-bgp-1", Namespace: FRRNamespace}, before); err != nil {
+	if err := c.Get(ctx, types.NamespacedName{Name: "bgp-cc-1", Namespace: FRRNamespace}, before); err != nil {
 		t.Fatalf("get before: %v", err)
 	}
 
-	desired := newFRRConfigObject("cudn-bgp-1", map[string]interface{}{LabelManagedBy: LabelManagedByVal}, "true")
+	desired := newFRRConfigObject("bgp-cc-1", map[string]interface{}{LabelManagedBy: LabelManagedByVal}, "true")
 	if err := createOrUpdate(ctx, c, desired); err != nil {
 		t.Fatalf("createOrUpdate: %v", err)
 	}
 
 	after := &unstructured.Unstructured{}
 	after.SetGroupVersionKind(FRRConfigurationGVK)
-	if err := c.Get(ctx, types.NamespacedName{Name: "cudn-bgp-1", Namespace: FRRNamespace}, after); err != nil {
+	if err := c.Get(ctx, types.NamespacedName{Name: "bgp-cc-1", Namespace: FRRNamespace}, after); err != nil {
 		t.Fatalf("get after: %v", err)
 	}
 	if after.GetResourceVersion() == before.GetResourceVersion() {
@@ -223,7 +223,7 @@ func TestCreateOrUpdate_SkipsUpdateWhenExistingHasServerDefaultedField(t *testin
 
 	// The fake client doesn't apply CRD defaulting, so this stands in for a
 	// field the real API server would have added on its own.
-	existing := newFRRConfigObject("cudn-bgp-1", map[string]interface{}{LabelManagedBy: LabelManagedByVal}, "true")
+	existing := newFRRConfigObject("bgp-cc-1", map[string]interface{}{LabelManagedBy: LabelManagedByVal}, "true")
 	spec := existing.Object["spec"].(map[string]interface{})
 	spec["serverDefaulted"] = "value-we-never-set"
 
@@ -231,18 +231,18 @@ func TestCreateOrUpdate_SkipsUpdateWhenExistingHasServerDefaultedField(t *testin
 
 	before := &unstructured.Unstructured{}
 	before.SetGroupVersionKind(FRRConfigurationGVK)
-	if err := c.Get(ctx, types.NamespacedName{Name: "cudn-bgp-1", Namespace: FRRNamespace}, before); err != nil {
+	if err := c.Get(ctx, types.NamespacedName{Name: "bgp-cc-1", Namespace: FRRNamespace}, before); err != nil {
 		t.Fatalf("get before: %v", err)
 	}
 
-	desired := newFRRConfigObject("cudn-bgp-1", map[string]interface{}{LabelManagedBy: LabelManagedByVal}, "true")
+	desired := newFRRConfigObject("bgp-cc-1", map[string]interface{}{LabelManagedBy: LabelManagedByVal}, "true")
 	if err := createOrUpdate(ctx, c, desired); err != nil {
 		t.Fatalf("createOrUpdate: %v", err)
 	}
 
 	after := &unstructured.Unstructured{}
 	after.SetGroupVersionKind(FRRConfigurationGVK)
-	if err := c.Get(ctx, types.NamespacedName{Name: "cudn-bgp-1", Namespace: FRRNamespace}, after); err != nil {
+	if err := c.Get(ctx, types.NamespacedName{Name: "bgp-cc-1", Namespace: FRRNamespace}, after); err != nil {
 		t.Fatalf("get after: %v", err)
 	}
 	if after.GetResourceVersion() != before.GetResourceVersion() {
@@ -257,7 +257,7 @@ func TestCreateOrUpdate_PreservesForeignLabelsAndAnnotationsOnUpdate(t *testing.
 	s.AddKnownTypeWithName(FRRConfigurationGVK.GroupVersion().WithKind("FRRConfiguration"), &unstructured.Unstructured{})
 	s.AddKnownTypeWithName(FRRConfigurationGVK.GroupVersion().WithKind("FRRConfigurationList"), &unstructured.UnstructuredList{})
 
-	existing := newFRRConfigObject("cudn-bgp-1", map[string]interface{}{
+	existing := newFRRConfigObject("bgp-cc-1", map[string]interface{}{
 		LabelManagedBy:     LabelManagedByVal,
 		"foreign.io/owner": "someone-else",
 	}, "true")
@@ -267,14 +267,14 @@ func TestCreateOrUpdate_PreservesForeignLabelsAndAnnotationsOnUpdate(t *testing.
 
 	// A real spec change forces createOrUpdate down the Update path, which is
 	// where a wholesale metadata replacement would lose anything we didn't set.
-	desired := newFRRConfigObject("cudn-bgp-1", map[string]interface{}{LabelManagedBy: LabelManagedByVal}, "false")
+	desired := newFRRConfigObject("bgp-cc-1", map[string]interface{}{LabelManagedBy: LabelManagedByVal}, "false")
 	if err := createOrUpdate(ctx, c, desired); err != nil {
 		t.Fatalf("createOrUpdate: %v", err)
 	}
 
 	after := &unstructured.Unstructured{}
 	after.SetGroupVersionKind(FRRConfigurationGVK)
-	if err := c.Get(ctx, types.NamespacedName{Name: "cudn-bgp-1", Namespace: FRRNamespace}, after); err != nil {
+	if err := c.Get(ctx, types.NamespacedName{Name: "bgp-cc-1", Namespace: FRRNamespace}, after); err != nil {
 		t.Fatalf("get after: %v", err)
 	}
 	if after.GetLabels()["foreign.io/owner"] != "someone-else" {
