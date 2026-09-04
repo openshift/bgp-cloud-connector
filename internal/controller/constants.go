@@ -62,6 +62,7 @@ const (
 	ReasonCloudDiscoveryFailed = "CloudDiscoveryFailed"
 	ReasonApplyFailed          = "ApplyFailed"
 	ReasonCloudReconcileFailed = "CloudReconcileFailed"
+	ReasonCloudCleanupFailed   = "CloudCleanupFailed"
 	ReasonNamespaceNotReady    = "NamespaceNotReady"
 	ReasonCUDNFailed           = "CUDNFailed"
 	ReasonRAFailed             = "RAFailed"

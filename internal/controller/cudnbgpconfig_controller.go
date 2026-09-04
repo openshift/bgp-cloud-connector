@@ -564,11 +564,24 @@ func (r *CUDNBgpConfigReconciler) reconcileDelete(ctx context.Context, config *n
 		}
 		p, err := buildPlatform(ctx, r.Client, config)
 		if err != nil {
-			log.Error(err, "unable to build the cloud platform for cleanup, skipping cloud resource cleanup")
-		} else if _, err := p.DiscoverEndpoints(ctx); err != nil {
-			log.Error(err, "unable to discover endpoints for cleanup, skipping cloud resource cleanup")
-		} else if err := p.Cleanup(ctx); err != nil {
-			return ctrl.Result{}, fmt.Errorf("cleaning up cloud resources: %w", err)
+			// emit event
+			var credErr *platform.CredentialError
+			if errors.As(err, &credErr) {
+				return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionCloudResourcesReconciled,
+					ReasonCloudCredentialsInvalid, fmt.Sprintf("Cloud cleanup blocked (keeping finalizer): %v", credErr))
+			}
+			return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionCloudResourcesReconciled,
+				ReasonCloudDiscoveryFailed, fmt.Sprintf("Cloud cleanup blocked (keeping finalizer): failed to build platform: %v", err))
+		}
+		if _, err := p.DiscoverEndpoints(ctx); err != nil {
+			// emit event
+			return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionCloudResourcesReconciled,
+				ReasonCloudDiscoveryFailed, fmt.Sprintf("Cloud cleanup blocked (keeping finalizer): %v", err))
+		}
+		if err := p.Cleanup(ctx); err != nil {
+			// emit event
+			return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionCloudResourcesReconciled,
+				ReasonCloudCleanupFailed, fmt.Sprintf("Cloud cleanup failed (keeping finalizer): %v", err))
 		}
 	}
 

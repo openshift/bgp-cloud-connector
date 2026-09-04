@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -32,6 +33,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	networkingv1alpha1 "github.com/openshift/bgp-cloud-connector/api/v1alpha1"
@@ -996,7 +998,7 @@ func TestConfigReconcile_AWSNodeFiltering(t *testing.T) {
 	t.Error("CompleteNodeInventory condition not found")
 }
 
-func TestConfigReconcile_DeleteSucceedsWithCredentialFailure(t *testing.T) {
+func TestConfigReconcile_DeleteKeepsFinalizerOnCredentialFailure(t *testing.T) {
 	now := metav1.Now()
 	config := newTestCUDNBgpConfigWithAWS()
 	config.Finalizers = []string{ConfigFinalizerName}
@@ -1015,17 +1017,188 @@ func TestConfigReconcile_DeleteSucceedsWithCredentialFailure(t *testing.T) {
 		},
 	}
 
-	_, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}})
+	result, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}})
 	if err != nil {
-		t.Fatalf("deletion should succeed even with credential failure, got: %v", err)
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue for terminal CloudCredentialsInvalid on delete, got %v", result.RequeueAfter)
 	}
 
 	updated := &networkingv1alpha1.CUDNBgpConfig{}
-	_ = c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, updated)
-	for _, f := range updated.Finalizers {
-		if f == ConfigFinalizerName {
-			t.Error("finalizer should be removed even when AWS credentials are invalid")
-		}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, updated); err != nil {
+		t.Fatalf("get config: %v", err)
+	}
+	if !controllerutil.ContainsFinalizer(updated, ConfigFinalizerName) {
+		t.Error("finalizer must be kept when AWS credentials are invalid during delete")
+	}
+	if updated.Status.Phase != networkingv1alpha1.PhaseDegraded {
+		t.Errorf("expected Phase=Degraded, got %q", updated.Status.Phase)
+	}
+	cond := meta.FindStatusCondition(updated.Status.Conditions, networkingv1alpha1.ConditionCloudResourcesReconciled)
+	if cond == nil {
+		t.Fatal("expected CloudResourcesReconciled condition")
+	}
+	if cond.Status != metav1.ConditionFalse || cond.Reason != ReasonCloudCredentialsInvalid {
+		t.Errorf("condition = %s/%s, want False/CloudCredentialsInvalid", cond.Status, cond.Reason)
+	}
+}
+
+func TestConfigReconcile_DeleteKeepsFinalizerOnBuildFailure(t *testing.T) {
+	now := metav1.Now()
+	config := newTestCUDNBgpConfigWithAWS()
+	config.Finalizers = []string{ConfigFinalizerName}
+	config.DeletionTimestamp = &now
+
+	s := configTestScheme()
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(config).
+		WithStatusSubresource(config).
+		Build()
+
+	r := &CUDNBgpConfigReconciler{
+		Client: c, Scheme: s,
+		PlatformBuilder: func(_ context.Context, _ client.Client, _ *networkingv1alpha1.CUDNBgpConfig) (platform.CloudPlatform, error) {
+			// A non-credential build failure: classified as discovery-failed
+			// (transient), matching the normal reconcile path.
+			return nil, errors.New("build failed")
+		},
+	}
+
+	result, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 30*time.Second {
+		t.Errorf("expected requeue 30s, got %v", result.RequeueAfter)
+	}
+
+	updated := &networkingv1alpha1.CUDNBgpConfig{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, updated); err != nil {
+		t.Fatalf("get config: %v", err)
+	}
+	if !controllerutil.ContainsFinalizer(updated, ConfigFinalizerName) {
+		t.Error("finalizer must be kept when the platform cannot be built during delete")
+	}
+	if updated.Status.Phase != networkingv1alpha1.PhaseDegraded {
+		t.Errorf("expected Phase=Degraded, got %q", updated.Status.Phase)
+	}
+	cond := meta.FindStatusCondition(updated.Status.Conditions, networkingv1alpha1.ConditionCloudResourcesReconciled)
+	if cond == nil {
+		t.Fatal("expected CloudResourcesReconciled condition")
+	}
+	if cond.Status != metav1.ConditionFalse || cond.Reason != ReasonCloudDiscoveryFailed {
+		t.Errorf("condition = %s/%s, want False/CloudDiscoveryFailed", cond.Status, cond.Reason)
+	}
+}
+
+func TestConfigReconcile_DeleteKeepsFinalizerOnDiscoveryFailure(t *testing.T) {
+	now := metav1.Now()
+	config := newTestCUDNBgpConfigWithAWS()
+	config.Finalizers = []string{ConfigFinalizerName}
+	config.DeletionTimestamp = &now
+
+	s := configTestScheme()
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(config).
+		WithStatusSubresource(config).
+		Build()
+
+	r := &CUDNBgpConfigReconciler{
+		Client: c, Scheme: s,
+		PlatformBuilder: func(_ context.Context, _ client.Client, _ *networkingv1alpha1.CUDNBgpConfig) (platform.CloudPlatform, error) {
+			return &mockPlatform{discoverErr: errors.New("discover failed")}, nil
+		},
+	}
+
+	result, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 30*time.Second {
+		t.Errorf("expected requeue 30s, got %v", result.RequeueAfter)
+	}
+
+	updated := &networkingv1alpha1.CUDNBgpConfig{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, updated); err != nil {
+		t.Fatalf("get config: %v", err)
+	}
+	if !controllerutil.ContainsFinalizer(updated, ConfigFinalizerName) {
+		t.Error("finalizer must be kept when discovery fails during delete")
+	}
+	if updated.Status.Phase != networkingv1alpha1.PhaseDegraded {
+		t.Errorf("expected Phase=Degraded, got %q", updated.Status.Phase)
+	}
+	cond := meta.FindStatusCondition(updated.Status.Conditions, networkingv1alpha1.ConditionCloudResourcesReconciled)
+	if cond == nil {
+		t.Fatal("expected CloudResourcesReconciled condition")
+	}
+	if cond.Status != metav1.ConditionFalse || cond.Reason != ReasonCloudDiscoveryFailed {
+		t.Errorf("condition = %s/%s, want False/CloudDiscoveryFailed", cond.Status, cond.Reason)
+	}
+}
+
+func TestConfigReconcile_DeleteKeepsFinalizerOnCleanupFailure(t *testing.T) {
+	now := metav1.Now()
+	config := newTestCUDNBgpConfigWithAWS()
+	config.Finalizers = []string{ConfigFinalizerName}
+	config.DeletionTimestamp = &now
+
+	frrObj := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "frrk8s.metallb.io/v1beta1",
+			"kind":       "FRRConfiguration",
+			"metadata": map[string]interface{}{
+				"name":      "cudn-bgp-az-1",
+				"namespace": FRRNamespace,
+				"labels":    map[string]interface{}{LabelManagedBy: LabelManagedByVal},
+			},
+		},
+	}
+
+	s := configTestScheme()
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(config, frrObj).
+		WithStatusSubresource(config).
+		Build()
+
+	r := &CUDNBgpConfigReconciler{
+		Client: c, Scheme: s,
+		PlatformBuilder: func(_ context.Context, _ client.Client, _ *networkingv1alpha1.CUDNBgpConfig) (platform.CloudPlatform, error) {
+			return &mockPlatform{cleanupErr: errors.New("cleanup failed")}, nil
+		},
+	}
+
+	result, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 30*time.Second {
+		t.Errorf("expected requeue 30s, got %v", result.RequeueAfter)
+	}
+
+	updated := &networkingv1alpha1.CUDNBgpConfig{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, updated); err != nil {
+		t.Fatalf("get config: %v", err)
+	}
+	if !controllerutil.ContainsFinalizer(updated, ConfigFinalizerName) {
+		t.Error("finalizer must be kept when cleanup fails during delete")
+	}
+	if updated.Status.Phase != networkingv1alpha1.PhaseDegraded {
+		t.Errorf("expected Phase=Degraded, got %q", updated.Status.Phase)
+	}
+	cond := meta.FindStatusCondition(updated.Status.Conditions, networkingv1alpha1.ConditionCloudResourcesReconciled)
+	if cond == nil {
+		t.Fatal("expected CloudResourcesReconciled condition")
+	}
+	if cond.Status != metav1.ConditionFalse || cond.Reason != ReasonCloudCleanupFailed {
+		t.Errorf("condition = %s/%s, want False/CloudCleanupFailed", cond.Status, cond.Reason)
+	}
+
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(FRRConfigurationGVK)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cudn-bgp-az-1", Namespace: FRRNamespace}, obj); err != nil {
+		t.Error("FRRConfiguration must remain when AWS cleanup fails")
 	}
 }
 
