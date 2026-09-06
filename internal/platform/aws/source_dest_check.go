@@ -42,6 +42,7 @@ func (p *Platform) getPrimaryENI(ctx context.Context, instanceID string) (eniID 
 	}
 	output, err := p.ec2Client.DescribeInstances(ctx, input)
 	if err != nil {
+		recordAWSAPIError(opSourceDest)
 		return "", false, err
 	}
 
@@ -64,5 +65,8 @@ func (p *Platform) setSourceDestCheck(ctx context.Context, eniID string, enabled
 		SourceDestCheck:    &ec2types.AttributeBooleanValue{Value: aws.Bool(enabled)},
 	}
 	_, err := p.ec2Client.ModifyNetworkInterfaceAttribute(ctx, input)
+	if err != nil {
+		recordAWSAPIError(opSourceDest)
+	}
 	return err
 }

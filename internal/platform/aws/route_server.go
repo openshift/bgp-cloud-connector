@@ -99,7 +99,34 @@ func (p *Platform) reconcileRouteServerPeers(ctx context.Context, nodes []platfo
 		}
 	}
 
+	managed, err := p.countManagedPeers(ctx, nodesByAZ)
+	if err != nil {
+		return err
+	}
+	awsPeersManaged.Set(float64(managed))
 	return nil
+}
+
+func (p *Platform) countManagedPeers(ctx context.Context, nodesByAZ map[string]map[string]bool) (int, error) {
+	managed := 0
+	for az, endpointIDs := range p.endpointsByAZ {
+		desiredIPs := nodesByAZ[az]
+		for _, endpointID := range endpointIDs {
+			peers, err := p.listManagedPeers(ctx, endpointID)
+			if err != nil {
+				return 0, fmt.Errorf("listing managed peers for endpoint %s: %w", endpointID, err)
+			}
+			for _, peer := range peers {
+				if peer.PeerAddress == nil || isDeleted(peer) {
+					continue
+				}
+				if desiredIPs[*peer.PeerAddress] {
+					managed++
+				}
+			}
+		}
+	}
+	return managed, nil
 }
 
 func (p *Platform) listManagedPeers(ctx context.Context, endpointID string) ([]ec2types.RouteServerPeer, error) {
@@ -126,6 +153,7 @@ func (p *Platform) listAllPeers(ctx context.Context, endpointID string) ([]ec2ty
 			NextToken: nextToken,
 		})
 		if err != nil {
+			recordAWSAPIError(opPeer)
 			return nil, err
 		}
 		for _, peer := range output.RouteServerPeers {
@@ -156,6 +184,9 @@ func (p *Platform) tagPeer(ctx context.Context, peerID string) error {
 		Tags:      p.peerTags(),
 	}
 	_, err := p.ec2Client.CreateTags(ctx, input)
+	if err != nil {
+		recordAWSAPIError(opPeer)
+	}
 	return err
 }
 
@@ -178,6 +209,9 @@ func (p *Platform) createPeer(ctx context.Context, endpointID, peerAddress strin
 		},
 	}
 	_, err := p.ec2Client.CreateRouteServerPeer(ctx, input)
+	if err != nil {
+		recordAWSAPIError(opPeer)
+	}
 	return err
 }
 
@@ -186,6 +220,9 @@ func (p *Platform) deletePeer(ctx context.Context, peerID string) error {
 		RouteServerPeerId: aws.String(peerID),
 	}
 	_, err := p.ec2Client.DeleteRouteServerPeer(ctx, input)
+	if err != nil {
+		recordAWSAPIError(opPeer)
+	}
 	return err
 }
 
@@ -225,5 +262,6 @@ func (p *Platform) deleteAllManagedPeers(ctx context.Context) error {
 			}
 		}
 	}
+	awsPeersManaged.Set(0)
 	return nil
 }

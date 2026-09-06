@@ -9,6 +9,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 
 	"github.com/openshift/bgp-cloud-connector/internal/platform"
 )
@@ -1279,5 +1281,195 @@ func TestReconcilePeers_RecreatesOverADeletedPeer(t *testing.T) {
 	}
 	if len(mock.deletePeerCalls) != 0 {
 		t.Errorf("expected no deletes, got %d", len(mock.deletePeerCalls))
+	}
+}
+
+func metricValue(t *testing.T, c prometheus.Metric) float64 {
+	t.Helper()
+	m := &dto.Metric{}
+	if err := c.Write(m); err != nil {
+		t.Fatalf("write metric: %v", err)
+	}
+	if m.Counter != nil {
+		return m.Counter.GetValue()
+	}
+	if m.Gauge != nil {
+		return m.Gauge.GetValue()
+	}
+	t.Fatal("metric is neither counter nor gauge")
+	return 0
+}
+
+func TestAWSMetrics_DiscoverErrorIncrements(t *testing.T) {
+	before := metricValue(t, awsAPIErrors.WithLabelValues(opDiscover))
+	mock := &mockEC2{
+		describeRSFunc: func(_ *ec2.DescribeRouteServersInput) (*ec2.DescribeRouteServersOutput, error) {
+			return nil, errors.New("ec2 API failure")
+		},
+	}
+	p := &Platform{ec2Client: mock, routeServerIDs: []string{"rs-1"}}
+	if _, err := p.DiscoverEndpoints(context.Background()); err == nil {
+		t.Fatal("expected error")
+	}
+	got := metricValue(t, awsAPIErrors.WithLabelValues(opDiscover))
+	if got != before+1 {
+		t.Fatalf("discover errors: got %v, want %v", got, before+1)
+	}
+}
+
+func TestAWSMetrics_PeersManagedGauge(t *testing.T) {
+	peers := []ec2types.RouteServerPeer{
+		testManagedPeer("ep-a1", "10.0.1.10"),
+		testManagedPeer("ep-a2", "10.0.1.10"),
+		testManagedPeer("ep-b1", "10.0.2.10"),
+		testManagedPeer("ep-b2", "10.0.2.10"),
+		testManagedPeer("ep-c1", "10.0.3.10"),
+		testManagedPeer("ep-c2", "10.0.3.10"),
+	}
+	mock := &mockEC2{
+		describePeersFunc: func(_ *ec2.DescribeRouteServerPeersInput) (*ec2.DescribeRouteServerPeersOutput, error) {
+			return &ec2.DescribeRouteServerPeersOutput{RouteServerPeers: peers}, nil
+		},
+	}
+	p := newTestPlatform(mock)
+	nodes := []platform.RouterNode{
+		{Name: "node-a", PrivateIP: "10.0.1.10", Zone: "us-east-1a", ProviderID: "aws:///us-east-1a/i-a"},
+		{Name: "node-b", PrivateIP: "10.0.2.10", Zone: "us-east-1b", ProviderID: "aws:///us-east-1b/i-b"},
+		{Name: "node-c", PrivateIP: "10.0.3.10", Zone: "us-east-1c", ProviderID: "aws:///us-east-1c/i-c"},
+	}
+	if err := p.reconcileRouteServerPeers(context.Background(), nodes); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := metricValue(t, awsPeersManaged)
+	if got != 6 {
+		t.Fatalf("aws_peers_managed: got %v, want 6", got)
+	}
+}
+
+func TestAWSMetrics_PeersManagedGaugeCountsActualNotDesired(t *testing.T) {
+	peers := []ec2types.RouteServerPeer{
+		testManagedPeer("ep-a1", "10.0.1.10"),
+		testManagedPeer("ep-b1", "10.0.2.10"),
+		testManagedPeer("ep-c1", "10.0.3.10"),
+	}
+	mock := &mockEC2{
+		describePeersFunc: func(_ *ec2.DescribeRouteServerPeersInput) (*ec2.DescribeRouteServerPeersOutput, error) {
+			return &ec2.DescribeRouteServerPeersOutput{RouteServerPeers: peers}, nil
+		},
+	}
+	p := newTestPlatform(mock)
+	nodes := []platform.RouterNode{
+		{Name: "node-a", PrivateIP: "10.0.1.10", Zone: "us-east-1a", ProviderID: "aws:///us-east-1a/i-a"},
+		{Name: "node-b", PrivateIP: "10.0.2.10", Zone: "us-east-1b", ProviderID: "aws:///us-east-1b/i-b"},
+		{Name: "node-c", PrivateIP: "10.0.3.10", Zone: "us-east-1c", ProviderID: "aws:///us-east-1c/i-c"},
+	}
+	if err := p.reconcileRouteServerPeers(context.Background(), nodes); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := metricValue(t, awsPeersManaged)
+	if got != 3 {
+		t.Fatalf("aws_peers_managed: got %v, want 3 (actual peers, not desired 6)", got)
+	}
+}
+
+func testManagedPeer(endpointID, ip string) ec2types.RouteServerPeer {
+	return ec2types.RouteServerPeer{
+		RouteServerEndpointId: aws.String(endpointID),
+		RouteServerPeerId:     aws.String("peer-" + endpointID),
+		PeerAddress:           aws.String(ip),
+		Tags: []ec2types.Tag{
+			{Key: aws.String("managed-by"), Value: aws.String("cudn-bgp-routing-operator/test-cluster")},
+		},
+	}
+}
+
+func TestAWSMetrics_PeerErrorIncrements(t *testing.T) {
+	before := metricValue(t, awsAPIErrors.WithLabelValues(opPeer))
+	mock := &mockEC2{
+		describePeersFunc: func(_ *ec2.DescribeRouteServerPeersInput) (*ec2.DescribeRouteServerPeersOutput, error) {
+			return nil, errors.New("peers list failed")
+		},
+	}
+	p := &Platform{
+		ec2Client:     mock,
+		endpointsByAZ: map[string][]string{"us-east-1a": {"ep-a1"}},
+		clusterID:     "test-cluster",
+	}
+	if err := p.reconcileRouteServerPeers(context.Background(), []platform.RouterNode{
+		{Name: "node-a", PrivateIP: "10.0.1.10", Zone: "us-east-1a"},
+	}); err == nil {
+		t.Fatal("expected error")
+	}
+	got := metricValue(t, awsAPIErrors.WithLabelValues(opPeer))
+	if got != before+1 {
+		t.Fatalf("peer errors: got %v, want %v", got, before+1)
+	}
+}
+
+func TestAWSMetrics_SourceDestErrorIncrements(t *testing.T) {
+	before := metricValue(t, awsAPIErrors.WithLabelValues(opSourceDest))
+	mock := &mockEC2{
+		describeInstFunc: func(_ *ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
+			return nil, errors.New("describe instances failed")
+		},
+	}
+	p := &Platform{ec2Client: mock}
+	if err := p.disableSourceDestCheck(context.Background(), []platform.RouterNode{
+		{Name: "node-a", ProviderID: "aws:///us-east-1a/i-a"},
+	}); err == nil {
+		t.Fatal("expected error")
+	}
+	got := metricValue(t, awsAPIErrors.WithLabelValues(opSourceDest))
+	if got != before+1 {
+		t.Fatalf("sourcedest errors: got %v, want %v", got, before+1)
+	}
+}
+
+func TestAWSMetrics_LocalErrorsDoNotIncrement(t *testing.T) {
+	discoverBefore := metricValue(t, awsAPIErrors.WithLabelValues(opDiscover))
+	sourceBefore := metricValue(t, awsAPIErrors.WithLabelValues(opSourceDest))
+
+	pDiscover := &Platform{
+		ec2Client: &mockEC2{
+			describeRSFunc: func(_ *ec2.DescribeRouteServersInput) (*ec2.DescribeRouteServersOutput, error) {
+				return &ec2.DescribeRouteServersOutput{}, nil
+			},
+		},
+		routeServerIDs: []string{"rs-missing"},
+	}
+	if _, err := pDiscover.DiscoverEndpoints(context.Background()); err == nil {
+		t.Fatal("expected not-found error")
+	}
+	if got := metricValue(t, awsAPIErrors.WithLabelValues(opDiscover)); got != discoverBefore {
+		t.Fatalf("discover errors after not-found: got %v, want %v", got, discoverBefore)
+	}
+
+	pSrc := &Platform{ec2Client: &mockEC2{}}
+	if err := pSrc.disableSourceDestCheck(context.Background(), []platform.RouterNode{
+		{Name: "node-a", ProviderID: "not-aws"},
+	}); err == nil {
+		t.Fatal("expected providerID error")
+	}
+	if got := metricValue(t, awsAPIErrors.WithLabelValues(opSourceDest)); got != sourceBefore {
+		t.Fatalf("sourcedest errors after bad providerID: got %v, want %v", got, sourceBefore)
+	}
+}
+
+func TestAWSMetrics_CleanupSetsPeersManagedZero(t *testing.T) {
+	awsPeersManaged.Set(3)
+	p := &Platform{
+		ec2Client: &mockEC2{
+			describePeersFunc: func(_ *ec2.DescribeRouteServerPeersInput) (*ec2.DescribeRouteServerPeersOutput, error) {
+				return &ec2.DescribeRouteServerPeersOutput{}, nil
+			},
+		},
+		endpointsByAZ: map[string][]string{"us-east-1a": {"ep-a1"}},
+		clusterID:     "test-cluster",
+	}
+	if err := p.deleteAllManagedPeers(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := metricValue(t, awsPeersManaged); got != 0 {
+		t.Fatalf("aws_peers_managed after cleanup: got %v, want 0", got)
 	}
 }

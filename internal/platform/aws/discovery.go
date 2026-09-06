@@ -102,6 +102,7 @@ func (p *Platform) describeRouteServer(ctx context.Context, routeServerID string
 		RouteServerIds: []string{routeServerID},
 	})
 	if err != nil {
+		recordAWSAPIError(opDiscover)
 		return nil, err
 	}
 	if len(output.RouteServers) == 0 {
@@ -118,6 +119,7 @@ func (p *Platform) describeRouteServerEndpoints(ctx context.Context, routeServer
 			NextToken: nextToken,
 		})
 		if err != nil {
+			recordAWSAPIError(opDiscover)
 			return nil, err
 		}
 		for _, ep := range output.RouteServerEndpoints {
@@ -141,6 +143,7 @@ func (p *Platform) resolveSubnetAZs(ctx context.Context, subnetIDs []string) (ma
 		SubnetIds: subnetIDs,
 	})
 	if err != nil {
+		recordAWSAPIError(opDiscover)
 		return nil, err
 	}
 	result := make(map[string]string, len(output.Subnets))
