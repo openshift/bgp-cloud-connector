@@ -1496,10 +1496,10 @@ func TestConfigReconcile_SetsExternalOwnershipWhenFRRPreExisting(t *testing.T) {
 
 func TestConfigReconcile_PartialNetworkOwnership(t *testing.T) {
 	cases := []struct {
-		name                     string
-		network                  *unstructured.Unstructured
-		wantFRRProviderOwnership networkingv1alpha1.NetworkPatchOwnership
-		wantRouteAdvertisementsOwnership    networkingv1alpha1.NetworkPatchOwnership
+		name                             string
+		network                          *unstructured.Unstructured
+		wantFRRProviderOwnership         networkingv1alpha1.NetworkPatchOwnership
+		wantRouteAdvertisementsOwnership networkingv1alpha1.NetworkPatchOwnership
 	}{
 		{
 			name: "FRR already in providers, claim only route ads",
@@ -1508,8 +1508,8 @@ func TestConfigReconcile_PartialNetworkOwnership(t *testing.T) {
 					"providers": []interface{}{FRRProviderName},
 				},
 			}),
-			wantFRRProviderOwnership: networkingv1alpha1.NetworkPatchOwnershipExternal,
-			wantRouteAdvertisementsOwnership:    networkingv1alpha1.NetworkPatchOwnershipOwned,
+			wantFRRProviderOwnership:         networkingv1alpha1.NetworkPatchOwnershipExternal,
+			wantRouteAdvertisementsOwnership: networkingv1alpha1.NetworkPatchOwnershipOwned,
 		},
 		{
 			name: "route ads already Enabled, claim only FRR",
@@ -1520,8 +1520,8 @@ func TestConfigReconcile_PartialNetworkOwnership(t *testing.T) {
 					},
 				},
 			}),
-			wantFRRProviderOwnership: networkingv1alpha1.NetworkPatchOwnershipOwned,
-			wantRouteAdvertisementsOwnership:    networkingv1alpha1.NetworkPatchOwnershipExternal,
+			wantFRRProviderOwnership:         networkingv1alpha1.NetworkPatchOwnershipOwned,
+			wantRouteAdvertisementsOwnership: networkingv1alpha1.NetworkPatchOwnershipExternal,
 		},
 	}
 	for _, tc := range cases {
