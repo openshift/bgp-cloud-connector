@@ -20,9 +20,12 @@ import (
 	"context"
 	"testing"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	networkingv1alpha1 "github.com/openshift/bgp-cloud-connector/api/v1alpha1"
 )
 
 func newFRRConfigObject(name string, labels map[string]interface{}, nodeSelectorValue string) *unstructured.Unstructured {
@@ -160,6 +163,41 @@ func TestCreateOrUpdate_UpdatesWhenManagedLabelMissing(t *testing.T) {
 	}
 	if after.GetLabels()[LabelManagedBy] != LabelManagedByVal {
 		t.Fatalf("expected managed-by label to be set, got %q", after.GetLabels()[LabelManagedBy])
+	}
+}
+
+// TestCreateOrUpdate_RefusesToAdoptUnownedObject verifies that an existing
+// FRRConfiguration without our owner reference is not adopted.
+func TestCreateOrUpdate_RefusesToAdoptUnownedObject(t *testing.T) {
+	ctx := context.Background()
+	s := testScheme()
+	s.AddKnownTypeWithName(FRRConfigurationGVK.GroupVersion().WithKind("FRRConfiguration"), &unstructured.Unstructured{})
+	s.AddKnownTypeWithName(FRRConfigurationGVK.GroupVersion().WithKind("FRRConfigurationList"), &unstructured.UnstructuredList{})
+
+	// Same name and managed-by label, but no owner reference.
+	existing := newFRRConfigObject("cudn-bgp-1", map[string]interface{}{LabelManagedBy: LabelManagedByVal}, "true")
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(existing).Build()
+
+	config := &networkingv1alpha1.CUDNBgpConfig{ObjectMeta: metav1.ObjectMeta{Name: "cluster", UID: testConfigUID}}
+	// A different spec so a wrongful adopt would also overwrite it.
+	desired := newFRRConfigObject("cudn-bgp-1", map[string]interface{}{LabelManagedBy: LabelManagedByVal}, "false")
+	setFRRConfigurationOwnerReference(desired, config)
+
+	if err := createOrUpdate(ctx, c, desired); err == nil {
+		t.Fatal("expected createOrUpdate to refuse adopting an object without our owner reference")
+	}
+
+	after := &unstructured.Unstructured{}
+	after.SetGroupVersionKind(FRRConfigurationGVK)
+	if err := c.Get(ctx, types.NamespacedName{Name: "cudn-bgp-1", Namespace: FRRNamespace}, after); err != nil {
+		t.Fatalf("get after: %v", err)
+	}
+	if len(after.GetOwnerReferences()) != 0 {
+		t.Fatalf("expected object to remain unowned, got owner refs %v", after.GetOwnerReferences())
+	}
+	value, _, _ := unstructured.NestedString(after.Object, "spec", "nodeSelector", "matchLabels", "bgp_router")
+	if value != "true" {
+		t.Fatalf("expected existing spec to remain unchanged, got bgp_router=%q", value)
 	}
 }
 

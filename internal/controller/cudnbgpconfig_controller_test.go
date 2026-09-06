@@ -19,11 +19,13 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -32,6 +34,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	networkingv1alpha1 "github.com/openshift/bgp-cloud-connector/api/v1alpha1"
@@ -140,6 +143,10 @@ func TestConfigReconcile_FullReconcile(t *testing.T) {
 	frrConfig.SetGroupVersionKind(FRRConfigurationGVK)
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "cudn-bgp-1", Namespace: FRRNamespace}, frrConfig); err != nil {
 		t.Fatalf("FRRConfiguration not created: %v", err)
+	}
+	if updated.Status.FRRProviderOwnership != networkingv1alpha1.NetworkPatchOwnershipOwned ||
+		updated.Status.RouteAdvertisementsOwnership != networkingv1alpha1.NetworkPatchOwnershipOwned {
+		t.Error("expected both Network fields Owned when neither was pre-existing")
 	}
 }
 
@@ -1033,6 +1040,7 @@ func TestConfigReconcile_DeleteSuccessful(t *testing.T) {
 	mock := &mockPlatform{}
 	now := metav1.Now()
 	config := newTestCUDNBgpConfigWithAWS()
+	config.UID = testConfigUID
 	config.Finalizers = []string{ConfigFinalizerName}
 	config.DeletionTimestamp = &now
 
@@ -1047,6 +1055,7 @@ func TestConfigReconcile_DeleteSuccessful(t *testing.T) {
 			},
 		},
 	}
+	withCUDNBgpConfigOwner(frrObj, config)
 
 	s := configTestScheme()
 	c := fake.NewClientBuilder().WithScheme(s).
@@ -1373,5 +1382,426 @@ func TestDefaultPlatformBuilder_UnknownPlatform(t *testing.T) {
 	_, err := defaultPlatformBuilder(context.Background(), c, config)
 	if err == nil || !strings.Contains(err.Error(), "no platform implementation") {
 		t.Errorf("expected an unknown platform to be refused, got %v", err)
+	}
+}
+
+// --- Network patch ownership tracking (Phase 1) ---
+
+func TestConfigReconcile_SetsNetworkOwnershipWhenNotPreExisting(t *testing.T) {
+	config := newTestCUDNBgpConfig()
+	s := configTestScheme()
+	frrNS := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: FRRNamespace}}
+	frrPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "frr-k8s-pod", Namespace: FRRNamespace, Labels: map[string]string{"app": "frr-k8s"}},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(config, newEmptyNetwork(), frrNS, frrPod).
+		WithStatusSubresource(config).
+		Build()
+
+	r := &CUDNBgpConfigReconciler{Client: c, Scheme: s}
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}}); err != nil {
+		t.Fatalf("first reconcile error: %v", err)
+	}
+	_, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}})
+	if err != nil {
+		t.Fatalf("reconcile error: %v", err)
+	}
+
+	updated := &networkingv1alpha1.CUDNBgpConfig{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, updated); err != nil {
+		t.Fatalf("failed to get config: %v", err)
+	}
+	if updated.Status.FRRProviderOwnership != networkingv1alpha1.NetworkPatchOwnershipOwned {
+		t.Error("expected FRRProviderOwnership=Owned when FRR was not active before first patch")
+	}
+	if updated.Status.RouteAdvertisementsOwnership != networkingv1alpha1.NetworkPatchOwnershipOwned {
+		t.Error("expected RouteAdvertisementsOwnership=Owned when routeAdvertisements was not Enabled before first patch")
+	}
+}
+
+func TestConfigReconcile_DoesNotPersistOwnedWhenNetworkPatchFails(t *testing.T) {
+	config := newTestCUDNBgpConfig()
+	s := configTestScheme()
+	frrNS := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: FRRNamespace}}
+	frrPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "frr-k8s-pod", Namespace: FRRNamespace, Labels: map[string]string{"app": "frr-k8s"}},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(config, newEmptyNetwork(), frrNS, frrPod).
+		WithStatusSubresource(config).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if obj.GetObjectKind().GroupVersionKind() == NetworkGVK {
+					return fmt.Errorf("injected patch failure")
+				}
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}).
+		Build()
+
+	r := &CUDNBgpConfigReconciler{Client: c, Scheme: s}
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}}); err != nil {
+		t.Fatalf("first reconcile error: %v", err)
+	}
+
+	updated := &networkingv1alpha1.CUDNBgpConfig{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, updated); err != nil {
+		t.Fatalf("failed to get config: %v", err)
+	}
+	if updated.Status.FRRProviderOwnership != "" {
+		t.Errorf("FRRProviderOwnership=%q, want empty when Network patch failed", updated.Status.FRRProviderOwnership)
+	}
+	if updated.Status.RouteAdvertisementsOwnership != "" {
+		t.Errorf("RouteAdvertisementsOwnership=%q, want empty when Network patch failed", updated.Status.RouteAdvertisementsOwnership)
+	}
+}
+
+func TestConfigReconcile_SetsExternalOwnershipWhenFRRPreExisting(t *testing.T) {
+	// Network/cluster already has FRR before the operator starts (External ownership).
+	config := newTestCUDNBgpConfig()
+	s := configTestScheme()
+	frrNS := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: FRRNamespace}}
+	frrPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "frr-k8s-pod", Namespace: FRRNamespace, Labels: map[string]string{"app": "frr-k8s"}},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(config, newFRREnabledNetwork(), frrNS, frrPod).
+		WithStatusSubresource(config).
+		Build()
+
+	r := &CUDNBgpConfigReconciler{Client: c, Scheme: s}
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}}); err != nil {
+		t.Fatalf("first reconcile error: %v", err)
+	}
+	_, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}})
+	if err != nil {
+		t.Fatalf("reconcile error: %v", err)
+	}
+
+	updated := &networkingv1alpha1.CUDNBgpConfig{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, updated); err != nil {
+		t.Fatalf("failed to get config: %v", err)
+	}
+	if updated.Status.FRRProviderOwnership != networkingv1alpha1.NetworkPatchOwnershipExternal {
+		t.Errorf("expected FRRProviderOwnership=External when FRR was already active, got %q", updated.Status.FRRProviderOwnership)
+	}
+	if updated.Status.RouteAdvertisementsOwnership != networkingv1alpha1.NetworkPatchOwnershipExternal {
+		t.Errorf("expected RouteAdvertisementsOwnership=External when routeAdvertisements was already Enabled, got %q", updated.Status.RouteAdvertisementsOwnership)
+	}
+}
+
+func TestConfigReconcile_PartialNetworkOwnership(t *testing.T) {
+	cases := []struct {
+		name                             string
+		network                          *unstructured.Unstructured
+		wantFRRProviderOwnership         networkingv1alpha1.NetworkPatchOwnership
+		wantRouteAdvertisementsOwnership networkingv1alpha1.NetworkPatchOwnership
+	}{
+		{
+			name: "FRR already in providers, claim only route ads",
+			network: newNetworkObject(map[string]interface{}{
+				"additionalRoutingCapabilities": map[string]interface{}{
+					"providers": []interface{}{FRRProviderName},
+				},
+			}),
+			wantFRRProviderOwnership:         networkingv1alpha1.NetworkPatchOwnershipExternal,
+			wantRouteAdvertisementsOwnership: networkingv1alpha1.NetworkPatchOwnershipOwned,
+		},
+		{
+			name: "route ads already Enabled, claim only FRR",
+			network: newNetworkObject(map[string]interface{}{
+				"defaultNetwork": map[string]interface{}{
+					"ovnKubernetesConfig": map[string]interface{}{
+						"routeAdvertisements": RouteAdvertisementsOn,
+					},
+				},
+			}),
+			wantFRRProviderOwnership:         networkingv1alpha1.NetworkPatchOwnershipOwned,
+			wantRouteAdvertisementsOwnership: networkingv1alpha1.NetworkPatchOwnershipExternal,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			config := newTestCUDNBgpConfig()
+			s := configTestScheme()
+			frrNS := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: FRRNamespace}}
+			frrPod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "frr-k8s-pod", Namespace: FRRNamespace, Labels: map[string]string{"app": "frr-k8s"}},
+				Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+			}
+			c := fake.NewClientBuilder().WithScheme(s).
+				WithObjects(config, tc.network, frrNS, frrPod).
+				WithStatusSubresource(config).
+				Build()
+			r := &CUDNBgpConfigReconciler{Client: c, Scheme: s}
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}}
+			if _, err := r.Reconcile(context.Background(), req); err != nil {
+				t.Fatalf("first reconcile: %v", err)
+			}
+			if _, err := r.Reconcile(context.Background(), req); err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			updated := &networkingv1alpha1.CUDNBgpConfig{}
+			if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, updated); err != nil {
+				t.Fatalf("get config: %v", err)
+			}
+			if updated.Status.FRRProviderOwnership != tc.wantFRRProviderOwnership {
+				t.Errorf("FRRProviderOwnership=%q, want %q", updated.Status.FRRProviderOwnership, tc.wantFRRProviderOwnership)
+			}
+			if updated.Status.RouteAdvertisementsOwnership != tc.wantRouteAdvertisementsOwnership {
+				t.Errorf("RouteAdvertisementsOwnership=%q, want %q", updated.Status.RouteAdvertisementsOwnership, tc.wantRouteAdvertisementsOwnership)
+			}
+			gotNetwork := &unstructured.Unstructured{}
+			gotNetwork.SetGroupVersionKind(NetworkGVK)
+			if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, gotNetwork); err != nil {
+				t.Fatalf("get Network: %v", err)
+			}
+			if tc.wantRouteAdvertisementsOwnership == networkingv1alpha1.NetworkPatchOwnershipOwned && mustNetworkRouteAds(t, gotNetwork) != RouteAdvertisementsOn {
+				t.Error("expected routeAdvertisements Enabled after claiming RouteAdvertisementsOwnership=Owned")
+			}
+			if tc.wantFRRProviderOwnership == networkingv1alpha1.NetworkPatchOwnershipOwned {
+				hasFRR := false
+				for _, p := range mustNetworkProviders(t, gotNetwork) {
+					if p == FRRProviderName {
+						hasFRR = true
+					}
+				}
+				if !hasFRR {
+					t.Error("expected FRR in providers after claiming FRRProviderOwnership=Owned")
+				}
+			}
+		})
+	}
+}
+
+// --- reconcileDelete: Network unpatch ---
+
+func TestConfigReconcile_DeleteUnpatchesNetworkWhenOwned(t *testing.T) {
+	now := metav1.Now()
+	config := newTestCUDNBgpConfig()
+	config.UID = testConfigUID
+	config.Finalizers = []string{ConfigFinalizerName}
+	config.DeletionTimestamp = &now
+	config.Status.FRRProviderOwnership = networkingv1alpha1.NetworkPatchOwnershipOwned
+	config.Status.RouteAdvertisementsOwnership = networkingv1alpha1.NetworkPatchOwnershipOwned
+
+	managedFRR := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "frrk8s.metallb.io/v1beta1", "kind": "FRRConfiguration",
+		"metadata": map[string]interface{}{
+			"name":       "cudn-bgp-1",
+			"namespace":  FRRNamespace,
+			"labels":     map[string]interface{}{LabelManagedBy: LabelManagedByVal},
+			"finalizers": []interface{}{"frrk8s.metallb.io/finalizer"},
+		},
+	}}
+	withCUDNBgpConfigOwner(managedFRR, config)
+
+	s := configTestScheme()
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(config, newFRREnabledNetwork(), managedFRR).
+		WithStatusSubresource(config).
+		Build()
+
+	r := &CUDNBgpConfigReconciler{Client: c, Scheme: s}
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	frrObj := &unstructured.Unstructured{}
+	frrObj.SetGroupVersionKind(FRRConfigurationGVK)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cudn-bgp-1", Namespace: FRRNamespace}, frrObj); err != nil {
+		if !apierrors.IsNotFound(err) {
+			t.Fatalf("failed to get managed FRRConfiguration: %v", err)
+		}
+	} else if frrObj.GetDeletionTimestamp().IsZero() {
+		t.Error("managed FRRConfiguration should be deleted or terminating")
+	}
+
+	updated := &networkingv1alpha1.CUDNBgpConfig{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, updated); err != nil {
+		if !apierrors.IsNotFound(err) {
+			t.Fatalf("failed to get config after delete: %v", err)
+		}
+	} else {
+		for _, f := range updated.Finalizers {
+			if f == ConfigFinalizerName {
+				t.Error("finalizer should be removed after delete")
+			}
+		}
+	}
+
+	network := &unstructured.Unstructured{}
+	network.SetGroupVersionKind(NetworkGVK)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, network); err != nil {
+		t.Fatalf("failed to read Network: %v", err)
+	}
+	if networkHasFRRProvider(t, network) {
+		t.Error("FRR should be removed from Network/cluster after delete")
+	}
+	if got := mustNetworkRouteAds(t, network); got != RouteAdvertisementsDisabled {
+		t.Errorf("routeAdvertisements = %q, want %q after delete", got, RouteAdvertisementsDisabled)
+	}
+}
+
+// TestConfigReconcile_DeleteRemovesFinalizerWhenUnpatchFails asserts that a
+// failure reverting the Network/cluster patch is best-effort: it must not wedge
+// the finalizer and leave the CUDNBgpConfig stuck Terminating forever.
+func TestConfigReconcile_DeleteRemovesFinalizerWhenUnpatchFails(t *testing.T) {
+	now := metav1.Now()
+	config := newTestCUDNBgpConfig()
+	config.Finalizers = []string{ConfigFinalizerName}
+	config.DeletionTimestamp = &now
+	config.Status.FRRProviderOwnership = networkingv1alpha1.NetworkPatchOwnershipOwned
+	config.Status.RouteAdvertisementsOwnership = networkingv1alpha1.NetworkPatchOwnershipOwned
+
+	s := configTestScheme()
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(config, newFRREnabledNetwork()).
+		WithStatusSubresource(config).
+		WithInterceptorFuncs(interceptor.Funcs{
+			// Fail the Network/cluster revert patch to simulate a webhook rejection
+			// or transient API error during unpatch.
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if obj.GetObjectKind().GroupVersionKind() == NetworkGVK {
+					return fmt.Errorf("injected patch failure")
+				}
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}).
+		Build()
+
+	r := &CUDNBgpConfigReconciler{Client: c, Scheme: s}
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}}); err != nil {
+		t.Fatalf("reconcileDelete must not return an error when unpatch fails, got: %v", err)
+	}
+
+	updated := &networkingv1alpha1.CUDNBgpConfig{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, updated); err != nil {
+		if apierrors.IsNotFound(err) {
+			return // config fully deleted once finalizer was removed — acceptable
+		}
+		t.Fatalf("failed to get config after delete: %v", err)
+	}
+	for _, f := range updated.Finalizers {
+		if f == ConfigFinalizerName {
+			t.Error("finalizer must be removed even when Network unpatch fails, to avoid a stuck deletion")
+		}
+	}
+}
+
+func TestConfigReconcile_DeleteSkipsUnpatchWhenNotOwned(t *testing.T) {
+	// FRR was pre-existing; delete must not unpatch Network/cluster.
+	now := metav1.Now()
+	config := newTestCUDNBgpConfig()
+	config.Finalizers = []string{ConfigFinalizerName}
+	config.DeletionTimestamp = &now
+
+	s := configTestScheme()
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(config, newFRREnabledNetwork()).
+		WithStatusSubresource(config).
+		Build()
+
+	r := &CUDNBgpConfigReconciler{Client: c, Scheme: s}
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	network := &unstructured.Unstructured{}
+	network.SetGroupVersionKind(NetworkGVK)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, network); err != nil {
+		t.Fatalf("failed to read Network: %v", err)
+	}
+	providers := mustNetworkProviders(t, network)
+	hasFRR := false
+	for _, p := range providers {
+		if p == FRRProviderName {
+			hasFRR = true
+		}
+	}
+	if !hasFRR {
+		t.Error("Network should not be unpatched when FRRProviderOwnership is not Owned")
+	}
+	if mustNetworkRouteAds(t, network) != RouteAdvertisementsOn {
+		t.Error("routeAdvertisements should remain Enabled when RouteAdvertisementsOwnership is not Owned")
+	}
+}
+
+func TestConfigReconcile_DeleteSkipsUnpatchWhenExternalFRRConfigExists(t *testing.T) {
+	now := metav1.Now()
+	config := newTestCUDNBgpConfig()
+	config.UID = testConfigUID
+	config.Finalizers = []string{ConfigFinalizerName}
+	config.DeletionTimestamp = &now
+	config.Status.FRRProviderOwnership = networkingv1alpha1.NetworkPatchOwnershipOwned
+	config.Status.RouteAdvertisementsOwnership = networkingv1alpha1.NetworkPatchOwnershipOwned
+
+	externalFRR := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "frrk8s.metallb.io/v1beta1", "kind": "FRRConfiguration",
+		"metadata": map[string]interface{}{
+			"name": "external-frr", "namespace": FRRNamespace,
+			"labels": map[string]interface{}{"owner": "metallb"},
+		},
+	}}
+	managedFRR := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "frrk8s.metallb.io/v1beta1", "kind": "FRRConfiguration",
+		"metadata": map[string]interface{}{
+			"name": "cudn-bgp-1", "namespace": FRRNamespace,
+			"labels": map[string]interface{}{LabelManagedBy: LabelManagedByVal},
+		},
+	}}
+	withCUDNBgpConfigOwner(managedFRR, config)
+
+	s := configTestScheme()
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(config, newFRREnabledNetwork(), externalFRR, managedFRR).
+		WithStatusSubresource(config).
+		Build()
+
+	r := &CUDNBgpConfigReconciler{Client: c, Scheme: s}
+	res, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.RequeueAfter == 0 {
+		t.Error("deletion should requeue while an external FRRConfiguration still exists")
+	}
+
+	network := &unstructured.Unstructured{}
+	network.SetGroupVersionKind(NetworkGVK)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, network); err != nil {
+		t.Fatalf("failed to read Network: %v", err)
+	}
+	providers := mustNetworkProviders(t, network)
+	hasFRR := false
+	for _, p := range providers {
+		if p == FRRProviderName {
+			hasFRR = true
+		}
+	}
+	if !hasFRR {
+		t.Error("Network should not be unpatched when external FRRConfiguration still exists")
+	}
+	if mustNetworkRouteAds(t, network) != RouteAdvertisementsOn {
+		t.Error("routeAdvertisements should remain Enabled when external FRRConfiguration still exists")
+	}
+
+	// The finalizer must be retained so ownership survives until the external
+	// consumer is gone; otherwise nothing could ever revert the Network patch.
+	updated := &networkingv1alpha1.CUDNBgpConfig{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, updated); err != nil {
+		t.Fatalf("CUDNBgpConfig should still exist (finalizer retained): %v", err)
+	}
+	if !slices.Contains(updated.Finalizers, ConfigFinalizerName) {
+		t.Error("finalizer should be retained while an external FRRConfiguration still exists")
+	}
+
+	cond := meta.FindStatusCondition(updated.Status.Conditions, ConditionDeletionBlocked)
+	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != ReasonExternalFRRConfigsExist {
+		t.Errorf("expected DeletionBlocked=True/%s condition, got %+v", ReasonExternalFRRConfigsExist, cond)
 	}
 }

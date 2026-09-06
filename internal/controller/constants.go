@@ -28,10 +28,13 @@ const (
 	FRRNamespace  = "openshift-frr-k8s"
 	// DefaultOperatorNamespace is where the operator runs unless the
 	// Deployment says otherwise through POD_NAMESPACE.
-	DefaultOperatorNamespace = "openshift-cudn-bgp-routing"
-	FRRConfigNamePrefix      = "cudn-bgp-"
-	CUDNNamePrefix           = "cluster-udn-"
-	RouteAdvertisementName   = "cudn-bgp-route-advertisements"
+	DefaultOperatorNamespace    = "openshift-cudn-bgp-routing"
+	FRRConfigNamePrefix         = "cudn-bgp-"
+	FRRProviderName             = "FRR"
+	CUDNNamePrefix              = "cluster-udn-"
+	RouteAdvertisementName      = "cudn-bgp-route-advertisements"
+	RouteAdvertisementsOn       = "Enabled"
+	RouteAdvertisementsDisabled = "Disabled"
 
 	// RawFRRConfigPriority orders this raw block against the raw blocks of
 	// other FRRConfigurations, a higher value being appended later. It says
@@ -58,6 +61,7 @@ const (
 
 	// Transient degraded reasons
 	ReasonPatchFailed          = "PatchFailed"
+	ReasonNetworkReadFailed    = "NetworkReadFailed"
 	ReasonCheckFailed          = "CheckFailed"
 	ReasonCloudDiscoveryFailed = "CloudDiscoveryFailed"
 	ReasonApplyFailed          = "ApplyFailed"
@@ -67,14 +71,15 @@ const (
 	ReasonRAFailed             = "RAFailed"
 
 	// Success / informational reasons
-	ReasonPatched         = "Patched"
-	ReasonWaitingForFRR   = "WaitingForFRR"
-	ReasonFRRReady        = "Ready"
-	ReasonDiscovered      = "Discovered"
-	ReasonApplied         = "Applied"
-	ReasonReconciled      = "Reconciled"
-	ReasonCreated         = "Created"
-	ReasonRoutingCRsExist = "RoutingCRsExist"
+	ReasonPatched                 = "Patched"
+	ReasonWaitingForFRR           = "WaitingForFRR"
+	ReasonFRRReady                = "Ready"
+	ReasonDiscovered              = "Discovered"
+	ReasonApplied                 = "Applied"
+	ReasonReconciled              = "Reconciled"
+	ReasonCreated                 = "Created"
+	ReasonRoutingCRsExist         = "RoutingCRsExist"
+	ReasonExternalFRRConfigsExist = "ExternalFRRConfigsExist"
 )
 
 // TerminalDegradedReasons returns condition reasons that must not schedule RequeueAfter.
