@@ -384,9 +384,11 @@ spec:
                 x-kubernetes-list-type: map
               frrProviderOwnership:
                 description: |-
-                  FRRProviderOwnership is External when FRR was already in
-                  additionalRoutingCapabilities.providers before this controller patched
-                  Network/cluster, or Owned when this controller added it.
+                  FRRProviderOwnership records whether this controller may revert the FRR
+                  provider patch on Network/cluster additionalRoutingCapabilities.providers.
+                  Empty until the first Phase 1 reconcile completes.
+                  Owned: this controller enabled FRR and may revert it on CUDNBgpConfig deletion.
+                  External: FRR was already enabled before the first Phase 1 reconcile.
                 enum:
                 - External
                 - Owned
@@ -478,11 +480,16 @@ spec:
                 - Ready
                 - Degraded
                 type: string
-              routeAdsOwnership:
+              routeAdvertisementsOwnership:
                 description: |-
-                  RouteAdsOwnership is External when routeAdvertisements was already
-                  Enabled before this controller patched Network/cluster, or Owned when
-                  this controller enabled it.
+                  RouteAdvertisementsOwnership records whether this controller may revert the
+                  routeAdvertisements patch on Network/cluster defaultNetwork.ovnKubernetesConfig.
+                  This documents the Network/cluster routeAdvertisements toggle, not the
+                  RouteAdvertisements CR.
+                  Empty until the first Phase 1 reconcile completes.
+                  Owned: this controller enabled route advertisements and may revert them on
+                  CUDNBgpConfig deletion.
+                  External: routeAdvertisements was already Enabled before the first Phase 1 reconcile.
                 enum:
                 - External
                 - Owned

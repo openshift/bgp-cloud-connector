@@ -40,14 +40,14 @@ const (
 	PhaseDegraded    PhaseType = "Degraded"
 )
 
-// NetworkPatchOwnership records whether this controller owns a Network/cluster
-// field it may revert on deletion, or whether it was already set externally.
+// NetworkPatchOwnership states whether this controller may revert a
+// Network/cluster field when CUDNBgpConfig is deleted.
 // +kubebuilder:validation:Enum=External;Owned
 type NetworkPatchOwnership string
 
 const (
 	// NetworkPatchOwnershipExternal means the field was already set before this
-	// controller patched Network/cluster (e.g. hack/enable-frr.sh in e2e).
+	// controller patched Network/cluster.
 	NetworkPatchOwnershipExternal NetworkPatchOwnership = "External"
 	// NetworkPatchOwnershipOwned means this controller enabled the field and may
 	// revert it on CUDNBgpConfig deletion.
@@ -314,16 +314,23 @@ type CUDNBgpConfigStatus struct {
 	// +listType=atomic
 	// +kubebuilder:validation:MaxItems=16
 	PeerGroups []PeerGroupStatus `json:"peerGroups,omitempty"`
-	// FRRProviderOwnership is External when FRR was already in
-	// additionalRoutingCapabilities.providers before this controller patched
-	// Network/cluster, or Owned when this controller added it.
+	// FRRProviderOwnership records whether this controller may revert the FRR
+	// provider patch on Network/cluster additionalRoutingCapabilities.providers.
+	// Empty until the first Phase 1 reconcile completes.
+	// Owned: this controller enabled FRR and may revert it on CUDNBgpConfig deletion.
+	// External: FRR was already enabled before the first Phase 1 reconcile.
 	// +optional
 	FRRProviderOwnership NetworkPatchOwnership `json:"frrProviderOwnership,omitempty"`
-	// RouteAdsOwnership is External when routeAdvertisements was already
-	// Enabled before this controller patched Network/cluster, or Owned when
-	// this controller enabled it.
+	// RouteAdvertisementsOwnership records whether this controller may revert the
+	// routeAdvertisements patch on Network/cluster defaultNetwork.ovnKubernetesConfig.
+	// This documents the Network/cluster routeAdvertisements toggle, not the
+	// RouteAdvertisements CR.
+	// Empty until the first Phase 1 reconcile completes.
+	// Owned: this controller enabled route advertisements and may revert them on
+	// CUDNBgpConfig deletion.
+	// External: routeAdvertisements was already Enabled before the first Phase 1 reconcile.
 	// +optional
-	RouteAdsOwnership NetworkPatchOwnership `json:"routeAdsOwnership,omitempty"`
+	RouteAdvertisementsOwnership NetworkPatchOwnership `json:"routeAdvertisementsOwnership,omitempty"`
 }
 
 // +kubebuilder:object:root=true
