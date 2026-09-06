@@ -145,7 +145,7 @@ func TestConfigReconcile_FullReconcile(t *testing.T) {
 		t.Fatalf("FRRConfiguration not created: %v", err)
 	}
 	if updated.Status.FRRProviderOwnership != networkingv1alpha1.NetworkPatchOwnershipOwned ||
-		updated.Status.RouteAdsOwnership != networkingv1alpha1.NetworkPatchOwnershipOwned {
+		updated.Status.RouteAdvertisementsOwnership != networkingv1alpha1.NetworkPatchOwnershipOwned {
 		t.Error("expected both Network fields Owned when neither was pre-existing")
 	}
 }
@@ -1416,13 +1416,51 @@ func TestConfigReconcile_SetsNetworkOwnershipWhenNotPreExisting(t *testing.T) {
 	if updated.Status.FRRProviderOwnership != networkingv1alpha1.NetworkPatchOwnershipOwned {
 		t.Error("expected FRRProviderOwnership=Owned when FRR was not active before first patch")
 	}
-	if updated.Status.RouteAdsOwnership != networkingv1alpha1.NetworkPatchOwnershipOwned {
-		t.Error("expected RouteAdsOwnership=Owned when routeAdvertisements was not Enabled before first patch")
+	if updated.Status.RouteAdvertisementsOwnership != networkingv1alpha1.NetworkPatchOwnershipOwned {
+		t.Error("expected RouteAdvertisementsOwnership=Owned when routeAdvertisements was not Enabled before first patch")
+	}
+}
+
+func TestConfigReconcile_DoesNotPersistOwnedWhenNetworkPatchFails(t *testing.T) {
+	config := newTestCUDNBgpConfig()
+	s := configTestScheme()
+	frrNS := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: FRRNamespace}}
+	frrPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "frr-k8s-pod", Namespace: FRRNamespace, Labels: map[string]string{"app": "frr-k8s"}},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(config, newEmptyNetwork(), frrNS, frrPod).
+		WithStatusSubresource(config).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if obj.GetObjectKind().GroupVersionKind() == NetworkGVK {
+					return fmt.Errorf("injected patch failure")
+				}
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}).
+		Build()
+
+	r := &CUDNBgpConfigReconciler{Client: c, Scheme: s}
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}}); err != nil {
+		t.Fatalf("first reconcile error: %v", err)
+	}
+
+	updated := &networkingv1alpha1.CUDNBgpConfig{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, updated); err != nil {
+		t.Fatalf("failed to get config: %v", err)
+	}
+	if updated.Status.FRRProviderOwnership != "" {
+		t.Errorf("FRRProviderOwnership=%q, want empty when Network patch failed", updated.Status.FRRProviderOwnership)
+	}
+	if updated.Status.RouteAdvertisementsOwnership != "" {
+		t.Errorf("RouteAdvertisementsOwnership=%q, want empty when Network patch failed", updated.Status.RouteAdvertisementsOwnership)
 	}
 }
 
 func TestConfigReconcile_SetsExternalOwnershipWhenFRRPreExisting(t *testing.T) {
-	// Mirrors e2e: hack/enable-frr.sh patches Network/cluster before the operator starts.
+	// Network/cluster already has FRR before the operator starts (External ownership).
 	config := newTestCUDNBgpConfig()
 	s := configTestScheme()
 	frrNS := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: FRRNamespace}}
@@ -1451,8 +1489,8 @@ func TestConfigReconcile_SetsExternalOwnershipWhenFRRPreExisting(t *testing.T) {
 	if updated.Status.FRRProviderOwnership != networkingv1alpha1.NetworkPatchOwnershipExternal {
 		t.Errorf("expected FRRProviderOwnership=External when FRR was already active, got %q", updated.Status.FRRProviderOwnership)
 	}
-	if updated.Status.RouteAdsOwnership != networkingv1alpha1.NetworkPatchOwnershipExternal {
-		t.Errorf("expected RouteAdsOwnership=External when routeAdvertisements was already Enabled, got %q", updated.Status.RouteAdsOwnership)
+	if updated.Status.RouteAdvertisementsOwnership != networkingv1alpha1.NetworkPatchOwnershipExternal {
+		t.Errorf("expected RouteAdvertisementsOwnership=External when routeAdvertisements was already Enabled, got %q", updated.Status.RouteAdvertisementsOwnership)
 	}
 }
 
@@ -1461,7 +1499,7 @@ func TestConfigReconcile_PartialNetworkOwnership(t *testing.T) {
 		name                     string
 		network                  *unstructured.Unstructured
 		wantFRRProviderOwnership networkingv1alpha1.NetworkPatchOwnership
-		wantRouteAdsOwnership    networkingv1alpha1.NetworkPatchOwnership
+		wantRouteAdvertisementsOwnership    networkingv1alpha1.NetworkPatchOwnership
 	}{
 		{
 			name: "FRR already in providers, claim only route ads",
@@ -1471,7 +1509,7 @@ func TestConfigReconcile_PartialNetworkOwnership(t *testing.T) {
 				},
 			}),
 			wantFRRProviderOwnership: networkingv1alpha1.NetworkPatchOwnershipExternal,
-			wantRouteAdsOwnership:    networkingv1alpha1.NetworkPatchOwnershipOwned,
+			wantRouteAdvertisementsOwnership:    networkingv1alpha1.NetworkPatchOwnershipOwned,
 		},
 		{
 			name: "route ads already Enabled, claim only FRR",
@@ -1483,7 +1521,7 @@ func TestConfigReconcile_PartialNetworkOwnership(t *testing.T) {
 				},
 			}),
 			wantFRRProviderOwnership: networkingv1alpha1.NetworkPatchOwnershipOwned,
-			wantRouteAdsOwnership:    networkingv1alpha1.NetworkPatchOwnershipExternal,
+			wantRouteAdvertisementsOwnership:    networkingv1alpha1.NetworkPatchOwnershipExternal,
 		},
 	}
 	for _, tc := range cases {
@@ -1514,16 +1552,16 @@ func TestConfigReconcile_PartialNetworkOwnership(t *testing.T) {
 			if updated.Status.FRRProviderOwnership != tc.wantFRRProviderOwnership {
 				t.Errorf("FRRProviderOwnership=%q, want %q", updated.Status.FRRProviderOwnership, tc.wantFRRProviderOwnership)
 			}
-			if updated.Status.RouteAdsOwnership != tc.wantRouteAdsOwnership {
-				t.Errorf("RouteAdsOwnership=%q, want %q", updated.Status.RouteAdsOwnership, tc.wantRouteAdsOwnership)
+			if updated.Status.RouteAdvertisementsOwnership != tc.wantRouteAdvertisementsOwnership {
+				t.Errorf("RouteAdvertisementsOwnership=%q, want %q", updated.Status.RouteAdvertisementsOwnership, tc.wantRouteAdvertisementsOwnership)
 			}
 			gotNetwork := &unstructured.Unstructured{}
 			gotNetwork.SetGroupVersionKind(NetworkGVK)
 			if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, gotNetwork); err != nil {
 				t.Fatalf("get Network: %v", err)
 			}
-			if tc.wantRouteAdsOwnership == networkingv1alpha1.NetworkPatchOwnershipOwned && mustNetworkRouteAds(t, gotNetwork) != RouteAdvertisementsOn {
-				t.Error("expected routeAdvertisements Enabled after claiming RouteAdsOwnership=Owned")
+			if tc.wantRouteAdvertisementsOwnership == networkingv1alpha1.NetworkPatchOwnershipOwned && mustNetworkRouteAds(t, gotNetwork) != RouteAdvertisementsOn {
+				t.Error("expected routeAdvertisements Enabled after claiming RouteAdvertisementsOwnership=Owned")
 			}
 			if tc.wantFRRProviderOwnership == networkingv1alpha1.NetworkPatchOwnershipOwned {
 				hasFRR := false
@@ -1549,7 +1587,7 @@ func TestConfigReconcile_DeleteUnpatchesNetworkWhenOwned(t *testing.T) {
 	config.Finalizers = []string{ConfigFinalizerName}
 	config.DeletionTimestamp = &now
 	config.Status.FRRProviderOwnership = networkingv1alpha1.NetworkPatchOwnershipOwned
-	config.Status.RouteAdsOwnership = networkingv1alpha1.NetworkPatchOwnershipOwned
+	config.Status.RouteAdvertisementsOwnership = networkingv1alpha1.NetworkPatchOwnershipOwned
 
 	managedFRR := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "frrk8s.metallb.io/v1beta1", "kind": "FRRConfiguration",
@@ -1618,7 +1656,7 @@ func TestConfigReconcile_DeleteRemovesFinalizerWhenUnpatchFails(t *testing.T) {
 	config.Finalizers = []string{ConfigFinalizerName}
 	config.DeletionTimestamp = &now
 	config.Status.FRRProviderOwnership = networkingv1alpha1.NetworkPatchOwnershipOwned
-	config.Status.RouteAdsOwnership = networkingv1alpha1.NetworkPatchOwnershipOwned
+	config.Status.RouteAdvertisementsOwnership = networkingv1alpha1.NetworkPatchOwnershipOwned
 
 	s := configTestScheme()
 	c := fake.NewClientBuilder().WithScheme(s).
@@ -1656,7 +1694,7 @@ func TestConfigReconcile_DeleteRemovesFinalizerWhenUnpatchFails(t *testing.T) {
 }
 
 func TestConfigReconcile_DeleteSkipsUnpatchWhenNotOwned(t *testing.T) {
-	// Same scenario as enable-frr.sh in e2e: FRR was pre-existing, so delete must not unpatch.
+	// FRR was pre-existing; delete must not unpatch Network/cluster.
 	now := metav1.Now()
 	config := newTestCUDNBgpConfig()
 	config.Finalizers = []string{ConfigFinalizerName}
@@ -1689,7 +1727,7 @@ func TestConfigReconcile_DeleteSkipsUnpatchWhenNotOwned(t *testing.T) {
 		t.Error("Network should not be unpatched when FRRProviderOwnership is not Owned")
 	}
 	if mustNetworkRouteAds(t, network) != RouteAdvertisementsOn {
-		t.Error("routeAdvertisements should remain Enabled when RouteAdsOwnership is not Owned")
+		t.Error("routeAdvertisements should remain Enabled when RouteAdvertisementsOwnership is not Owned")
 	}
 }
 
@@ -1700,7 +1738,7 @@ func TestConfigReconcile_DeleteSkipsUnpatchWhenExternalFRRConfigExists(t *testin
 	config.Finalizers = []string{ConfigFinalizerName}
 	config.DeletionTimestamp = &now
 	config.Status.FRRProviderOwnership = networkingv1alpha1.NetworkPatchOwnershipOwned
-	config.Status.RouteAdsOwnership = networkingv1alpha1.NetworkPatchOwnershipOwned
+	config.Status.RouteAdvertisementsOwnership = networkingv1alpha1.NetworkPatchOwnershipOwned
 
 	externalFRR := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "frrk8s.metallb.io/v1beta1", "kind": "FRRConfiguration",

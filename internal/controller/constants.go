@@ -61,6 +61,7 @@ const (
 
 	// Transient degraded reasons
 	ReasonPatchFailed          = "PatchFailed"
+	ReasonNetworkReadFailed    = "NetworkReadFailed"
 	ReasonCheckFailed          = "CheckFailed"
 	ReasonCloudDiscoveryFailed = "CloudDiscoveryFailed"
 	ReasonApplyFailed          = "ApplyFailed"

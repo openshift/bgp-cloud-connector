@@ -522,11 +522,20 @@ func networkHasFRRProvider(t *testing.T, network *unstructured.Unstructured) boo
 	return false
 }
 
+func mustGetNetwork(t *testing.T, c client.Client) *unstructured.Unstructured {
+	t.Helper()
+	network, err := getNetworkCluster(context.Background(), c)
+	if err != nil {
+		t.Fatalf("get network: %v", err)
+	}
+	return network
+}
+
 // --- ReadNetworkOperatorState ---
 
 func TestReadNetworkOperatorState_NetworkNotFound(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(configTestScheme()).Build()
-	frrPresent, routeAdsOn, err := ReadNetworkOperatorState(context.Background(), c)
+	_, frrPresent, routeAdsOn, err := ReadNetworkOperatorState(context.Background(), c)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -538,7 +547,7 @@ func TestReadNetworkOperatorState_NetworkNotFound(t *testing.T) {
 func TestReadNetworkOperatorState_NoProviders(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(configTestScheme()).
 		WithObjects(newNetworkObject(map[string]interface{}{})).Build()
-	frrPresent, routeAdsOn, err := ReadNetworkOperatorState(context.Background(), c)
+	_, frrPresent, routeAdsOn, err := ReadNetworkOperatorState(context.Background(), c)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -554,7 +563,7 @@ func TestReadNetworkOperatorState_FRRProviderPresentRouteAdsDisabled(t *testing.
 				"providers": []interface{}{FRRProviderName},
 			},
 		})).Build()
-	frrPresent, routeAdsOn, err := ReadNetworkOperatorState(context.Background(), c)
+	_, frrPresent, routeAdsOn, err := ReadNetworkOperatorState(context.Background(), c)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -569,7 +578,7 @@ func TestReadNetworkOperatorState_FRRProviderPresentRouteAdsDisabled(t *testing.
 func TestReadNetworkOperatorState_FullyEnabled(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(configTestScheme()).
 		WithObjects(newFRREnabledNetwork()).Build()
-	frrPresent, routeAdsOn, err := ReadNetworkOperatorState(context.Background(), c)
+	_, frrPresent, routeAdsOn, err := ReadNetworkOperatorState(context.Background(), c)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -578,6 +587,67 @@ func TestReadNetworkOperatorState_FullyEnabled(t *testing.T) {
 	}
 	if !routeAdsOn {
 		t.Error("expected routeAdsOn=true")
+	}
+}
+
+// --- PatchNetworkOperator ---
+
+func TestPatchNetworkOperator_NoOpWhenNothingRequested(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(configTestScheme()).
+		WithObjects(newEmptyNetwork()).Build()
+	if err := PatchNetworkOperator(context.Background(), c, mustGetNetwork(t, c), false, false); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	network := &unstructured.Unstructured{}
+	network.SetGroupVersionKind(NetworkGVK)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, network); err != nil {
+		t.Fatalf("get network: %v", err)
+	}
+	if networkHasFRRProvider(t, network) {
+		t.Error("expected no FRR provider when patch flags are false")
+	}
+}
+
+func TestPatchNetworkOperator_PatchRouteAdsOnlyPreservesExistingProviders(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(configTestScheme()).
+		WithObjects(newNetworkObject(map[string]interface{}{
+			"additionalRoutingCapabilities": map[string]interface{}{
+				"providers": []interface{}{FRRProviderName, "Other"},
+			},
+		})).Build()
+	if err := PatchNetworkOperator(context.Background(), c, mustGetNetwork(t, c), false, true); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	network := &unstructured.Unstructured{}
+	network.SetGroupVersionKind(NetworkGVK)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, network); err != nil {
+		t.Fatalf("get network: %v", err)
+	}
+	providers := mustNetworkProviders(t, network)
+	if len(providers) != 2 || providers[0] != FRRProviderName || providers[1] != "Other" {
+		t.Fatalf("providers=%v, want [FRR Other]", providers)
+	}
+	if got := mustNetworkRouteAds(t, network); got != RouteAdvertisementsOn {
+		t.Fatalf("routeAdvertisements=%q, want %q", got, RouteAdvertisementsOn)
+	}
+}
+
+func TestPatchNetworkOperator_PatchFRRAndRouteAds(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(configTestScheme()).
+		WithObjects(newEmptyNetwork()).Build()
+	if err := PatchNetworkOperator(context.Background(), c, mustGetNetwork(t, c), true, true); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	network := &unstructured.Unstructured{}
+	network.SetGroupVersionKind(NetworkGVK)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, network); err != nil {
+		t.Fatalf("get network: %v", err)
+	}
+	if !networkHasFRRProvider(t, network) {
+		t.Error("expected FRR in providers")
+	}
+	if got := mustNetworkRouteAds(t, network); got != RouteAdvertisementsOn {
+		t.Fatalf("routeAdvertisements=%q, want %q", got, RouteAdvertisementsOn)
 	}
 }
 

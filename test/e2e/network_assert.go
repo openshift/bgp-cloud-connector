@@ -24,6 +24,7 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -33,8 +34,7 @@ import (
 	networkingv1alpha1 "github.com/openshift/bgp-cloud-connector/api/v1alpha1"
 )
 
-// NetworkOperatorGVK matches hack/enable-frr.sh: Network/cluster on
-// operator.openshift.io.
+// NetworkOperatorGVK is operator.openshift.io/v1 Network for Network/cluster.
 var NetworkOperatorGVK = schema.GroupVersionKind{
 	Group: "operator.openshift.io", Version: "v1", Kind: "Network",
 }
@@ -46,8 +46,7 @@ const (
 
 // CheckConfigNetworkOwnershipExternal returns an error unless CUDNBgpConfig
 // recorded External ownership for both fields, i.e. FRR and route
-// advertisements were already enabled (e.g. hack/enable-frr.sh in CI) before
-// the operator patched Network/cluster.
+// advertisements were already enabled before the operator first reconciled.
 func CheckConfigNetworkOwnershipExternal(ctx context.Context, c client.Client, configName string) error {
 	cfg := &networkingv1alpha1.CUDNBgpConfig{}
 	if err := c.Get(ctx, types.NamespacedName{Name: configName}, cfg); err != nil {
@@ -57,17 +56,17 @@ func CheckConfigNetworkOwnershipExternal(ctx context.Context, c client.Client, c
 		return fmt.Errorf("FRRProviderOwnership = %q, want External (FRR was pre-enabled; operator must not claim Owned)",
 			cfg.Status.FRRProviderOwnership)
 	}
-	if cfg.Status.RouteAdsOwnership != networkingv1alpha1.NetworkPatchOwnershipExternal {
-		return fmt.Errorf("RouteAdsOwnership = %q, want External "+
+	if cfg.Status.RouteAdvertisementsOwnership != networkingv1alpha1.NetworkPatchOwnershipExternal {
+		return fmt.Errorf("RouteAdvertisementsOwnership = %q, want External "+
 			"(routeAdvertisements was pre-enabled; operator must not claim Owned)",
-			cfg.Status.RouteAdsOwnership)
+			cfg.Status.RouteAdvertisementsOwnership)
 	}
 	return nil
 }
 
 // CheckNetworkFRREnabled returns an error unless Network/cluster still lists FRR
-// and has route advertisements Enabled. E2E runs hack/enable-frr.sh before the
-// operator; after CUDNBgpConfig delete the operator must not unpatch that state.
+// and has route advertisements Enabled. After CUDNBgpConfig delete the operator
+// must not unpatch externally pre-enabled Network state.
 func CheckNetworkFRREnabled(ctx context.Context, c client.Client) error {
 	network := &unstructured.Unstructured{}
 	network.SetGroupVersionKind(NetworkOperatorGVK)
@@ -80,14 +79,7 @@ func CheckNetworkFRREnabled(ctx context.Context, c client.Client) error {
 	if err != nil {
 		return err
 	}
-	found := false
-	for _, p := range providers {
-		if p == networkFRRProviderName {
-			found = true
-			break
-		}
-	}
-	if !found {
+	if !slices.Contains(providers, networkFRRProviderName) {
 		return fmt.Errorf("network/cluster providers %v missing FRR after CUDNBgpConfig delete", providers)
 	}
 

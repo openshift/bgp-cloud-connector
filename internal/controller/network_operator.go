@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -31,7 +32,7 @@ import (
 func getNetworkCluster(ctx context.Context, c client.Client) (*unstructured.Unstructured, error) {
 	network := &unstructured.Unstructured{}
 	network.SetGroupVersionKind(NetworkGVK)
-	if err := c.Get(ctx, types.NamespacedName{Name: "cluster"}, network); err != nil {
+	if err := c.Get(ctx, types.NamespacedName{Name: SingletonName}, network); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, nil
 		}
@@ -60,81 +61,70 @@ func readRouteAds(network *unstructured.Unstructured) (string, error) {
 	return ra, nil
 }
 
-// ReadNetworkOperatorState returns whether FRR is in additionalRoutingCapabilities.providers
-// and whether routeAdvertisements is Enabled on Network/cluster.
-// Use the return values to decide which fields this controller should claim before patching.
-// Returns (false, false, nil) when Network/cluster does not exist.
-func ReadNetworkOperatorState(ctx context.Context, c client.Client) (frrInProviders bool, routeAdsEnabled bool, err error) {
-	network, err := getNetworkCluster(ctx, c)
+// ReadNetworkOperatorState returns Network/cluster along with whether FRR is in
+// additionalRoutingCapabilities.providers and whether routeAdvertisements is Enabled.
+// Use the flags to decide which fields this controller should claim, and hand the
+// returned object to PatchNetworkOperator so the patch reuses this single read.
+// Returns (nil, false, false, nil) when Network/cluster does not exist.
+func ReadNetworkOperatorState(ctx context.Context, c client.Client) (network *unstructured.Unstructured, frrInProviders bool, routeAdsEnabled bool, err error) {
+	network, err = getNetworkCluster(ctx, c)
 	if err != nil || network == nil {
-		return false, false, err
+		return nil, false, false, err
 	}
 	providers, err := readProviders(network)
 	if err != nil {
-		return false, false, err
-	}
-	for _, p := range providers {
-		if p == FRRProviderName {
-			frrInProviders = true
-			break
-		}
+		return nil, false, false, err
 	}
 	ra, err := readRouteAds(network)
 	if err != nil {
-		return false, false, err
+		return nil, false, false, err
 	}
-	routeAdsEnabled = ra == RouteAdvertisementsOn
-	return frrInProviders, routeAdsEnabled, nil
+	return network, slices.Contains(providers, FRRProviderName), ra == RouteAdvertisementsOn, nil
 }
 
-// PatchNetworkOperator merges FRR into additionalRoutingCapabilities.providers
-// (preserving any pre-existing providers) and sets routeAdvertisements to Enabled.
-func PatchNetworkOperator(ctx context.Context, c client.Client) error {
-	network, err := getNetworkCluster(ctx, c)
-	if err != nil {
-		return err
+// PatchNetworkOperator applies only the requested changes to Network/cluster, using
+// network as returned by ReadNetworkOperatorState:
+// patchFRR merges FRR into additionalRoutingCapabilities.providers (preserving others);
+// patchRouteAds sets routeAdvertisements to Enabled. No-op when both flags are false.
+func PatchNetworkOperator(ctx context.Context, c client.Client, network *unstructured.Unstructured, patchFRR, patchRouteAds bool) error {
+	if !patchFRR && !patchRouteAds {
+		return nil
 	}
 
-	var mergedProviders []interface{}
-	if network != nil {
-		existing, err := readProviders(network)
-		if err != nil {
-			return err
+	spec := map[string]interface{}{}
+
+	if patchFRR {
+		var providers []string
+		if network != nil {
+			existing, err := readProviders(network)
+			if err != nil {
+				return err
+			}
+			providers = existing
 		}
-		for _, p := range existing {
-			mergedProviders = append(mergedProviders, p)
+		if !slices.Contains(providers, FRRProviderName) {
+			providers = append(providers, FRRProviderName)
 		}
-	}
-	hasFRR := false
-	for _, p := range mergedProviders {
-		if p == FRRProviderName {
-			hasFRR = true
-			break
+		spec["additionalRoutingCapabilities"] = map[string]interface{}{
+			"providers": providers,
 		}
-	}
-	if !hasFRR {
-		mergedProviders = append(mergedProviders, FRRProviderName)
 	}
 
-	patch := map[string]interface{}{
-		"spec": map[string]interface{}{
-			"additionalRoutingCapabilities": map[string]interface{}{
-				"providers": mergedProviders,
+	if patchRouteAds {
+		spec["defaultNetwork"] = map[string]interface{}{
+			"ovnKubernetesConfig": map[string]interface{}{
+				"routeAdvertisements": RouteAdvertisementsOn,
 			},
-			"defaultNetwork": map[string]interface{}{
-				"ovnKubernetesConfig": map[string]interface{}{
-					"routeAdvertisements": RouteAdvertisementsOn,
-				},
-			},
-		},
+		}
 	}
-	patchBytes, err := json.Marshal(patch)
+
+	patchBytes, err := json.Marshal(map[string]interface{}{"spec": spec})
 	if err != nil {
 		return err
 	}
 	target := &unstructured.Unstructured{}
 	target.SetGroupVersionKind(NetworkGVK)
-	target.SetName("cluster")
+	target.SetName(SingletonName)
 	return c.Patch(ctx, target, client.RawPatch(types.MergePatchType, patchBytes))
 }
 
@@ -157,12 +147,7 @@ func UnpatchNetworkOperator(ctx context.Context, c client.Client, removeFRRProvi
 		if err != nil {
 			return err
 		}
-		filtered := make([]interface{}, 0, len(existing))
-		for _, p := range existing {
-			if p != FRRProviderName {
-				filtered = append(filtered, p)
-			}
-		}
+		filtered := slices.DeleteFunc(existing, func(p string) bool { return p == FRRProviderName })
 		if len(filtered) == 0 {
 			spec["additionalRoutingCapabilities"] = nil
 		} else {
@@ -187,6 +172,6 @@ func UnpatchNetworkOperator(ctx context.Context, c client.Client, removeFRRProvi
 
 	target := &unstructured.Unstructured{}
 	target.SetGroupVersionKind(NetworkGVK)
-	target.SetName("cluster")
+	target.SetName(SingletonName)
 	return c.Patch(ctx, target, client.RawPatch(types.MergePatchType, patchBytes))
 }

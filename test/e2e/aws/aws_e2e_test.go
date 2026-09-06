@@ -72,7 +72,7 @@ var _ = Describe("AWS E2E", Ordered, func() {
 				g.Expect(cfg.Status.Phase).To(Equal(networkingv1alpha1.PhaseReady))
 			}).WithTimeout(reconcileTimeout).WithPolling(pollInterval).Should(Succeed())
 
-			By("verifying Network/cluster ownership is External (hack/enable-frr.sh pre-enabled FRR)")
+			By("verifying Network/cluster ownership is External (FRR pre-enabled externally)")
 			Expect(e2e.CheckConfigNetworkOwnershipExternal(ctx, k8sClient, configCR.Name)).To(Succeed())
 
 			By("verifying FRRConfigurations exist")
