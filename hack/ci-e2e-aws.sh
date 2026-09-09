@@ -28,8 +28,8 @@ set -o pipefail
 # the entire job of this file, and errexit would exit before it.
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=hack/lib/ci.sh
-source "${here}/lib/ci.sh"
+# shellcheck source=hack/aws/ci.sh
+source "${here}/aws/ci.sh"
 
 teardown_done=false
 

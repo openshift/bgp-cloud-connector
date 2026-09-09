@@ -21,6 +21,8 @@ source "${here}/lib/frr.sh"       # pulls in common.sh
 source "${here}/lib/retry.sh"
 # shellcheck source=hack/aws/lib.sh
 source "${here}/aws/lib.sh"
+# shellcheck source=hack/aws/ci.sh
+source "${here}/aws/ci.sh"    # pulls in lib/ci.sh
 
 export RETRY_INTERVAL_SECS=1      # real sleeps would be too slow for the unit job
 
@@ -602,6 +604,73 @@ check "repeats what aws said" \
 stub_aws_rc=0
 
 unset -f oc aws
+
+######################################################################
+echo "--- lib/ci.sh ---"
+
+# The bootstrap is what a prow job does before it touches anything, so a
+# mistake here is one nobody sees until a job has already spent forty
+# minutes installing a cluster. It is split into pieces small enough to
+# assert on: the whole ci_bootstrap cannot be called here, because its
+# last step provisions a CLI and would fetch sixty megabytes.
+
+ci_home="$(mktemp -d "${workdir}/ci-XXXXXX")"
+
+check "ci_use_shared_kubeconfig leaves the environment alone with no SHARED_DIR" \
+    "$( (unset SHARED_DIR; KUBECONFIG=/mine; ci_use_shared_kubeconfig; echo "${KUBECONFIG}") )" \
+    "/mine"
+
+mkdir -p "${ci_home}/shared"
+: >"${ci_home}/shared/kubeconfig"
+check "ci_use_shared_kubeconfig takes prow's kubeconfig when there is one" \
+    "$( (SHARED_DIR="${ci_home}/shared"; KUBECONFIG=/mine; ci_use_shared_kubeconfig; echo "${KUBECONFIG}") )" \
+    "${ci_home}/shared/kubeconfig"
+
+# A SHARED_DIR with no kubeconfig in it means the install step did not
+# leave one, which is worth saying rather than silently carrying on
+# against whatever cluster the environment happens to point at.
+mkdir -p "${ci_home}/empty"
+out="$( ( set -o errexit; SHARED_DIR="${ci_home}/empty"; ci_use_shared_kubeconfig ) 2>&1 )"
+check "ci_use_shared_kubeconfig fails when prow left no kubeconfig" "$?" "1"
+check "and says where it looked" \
+    "$(printf '%s' "${out}" | grep -c "${ci_home}/empty")" "1"
+
+ci_make_workdir
+check "ci_make_workdir creates a directory" \
+    "$([[ -d "${ci_workdir}" ]] && echo yes)" "yes"
+made="${ci_workdir}"
+ci_remove_workdir
+check "ci_remove_workdir removes it" \
+    "$([[ -d "${made}" ]] && echo yes || echo no)" "no"
+
+# Called from an EXIT trap, where a non-zero status would replace the
+# script's own and turn a clean run into a failure.
+ci_workdir=""
+ci_remove_workdir
+check "ci_remove_workdir succeeds with nothing to remove" "$?" "0"
+
+######################################################################
+echo "--- aws/ci.sh ---"
+
+check "ci_aws_shared_credentials leaves the environment alone with no CLUSTER_PROFILE_DIR" \
+    "$( (unset CLUSTER_PROFILE_DIR AWS_SHARED_CREDENTIALS_FILE
+         ci_aws_shared_credentials; echo "${AWS_SHARED_CREDENTIALS_FILE:-unset}") )" \
+    "unset"
+
+mkdir -p "${ci_home}/profile"
+: >"${ci_home}/profile/.awscred"
+check "ci_aws_shared_credentials takes the cluster profile's credentials" \
+    "$( (CLUSTER_PROFILE_DIR="${ci_home}/profile"
+         ci_aws_shared_credentials; echo "${AWS_SHARED_CREDENTIALS_FILE}") )" \
+    "${ci_home}/profile/.awscred"
+
+mkdir -p "${ci_home}/profile-empty"
+out="$( ( set -o errexit; CLUSTER_PROFILE_DIR="${ci_home}/profile-empty"
+          ci_aws_shared_credentials ) 2>&1 )"
+check "ci_aws_shared_credentials fails when the profile carries no .awscred" "$?" "1"
+check "and says where it looked" \
+    "$(printf '%s' "${out}" | grep -c "${ci_home}/profile-empty")" "1"
+
 
 echo "---"
 echo "passed=${passed} failed=${failed}"
