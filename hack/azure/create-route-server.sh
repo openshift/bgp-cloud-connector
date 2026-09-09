@@ -95,6 +95,19 @@ rs="${infra}-rs"
 rs_pip="${infra}-rs-pip"
 rs_subnet="RouteServerSubnet"
 
+# What says the widening was ours.
+#
+# The teardown removes an address prefix only when this tag records that
+# this cluster added it. Without that record it cannot tell a prefix we
+# added from one that was already there when we arrived and that we
+# merely put a subnet inside, and removing the second narrows a vnet
+# somebody widened for their own reasons.
+#
+# Keyed on the cluster, because a vnet the cluster does not own can hold
+# more than one cluster's estate, and an unkeyed tag would let the
+# second overwrite the first's record.
+prefix_tag="bgp-cloud-connector-added-prefix-${infra}"
+
 info "cluster:       ${infra}"
 info "subscription:  ${subscription}"
 info "region:        ${region}"
@@ -180,7 +193,11 @@ ensure_address_prefix() {
     done < <(print_fields "${prefixes}")
 
     if [[ -n "${have}" ]]; then
-        info "  ${rs_cidr} is already in the address space"
+        # Adopted, not added. Deliberately not tagged: the teardown
+        # leaves an untagged prefix alone, which is what stops it
+        # removing address space that was here before we were.
+        info "  ${rs_cidr} is already in the address space, so it is not ours"
+        info "  (the teardown will leave it where it found it)"
         return 0
     fi
 
@@ -194,8 +211,13 @@ ensure_address_prefix() {
     done < <(print_fields "${prefixes}")
     all+=("${rs_cidr}")
 
+    # The record is written by the same call that widens the vnet, so
+    # there is no window in which the vnet is wider than the installer
+    # made it with nothing to say who widened it. --set leaves the
+    # installer's own tags alone, checked against a live vnet.
     try az network vnet update -g "${net_rg}" -n "${vnet}" \
-        --address-prefixes "${all[@]}" --output none
+        --address-prefixes "${all[@]}" \
+        --set "tags.${prefix_tag}=${rs_cidr}" --output none
 }
 
 # --- the subnet ---------------------------------------------------------

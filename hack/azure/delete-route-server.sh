@@ -90,6 +90,10 @@ rs="${infra}-rs"
 rs_pip="${infra}-rs-pip"
 rs_subnet="RouteServerSubnet"
 
+# Written by hack/azure/create-route-server.sh when it widened the vnet.
+# Its absence means the prefix was already there, and is not ours.
+prefix_tag="bgp-cloud-connector-added-prefix-${infra}"
+
 info "cluster:       ${infra}"
 info "subscription:  ${subscription}"
 info "group:         ${rg}"
@@ -217,10 +221,6 @@ delete_public_ip() {
 
 # --- the subnet ---------------------------------------------------------
 
-# Read before the subnet is deleted, because it is what names the prefix
-# to remove afterwards.
-rs_cidr=""
-
 delete_subnet() {
     [[ -n "${vnet}" ]] || { info "  no vnet, so nothing to do"; return 0; }
     local rc=0
@@ -230,13 +230,14 @@ delete_subnet() {
         2) fail "cannot tell whether the vnet ${vnet} exists"; return 0 ;;
     esac
 
-    rs_cidr="$(subnet_prefix)" || { fail "cannot tell whether ${rs_subnet} exists"; return 0; }
-    if [[ -z "${rs_cidr}" ]]; then
+    local prefix
+    prefix="$(subnet_prefix)" || { fail "cannot tell whether ${rs_subnet} exists"; return 0; }
+    if [[ -z "${prefix}" ]]; then
         info "  already gone"
         return 0
     fi
 
-    info "  deleting ${rs_subnet} (${rs_cidr})"
+    info "  deleting ${rs_subnet} (${prefix})"
     try az network vnet subnet delete -g "${net_rg}" --vnet-name "${vnet}" \
         -n "${rs_subnet}" --output none \
         || fail "delete subnet ${rs_subnet}"
@@ -248,8 +249,12 @@ delete_subnet() {
 # left it. Removing a prefix means rewriting the whole list without it,
 # for the same reason adding one meant rewriting the whole list with it.
 #
-# Nothing is removed unless it is the range the subnet was in, so a vnet
-# somebody widened for their own reasons is not narrowed here.
+# Only the prefix this cluster added, and only when the vnet says so.
+# Guessing at the range instead -- from the subnet, or from the default
+# the create script uses -- cannot tell a prefix we added from one that
+# was already there and that we merely put a subnet inside. The second
+# belongs to somebody else, and Azure will happily remove it as long as
+# no subnet is using it, so the guess is not self-correcting.
 delete_address_prefix() {
     [[ -n "${vnet}" ]] || { info "  no vnet, so nothing to do"; return 0; }
     local rc=0
@@ -259,14 +264,18 @@ delete_address_prefix() {
         2) fail "cannot tell whether the vnet ${vnet} exists"; return 0 ;;
     esac
 
-    # The range normally comes from the subnet, read just before it was
-    # deleted. A run that got as far as the subnet and then failed
-    # leaves nothing to read it from, and the prefix would be stranded
-    # with nothing able to name it again, so fall back to the default
-    # the create script uses. Removal stays conditional on the prefix
-    # actually being there, so a wrong guess removes nothing.
-    local cidr="${rs_cidr:-${ROUTE_SERVER_CIDR:-10.1.0.0/26}}"
-    [[ -n "${rs_cidr}" ]] || info "  no subnet to read the range from; trying ${cidr}"
+    local owned
+    owned="$(az_query "read the address prefix record on ${vnet}" \
+        az network vnet show -g "${net_rg}" -n "${vnet}" \
+        --query "tags.\"${prefix_tag}\"" -o tsv)" \
+        || { fail "read the address prefix record on ${vnet}"; return 0; }
+    [[ "${owned}" == "None" ]] && owned=""
+
+    if [[ -z "${owned}" ]]; then
+        info "  ${vnet} carries no record of a prefix added for ${infra}"
+        info "  (nothing to remove; an address range that was here first stays)"
+        return 0
+    fi
 
     local prefixes
     prefixes="$(az_query "read the address space of ${vnet}" \
@@ -278,7 +287,7 @@ delete_address_prefix() {
     local found="" prefix
     while read -r prefix; do
         [[ -n "${prefix}" ]] || continue
-        if [[ "${prefix}" == "${cidr}" ]]; then
+        if [[ "${prefix}" == "${owned}" ]]; then
             found="yes"
         else
             remaining+=("${prefix}")
@@ -286,20 +295,29 @@ delete_address_prefix() {
     done < <(print_fields "${prefixes}")
 
     if [[ -z "${found}" ]]; then
-        info "  ${cidr} is not in the address space"
+        # The record outlived the prefix, which is what a teardown
+        # interrupted between the two leaves. Clear it, so a later run
+        # does not keep reporting something to do.
+        info "  ${owned} is already gone; clearing the record"
+        try az network vnet update -g "${net_rg}" -n "${vnet}" \
+            --remove "tags.${prefix_tag}" --output none \
+            || fail "clear the address prefix record on ${vnet}"
         return 0
     fi
 
     if (( ${#remaining[@]} == 0 )); then
-        warn "  ${cidr} is the only prefix on ${vnet}; leaving it rather than"
+        warn "  ${owned} is the only prefix on ${vnet}; leaving it rather than"
         warn "  emptying the address space."
         return 0
     fi
 
-    info "  removing ${cidr}, leaving ${remaining[*]}"
+    info "  removing ${owned}, leaving ${remaining[*]}"
+    # The record goes in the same call that removes the prefix, so the
+    # two cannot disagree.
     try az network vnet update -g "${net_rg}" -n "${vnet}" \
-        --address-prefixes "${remaining[@]}" --output none \
-        || fail "remove the address prefix ${cidr}"
+        --address-prefixes "${remaining[@]}" \
+        --remove "tags.${prefix_tag}" --output none \
+        || fail "remove the address prefix ${owned}"
 }
 
 info ""
