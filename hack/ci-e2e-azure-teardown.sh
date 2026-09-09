@@ -4,8 +4,16 @@
 # whether the test passed, failed, or never got as far as creating
 # anything.
 #
-#   INFRA=<infra-id> AZURE_RESOURCE_GROUP=<group> hack/ci-e2e-azure-teardown.sh
+#   INFRA=<infra-id> AZURE_RESOURCE_GROUP=<group> \
+#       [AZURE_NETWORK_RESOURCE_GROUP=<group>] hack/ci-e2e-azure-teardown.sh
 #   KUBECONFIG=<cluster>/auth/kubeconfig hack/ci-e2e-azure-teardown.sh
+#
+# AZURE_NETWORK_RESOURCE_GROUP is only needed for a cluster installed
+# into a vnet it does not own, where the subnet and the address prefix
+# are in a different group from the Route Server. It defaults to
+# AZURE_RESOURCE_GROUP, and getting it wrong leaves those two behind
+# while reporting success, so the scripts print it in the commands they
+# suggest rather than leaving you to remember it.
 #
 # Separate from the test because a trap cannot be relied on to run. Prow
 # sends TERM and then, once the grace period is up, KILL, and a killed
@@ -146,4 +154,5 @@ done
 
 die "teardown failed after ${attempts} attempts: cloud resources are still up" \
     "Tear them down with:" \
-    "INFRA=${infra} AZURE_RESOURCE_GROUP=${rg} hack/azure/delete-route-server.sh"
+    "INFRA=${infra} AZURE_RESOURCE_GROUP=${rg} \\" \
+    "  AZURE_NETWORK_RESOURCE_GROUP=${net_rg} hack/azure/delete-route-server.sh"

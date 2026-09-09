@@ -12,7 +12,11 @@
 # the cluster has gone there is nothing to ask, so name it:
 #
 #   INFRA=<infra-id> AZURE_RESOURCE_GROUP=<group> \
+#       [AZURE_NETWORK_RESOURCE_GROUP=<group>] \
 #       hack/azure/delete-route-server.sh
+#
+# AZURE_NETWORK_RESOURCE_GROUP defaults to AZURE_RESOURCE_GROUP and is
+# only needed for a cluster installed into a vnet it does not own.
 #
 # Removing the address prefix as well as the subnet is the point: the
 # cluster goes back to exactly what openshift-install built. The BGP
@@ -69,7 +73,8 @@ if [[ -z "${infra}" || -z "${rg}" ]]; then
                "This normally reads the cluster and its group from the cluster:" \
                "  export KUBECONFIG=<cluster>/auth/kubeconfig" \
                "Once the cluster has gone there is nothing to ask, so name them:" \
-               "  INFRA=<infra-id> AZURE_RESOURCE_GROUP=<group> ${0##*/}"
+               "  INFRA=<infra-id> AZURE_RESOURCE_GROUP=<group> ${0##*/}" \
+               "Add AZURE_NETWORK_RESOURCE_GROUP=<group> if the cluster does not own its vnet."
     require_platform Azure
     # Sets infra, rg and net_rg, and dies rather than guessing.
     azure_cluster_facts
@@ -80,6 +85,7 @@ fi
     || die "could not work out the cluster and its resource group" \
            "No cluster is reachable, or it is not an Azure one. Name them:" \
            "  INFRA=<infra-id> AZURE_RESOURCE_GROUP=<group> ${0##*/}" \
+           "Add AZURE_NETWORK_RESOURCE_GROUP=<group> if the cluster does not own its vnet." \
            "Got: infra='${infra}' rg='${rg}'"
 
 # Checked, not kept: see the note in create-route-server.sh.

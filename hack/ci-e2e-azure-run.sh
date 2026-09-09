@@ -104,4 +104,5 @@ die "the estate is up, but there is no Azure e2e suite to run against it yet" \
     "This is the expected outcome until test/e2e/azure exists and the" \
     "operator can obtain Azure credentials in a cluster." \
     "Remove what this built with:" \
-    "  INFRA=${infra} AZURE_RESOURCE_GROUP=${rg} hack/ci-e2e-azure-teardown.sh"
+    "  INFRA=${infra} AZURE_RESOURCE_GROUP=${rg} \\" \
+    "    AZURE_NETWORK_RESOURCE_GROUP=${net_rg} hack/ci-e2e-azure-teardown.sh"
