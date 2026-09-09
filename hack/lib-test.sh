@@ -25,6 +25,8 @@ source "${here}/aws/lib.sh"
 source "${here}/aws/ci.sh"    # pulls in lib/ci.sh
 # shellcheck source=hack/azure/lib.sh
 source "${here}/azure/lib.sh"
+# shellcheck source=hack/azure/ci.sh
+source "${here}/azure/ci.sh"
 
 export RETRY_INTERVAL_SECS=1      # real sleeps would be too slow for the unit job
 
@@ -820,6 +822,64 @@ check "fails on an empty infrastructure name" "$?" "1"
 stub_infra="mycluster-abcde"
 
 unset -f az oc
+
+
+######################################################################
+echo "--- azure/ci.sh ---"
+
+# az writes its own state -- the token cache, the profile, the
+# subscription it is pointed at -- under AZURE_CONFIG_DIR, defaulting to
+# $HOME/.azure. A prow test container runs as a random uid whose home
+# may not be writable, so the login has to be told where to put it, and
+# the scratch directory is the right place: it goes away with the run,
+# and it takes the service principal's token cache with it.
+
+az_calls=""
+# Recorded rather than run. Reached by name here, unlike the stubs above.
+# shellcheck disable=SC2329
+az() { az_calls+="az $*"$'\n'; }
+
+check "ci_azure_credentials leaves the environment alone with no CLUSTER_PROFILE_DIR" \
+    "$( (unset CLUSTER_PROFILE_DIR AZURE_CONFIG_DIR
+         ci_azure_credentials; echo "${AZURE_CONFIG_DIR:-unset}") )" \
+    "unset"
+
+mkdir -p "${ci_home}/azure-profile"
+cat >"${ci_home}/azure-profile/osServicePrincipal.json" <<'JSON'
+{"clientId":"cid","clientSecret":"secret","tenantId":"tid","subscriptionId":"sub"}
+JSON
+
+ci_workdir="${ci_home}/work"
+mkdir -p "${ci_workdir}"
+( CLUSTER_PROFILE_DIR="${ci_home}/azure-profile"; ci_azure_credentials ) >/dev/null 2>&1
+check "ci_azure_credentials succeeds with a service principal" "$?" "0"
+
+az_calls=""
+CLUSTER_PROFILE_DIR="${ci_home}/azure-profile" ci_azure_credentials >/dev/null 2>&1
+check "it logs in as the service principal" \
+    "$(printf '%s' "${az_calls}" | grep -c -- '--service-principal')" "1"
+check "it selects the subscription the profile names" \
+    "$(printf '%s' "${az_calls}" | grep -c 'account set --subscription sub')" "1"
+
+# The secret must not reach the log. Prow logs for openshift
+# repositories are public.
+check "it keeps the client secret out of what it prints" \
+    "$( (CLUSTER_PROFILE_DIR="${ci_home}/azure-profile"; ci_azure_credentials) 2>&1 | grep -c 'secret' )" "0"
+
+check "it points az at the scratch directory rather than at a home it may not own" \
+    "$( (CLUSTER_PROFILE_DIR="${ci_home}/azure-profile"
+         ci_azure_credentials >/dev/null 2>&1; echo "${AZURE_CONFIG_DIR}") )" \
+    "${ci_workdir}/azure"
+
+mkdir -p "${ci_home}/azure-empty"
+out="$( ( set -o errexit; CLUSTER_PROFILE_DIR="${ci_home}/azure-empty"
+          ci_azure_credentials ) 2>&1 )"
+check "ci_azure_credentials fails when the profile carries no service principal" "$?" "1"
+check "and says where it looked" \
+    "$(printf '%s' "${out}" | grep -c "${ci_home}/azure-empty")" "1"
+
+unset -f az
+ci_workdir=""
 
 
 echo "---"
