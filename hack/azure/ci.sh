@@ -42,22 +42,32 @@ ci_azure_credentials() {
     export AZURE_CONFIG_DIR="${ci_workdir}/azure"
     mkdir -p "${AZURE_CONFIG_DIR}"
 
-    local client_id tenant_id subscription_id
-    client_id="$(jq -r .clientId "${sp}")" \
-        || die "cannot read clientId from ${sp}"
-    tenant_id="$(jq -r .tenantId "${sp}")" \
-        || die "cannot read tenantId from ${sp}"
-    subscription_id="$(jq -r .subscriptionId "${sp}")" \
-        || die "cannot read subscriptionId from ${sp}"
+    # -e as well as -r: without it jq prints the string "null" and exits
+    # 0 for a key that is not there, so a service principal missing a
+    # field would reach az as --tenant null and be reported as a failed
+    # login rather than as a malformed file.
+    local client_id tenant_id subscription_id client_secret
+    client_id="$(jq -er .clientId "${sp}")" \
+        || die "no clientId in ${sp}"
+    tenant_id="$(jq -er .tenantId "${sp}")" \
+        || die "no tenantId in ${sp}"
+    subscription_id="$(jq -er .subscriptionId "${sp}")" \
+        || die "no subscriptionId in ${sp}"
+    client_secret="$(jq -er .clientSecret "${sp}")" \
+        || die "no clientSecret in ${sp}"
 
     # The secret is read straight out of the file into the argument and
     # never into a variable this function prints, because prow logs for
     # openshift repositories are public. --output none for the same
     # reason: a successful login otherwise prints the subscription, the
     # tenant and the signed-in principal.
+    # Nothing here prints the secret, and --output none is for the same
+    # reason: prow logs for openshift repositories are public, and a
+    # successful login otherwise prints the subscription, the tenant and
+    # the signed-in principal.
     az login --service-principal \
         --username "${client_id}" \
-        --password "$(jq -r .clientSecret "${sp}")" \
+        --password "${client_secret}" \
         --tenant "${tenant_id}" \
         --output none \
         || die "could not log in as the service principal in ${sp}"

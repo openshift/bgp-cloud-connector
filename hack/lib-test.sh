@@ -782,9 +782,14 @@ stub_rg="mycluster-abcde-rg"
 stub_net_rg=""
 stub_oc_rc=0
 
+# Reached through azure_cluster_facts rather than by name.
+# shellcheck disable=SC2329
 oc() {
     if (( stub_oc_rc != 0 )); then
-        echo "error: You must be logged in to the server"
+        # To stderr, which is where oc puts it, and where
+        # azure_cluster_facts now reads it from rather than folding it
+        # into the value.
+        echo "error: You must be logged in to the server" >&2
         return "${stub_oc_rc}"
     fi
     case "$*" in
@@ -834,10 +839,15 @@ echo "--- azure/ci.sh ---"
 # the scratch directory is the right place: it goes away with the run,
 # and it takes the service principal's token cache with it.
 
-az_calls=""
+# Into a file rather than a variable: ci_azure_credentials is called in
+# a subshell below, because it exports AZURE_CONFIG_DIR and its failure
+# paths call die, which would take this harness with it. A variable set
+# inside that subshell would not come back.
+az_calls="${ci_home}/az-calls"
+: >"${az_calls}"
 # Recorded rather than run. Reached by name here, unlike the stubs above.
 # shellcheck disable=SC2329
-az() { az_calls+="az $*"$'\n'; }
+az() { printf 'az %s\n' "$*" >>"${az_calls}"; }
 
 check "ci_azure_credentials leaves the environment alone with no CLUSTER_PROFILE_DIR" \
     "$( (unset CLUSTER_PROFILE_DIR AZURE_CONFIG_DIR
@@ -854,12 +864,12 @@ mkdir -p "${ci_workdir}"
 ( CLUSTER_PROFILE_DIR="${ci_home}/azure-profile"; ci_azure_credentials ) >/dev/null 2>&1
 check "ci_azure_credentials succeeds with a service principal" "$?" "0"
 
-az_calls=""
-CLUSTER_PROFILE_DIR="${ci_home}/azure-profile" ci_azure_credentials >/dev/null 2>&1
+: >"${az_calls}"
+( CLUSTER_PROFILE_DIR="${ci_home}/azure-profile"; ci_azure_credentials ) >/dev/null 2>&1
 check "it logs in as the service principal" \
-    "$(printf '%s' "${az_calls}" | grep -c -- '--service-principal')" "1"
+    "$(grep -c -- '--service-principal' "${az_calls}")" "1"
 check "it selects the subscription the profile names" \
-    "$(printf '%s' "${az_calls}" | grep -c 'account set --subscription sub')" "1"
+    "$(grep -c 'account set --subscription sub' "${az_calls}")" "1"
 
 # The secret must not reach the log. Prow logs for openshift
 # repositories are public.

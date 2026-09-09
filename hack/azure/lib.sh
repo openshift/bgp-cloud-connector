@@ -74,12 +74,20 @@ require_azure() {
 # anything: an unreachable cluster would exit non-zero with no
 # diagnostic at all, which is the same failure this whole file is about.
 azure_cluster_facts() {
+    # stderr into a file rather than into the value. oc writes server
+    # warnings and deprecation notices to stderr on calls that return 0,
+    # and folding those in with 2>&1 leaves the warning text inside
+    # infra, which still passes the -n guard below and then becomes
+    # ${infra}-rs. The same rule az_query is built around.
+    local err
+    err="$(mktemp)"
+
     infra="$(oc get infrastructure cluster \
-        -o jsonpath='{.status.infrastructureName}' 2>&1)" \
-        || die "could not read the infrastructure name from the cluster" "${infra}"
+        -o jsonpath='{.status.infrastructureName}' 2>"${err}")" \
+        || die "could not read the infrastructure name from the cluster" "$(<"${err}")"
     rg="$(oc get infrastructure cluster \
-        -o jsonpath='{.status.platformStatus.azure.resourceGroupName}' 2>&1)" \
-        || die "could not read the resource group from the cluster" "${rg}"
+        -o jsonpath='{.status.platformStatus.azure.resourceGroupName}' 2>"${err}")" \
+        || die "could not read the resource group from the cluster" "$(<"${err}")"
     [[ -n "${infra}" && -n "${rg}" ]] \
         || die "the cluster reported an empty infrastructure name or resource group"
 
@@ -89,9 +97,11 @@ azure_cluster_facts() {
     # estate scripts have to get right: the Route Server goes in the
     # cluster's group, the subnet it needs goes in the network's.
     net_rg="$(oc get infrastructure cluster \
-        -o jsonpath='{.status.platformStatus.azure.networkResourceGroupName}' 2>&1)" \
-        || die "could not read the network resource group from the cluster" "${net_rg}"
+        -o jsonpath='{.status.platformStatus.azure.networkResourceGroupName}' 2>"${err}")" \
+        || die "could not read the network resource group from the cluster" "$(<"${err}")"
     : "${net_rg:=${rg}}"
+
+    rm -f "${err}"
 }
 
 # The subscription az is pointed at, which is not necessarily the one
