@@ -6,6 +6,28 @@
 
 # shellcheck source=hack/lib/common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/common.sh"
+# shellcheck source=hack/lib/retry.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/retry.sh"
+
+# A mutating call Azure may refuse with AnotherOperationInProgress until
+# something already running finishes. Honours dry_run like try, and
+# discards the call's output for the same reason.
+#
+# Use this rather than try for anything a cancelled run could collide
+# with. Waiting for a read to say the resource is settled does not work:
+# a Route Server reports provisioningState Succeeded while its addresses
+# are still being allocated, so the read says yes and the call that
+# follows is refused. Issuing the call and letting Azure say when it is
+# ready is the only signal that does not depend on what a read chooses
+# to report.
+az_retry() {
+    local what="$1" budget="$2"; shift 2
+    if [[ "${dry_run}" == true ]]; then
+        info "  would run: $*"
+        return 0
+    fi
+    retry_on_azure_conflict "${what}" "${budget}" "$@" >/dev/null
+}
 
 # A read that failed is not an answer.
 #

@@ -892,6 +892,73 @@ unset -f az
 ci_workdir=""
 
 
+######################################################################
+echo "--- lib/retry.sh: retry_on_azure_conflict ---"
+
+# Observed on 2026-09-09: a run cancelled 45s into a Route Server
+# create left the create running server-side, and every delete the
+# teardown then attempted was refused with AnotherOperationInProgress.
+# Three attempts thirty seconds apart gave up after ninety seconds and
+# leaked a Route Server, a public IP, a subnet and a widened vnet. The
+# create takes about fifteen minutes, so the wait has to be minutes not
+# seconds.
+
+# The call count goes in a file, because retry_on_azure_conflict runs
+# the command inside a command substitution and a variable set there
+# does not come back.
+conflict_calls="${workdir}/conflict-calls"
+: >"${conflict_calls}"
+# Reached through retry_on_azure_conflict's "$@".
+# shellcheck disable=SC2329
+az_conflict_then_ok() {
+    echo x >>"${conflict_calls}"
+    if (( $(wc -l <"${conflict_calls}") < 3 )); then
+        echo "ERROR: (AnotherOperationInProgress) Another operation on this or dependent resource is in progress." >&2
+        return 1
+    fi
+    echo "deleted"
+}
+# shellcheck disable=SC2329
+az_always_conflict() {
+    echo "ERROR: (AnotherOperationInProgress) still going" >&2
+    return 1
+}
+# shellcheck disable=SC2329
+az_hard_failure() {
+    echo "ERROR: (AuthorizationFailed) not permitted" >&2
+    return 1
+}
+
+check "retries until the conflicting operation finishes" \
+    "$(retry_on_azure_conflict "delete it" 30 az_conflict_then_ok)" "deleted"
+check "and took the attempts it needed" "$(wc -l <"${conflict_calls}" | tr -d ' ')" "3"
+
+started=${SECONDS}
+retry_on_azure_conflict "delete it" 2 az_always_conflict >/dev/null 2>&1
+rc=$?; elapsed=$((SECONDS - started))
+check "gives up when the budget runs out" "${rc}" "1"
+check "and spends the budget rather than returning at once" "$(( elapsed >= 2 ))" "1"
+
+# Observed after the conflict cleared, on the next attempt, with the
+# delete succeeding later: a 500 is not a verdict.
+# shellcheck disable=SC2329
+az_internal_error() {
+    echo "ERROR: (InternalServerError) An error occurred." >&2
+    return 1
+}
+started=${SECONDS}
+retry_on_azure_conflict "delete it" 2 az_internal_error >/dev/null 2>&1
+check "keeps trying through an InternalServerError" "$(( SECONDS - started >= 2 ))" "1"
+unset -f az_internal_error
+
+out="$(retry_on_azure_conflict "delete it" 30 az_hard_failure 2>&1)"
+check "does not retry an error that will not clear" "$?" "1"
+check "and repeats what az said" \
+    "$(printf '%s' "${out}" | grep -c 'AuthorizationFailed')" "1"
+
+unset -f az_conflict_then_ok az_always_conflict az_hard_failure
+
+
 echo "---"
 echo "passed=${passed} failed=${failed}"
 [[ "${failed}" -eq 0 ]]

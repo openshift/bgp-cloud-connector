@@ -51,6 +51,18 @@ parse_args "$@"
 require_cmd az
 require_azure
 
+# How long to keep trying a delete Azure refuses with
+# AnotherOperationInProgress.
+#
+# Measured on 2026-09-09: a run cancelled 45s into a Route Server create
+# left the create running server-side, and every delete was refused
+# until it finished. A create takes about fifteen minutes, so this is
+# twice that. The teardown after a cancellation is the case it exists
+# for, and the cost of giving up early is a leaked Route Server plus the
+# public IP, subnet and address prefix it holds open, which then block
+# the cluster's own deprovision.
+delete_budget="${AZURE_DELETE_BUDGET:-1800}"
+
 # Each can come from the environment or from a running cluster, one at a
 # time rather than all or nothing, so a variable set by the caller still
 # works alongside a live cluster supplying the rest.
@@ -201,7 +213,8 @@ delete_peerings() {
     local name
     while read -r name; do
         info "  deleting peering ${name}"
-        try az network routeserver peering delete -g "${rg}" \
+        az_retry "delete peering ${name}" "${delete_budget}" \
+            az network routeserver peering delete -g "${rg}" \
             --routeserver "${rs}" -n "${name}" --yes --output none \
             || fail "delete peering ${name}"
     done < <(print_fields "${names}")
@@ -217,7 +230,8 @@ delete_route_server() {
         2) fail "cannot tell whether the route server ${rs} exists"; return 0 ;;
     esac
     info "  deleting ${rs} -- slower than most of this, though quicker than creating it"
-    try az network routeserver delete -g "${rg}" -n "${rs}" --yes --output none \
+    az_retry "delete route server ${rs}" "${delete_budget}" \
+        az network routeserver delete -g "${rg}" -n "${rs}" --yes --output none \
         || fail "delete route server ${rs}"
 }
 
@@ -228,7 +242,8 @@ delete_public_ip() {
         1) info "  already gone"; return 0 ;;
         2) fail "cannot tell whether the public IP ${rs_pip} exists"; return 0 ;;
     esac
-    try az network public-ip delete -g "${rg}" -n "${rs_pip}" --output none \
+    az_retry "delete public IP ${rs_pip}" "${delete_budget}" \
+        az network public-ip delete -g "${rg}" -n "${rs_pip}" --output none \
         || fail "delete public IP ${rs_pip}"
 }
 
@@ -251,7 +266,8 @@ delete_subnet() {
     fi
 
     info "  deleting ${rs_subnet} (${prefix})"
-    try az network vnet subnet delete -g "${net_rg}" --vnet-name "${vnet}" \
+    az_retry "delete subnet ${rs_subnet}" "${delete_budget}" \
+        az network vnet subnet delete -g "${net_rg}" --vnet-name "${vnet}" \
         -n "${rs_subnet}" --output none \
         || fail "delete subnet ${rs_subnet}"
 }
@@ -327,7 +343,8 @@ delete_address_prefix() {
     info "  removing ${owned}, leaving ${remaining[*]}"
     # The record goes in the same call that removes the prefix, so the
     # two cannot disagree.
-    try az network vnet update -g "${net_rg}" -n "${vnet}" \
+    az_retry "remove the address prefix ${owned}" "${delete_budget}" \
+        az network vnet update -g "${net_rg}" -n "${vnet}" \
         --address-prefixes "${remaining[@]}" \
         --remove "tags.${prefix_tag}" --output none \
         || fail "remove the address prefix ${owned}"
