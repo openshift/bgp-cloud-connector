@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	networkingapi "github.com/openshift/bgp-cloud-connector/api/v1beta1"
@@ -254,23 +255,26 @@ func createOrUpdate(ctx context.Context, c client.Client, obj *unstructured.Unst
 	existing.SetGroupVersionKind(obj.GroupVersionKind())
 	key := types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
 
-	err := c.Get(ctx, key, existing)
-	if apierrors.IsNotFound(err) {
-		return c.Create(ctx, obj)
-	}
-	if err != nil {
+	if err := c.Get(ctx, key, existing); err != nil {
+		if apierrors.IsNotFound(err) {
+			return c.Create(ctx, obj)
+		}
 		return err
 	}
 
-	obj.SetResourceVersion(existing.GetResourceVersion())
-	// Both controllers watch what they write here, so skip the write when nothing we manage changed to avoid re-triggering reconcile.
 	if specEqual(existing, obj) && labelsSatisfied(existing.GetLabels(), obj.GetLabels()) {
 		return nil
 	}
-	// The write replaces metadata wholesale, so carry forward anything we don't manage ourselves (e.g. a foreign label, or ovn-kubernetes' own finalizer/annotations on a ClusterUDN).
-	obj.SetLabels(mergeLabels(existing.GetLabels(), obj.GetLabels()))
-	obj.SetAnnotations(mergeLabels(existing.GetAnnotations(), obj.GetAnnotations()))
-	return c.Update(ctx, obj)
+
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := c.Get(ctx, key, existing); err != nil {
+			return err
+		}
+		obj.SetResourceVersion(existing.GetResourceVersion())
+		obj.SetLabels(mergeLabels(existing.GetLabels(), obj.GetLabels()))
+		obj.SetAnnotations(mergeLabels(existing.GetAnnotations(), obj.GetAnnotations()))
+		return c.Update(ctx, obj)
+	})
 }
 
 // specEqual reports whether every field we set in desired already has that
