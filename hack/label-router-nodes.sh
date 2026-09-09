@@ -8,9 +8,9 @@
 # The label has to match spec.routerNodeSelector in the BGPCloudConfiguration
 # being used, or the operator selects nothing, builds no peers, and
 # reports a plan with no groups in it -- which looks like a discovery
-# failure rather than a cluster nobody labelled. hack/aws/write-e2e-profile.sh
-# writes that selector from the same two variables, so they agree by
-# construction.
+# failure rather than a cluster nobody labelled. The per-cloud
+# write-e2e-profile.sh scripts write that selector from the same two
+# variables, so they agree by construction.
 #
 # Workers only. The router nodes are where pod traffic lands, and
 # peering from a master would put BGP on a node that carries none.
