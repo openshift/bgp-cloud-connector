@@ -79,7 +79,25 @@ if [[ "${cluster_reachable}" == true ]]; then
     # down: both CRs carry finalizers that only the operator removes, so
     # deleting them afterwards would wait on a deletionTimestamp nobody
     # is going to clear.
-    if ! "${here}/delete-e2e-crs.sh"; then
+    # A longer finalizer budget than delete-e2e-crs.sh defaults to.
+    # That default is 120s, which is right for AWS and much too short
+    # here: measured on 2026-09-09, the operator's cleanup deletes Azure
+    # Route Server peerings one at a time at about 1m33s each, so three
+    # router nodes take 4m39s. At 120s the script gives up, clears the
+    # finalizer by hand and reports success, and the scale-down below
+    # then stops the operator part way through its own cleanup.
+    #
+    # Generous rather than exact, and deliberately so twice over. A
+    # Route Server takes sixteen peerings, so the measurement above is a
+    # floor rather than a worst case; and the measurement itself came
+    # from a subscription nobody else was using, whereas CI shares its
+    # quota slices. Waiting is cheaper than the alternative, which is
+    # peerings left behind for the Route Server delete to collide with.
+    #
+    # It has to stay inside the step's grace period, though: on a
+    # cancellation prow allows the whole teardown that long before it
+    # sends KILL, and the Route Server delete after this measured 6m57s.
+    if ! FINALIZER_TIMEOUT="${FINALIZER_TIMEOUT:-1200}" "${here}/delete-e2e-crs.sh"; then
         warn "cluster-side cleanup failed; continuing to the cloud resources"
         cluster_side_failed=true
     fi

@@ -51,11 +51,21 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 # 10.1.0.0/26 clears the installer's 10.0.0.0/16 default.
 rs_cidr="${ROUTE_SERVER_CIDR:-10.1.0.0/26}"
 
-# How long to wait for a Route Server to report its addresses. A create
-# measured 15m10s on 2026-09-09, so this is roughly double, and it is
-# only ever spent when adopting one that an interrupted run left
-# unfinished -- a create that ran to completion is already ready.
-ready_timeout="${ROUTE_SERVER_READY_TIMEOUT:-1800}"
+# How long to wait for a Route Server to report its addresses.
+#
+# A create measured 15m10s on 2026-09-09, in a subscription nobody else
+# was using. CI is not that: the quota slices are shared and Azure's own
+# FAQ puts Route Server deployment at 30 to 60 minutes once a virtual
+# network gateway is involved, which is the same control plane under
+# load. So this is an hour rather than twice the measurement, because
+# the two failure modes are not comparable -- waiting longer costs
+# nothing when the estate is coming up anyway, and giving up early
+# fails a job that would have passed and leaves a half-built Route
+# Server behind for the teardown to find.
+#
+# It is only ever spent adopting one an interrupted run left unfinished.
+# A create that ran to completion is already ready when this is reached.
+ready_timeout="${ROUTE_SERVER_READY_TIMEOUT:-3600}"
 
 parse_args "$@"
 require_cmd az oc
