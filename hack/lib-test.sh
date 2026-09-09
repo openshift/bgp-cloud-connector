@@ -103,6 +103,25 @@ check "retry stopped as soon as it succeeded" "${flaky_calls}" "3"
 retry 3 1 "doomed" always_fails >/dev/null 2>&1
 check "retry gives up after the last attempt" "$?" "1"
 
+# print_fields is shared rather than AWS's, because `az -o tsv` has the
+# same shape as `aws --output text`: tab separated, and a bare newline
+# for an empty result.
+check "print_fields puts one field per line" \
+    "$(print_fields "$(printf 'a\tb\tc')" | tr '\n' ' ')" "a b c "
+check "print_fields says nothing for an empty result" \
+    "$(print_fields "$(printf '\n')" | wc -l)" "0"
+check "print_fields drops empty fields rather than emitting blank lines" \
+    "$(print_fields "$(printf 'a\t\tb')" | wc -l)" "2"
+check "print_fields handles a newline separated result too" \
+    "$(print_fields "$(printf 'a\nb')" | tr '\n' ' ')" "a b "
+
+# The point of it living here rather than in aws/lib.sh: a cloud that
+# does not source AWS's library still gets it.
+check "print_fields comes from common.sh alone" \
+    "$(bash -c 'source "${0}/lib/common.sh"; print_fields "$(printf "a\tb")" | tr "\n" " "' "${here}")" \
+    "a b "
+
+
 ######################################################################
 echo "--- lib/frr.sh ---"
 
