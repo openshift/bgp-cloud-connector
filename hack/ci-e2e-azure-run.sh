@@ -75,7 +75,11 @@ profile_dir="${ci_workdir}/e2e-profile"
 info ""
 info "--- estate ready ---"
 info "profile written to ${profile_dir}:"
-sed 's/^/  /' "${profile_dir}/bgpcloudconfiguration.yaml"
+# With the subscription id taken out. The rest of the profile is worth
+# having in the log, and that one field is not: prow logs for openshift
+# repositories are public.
+sed -e 's/^/  /' -e 's/\(subscriptionID:\).*/\1 <redacted>/' \
+    "${profile_dir}/bgpcloudconfiguration.yaml"
 
 # There is no Azure suite to run yet, and this exits non-zero rather
 # than reporting success, because a job that goes green having tested

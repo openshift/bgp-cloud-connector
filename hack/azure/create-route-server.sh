@@ -74,12 +74,17 @@ require_platform Azure
 require_azure
 
 azure_cluster_facts
-subscription="$(azure_subscription)" \
-    || die "cannot tell which subscription az is pointed at" \
+# Checked, not kept. Nothing here needs the id, and printing it is
+# what the note below refuses to do; what matters is that az has a
+# subscription selected at all, because every lookup after this is
+# scoped to it and an unset one fails them all with the same
+# unhelpful error.
+azure_subscription >/dev/null \
+    || die "az has no subscription selected" \
            "Pick one: az account set --subscription <id>"
 region="$(azure_group_location "${rg}")" \
-    || die "resource group ${rg} is not visible in subscription ${subscription}" \
-           "The cluster is probably in a different subscription from the one az is on." \
+    || die "resource group ${rg} is not visible in the subscription az is pointed at" \
+           "The cluster is probably in a different subscription from that one." \
            "Switch: az account set --subscription <id>"
 vnet="$(azure_cluster_vnet "${net_rg}" "${infra}")" \
     || die "cannot find the cluster's virtual network in ${net_rg}"
@@ -108,8 +113,14 @@ rs_subnet="RouteServerSubnet"
 # second overwrite the first's record.
 prefix_tag="bgp-cloud-connector-added-prefix-${infra}"
 
+# The subscription id is deliberately not printed, here or anywhere
+# else in these scripts. Prow logs for openshift repositories are
+# public, and it is the direct analogue of the AWS account id that
+# require_aws goes out of its way not to print. The cluster, resource
+# group and vnet names are printed, because they name resources that
+# exist for the length of one job and they are what makes a log worth
+# reading.
 info "cluster:       ${infra}"
-info "subscription:  ${subscription}"
 info "region:        ${region}"
 info "group:         ${rg}"
 [[ "${net_rg}" != "${rg}" ]] && info "network group: ${net_rg} (a vnet the cluster does not own)"

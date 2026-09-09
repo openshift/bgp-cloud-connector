@@ -82,8 +82,9 @@ fi
            "  INFRA=<infra-id> AZURE_RESOURCE_GROUP=<group> ${0##*/}" \
            "Got: infra='${infra}' rg='${rg}'"
 
-subscription="$(azure_subscription)" \
-    || die "cannot tell which subscription az is pointed at" \
+# Checked, not kept: see the note in create-route-server.sh.
+azure_subscription >/dev/null \
+    || die "az has no subscription selected" \
            "Pick one: az account set --subscription <id>"
 
 rs="${infra}-rs"
@@ -94,8 +95,14 @@ rs_subnet="RouteServerSubnet"
 # Its absence means the prefix was already there, and is not ours.
 prefix_tag="bgp-cloud-connector-added-prefix-${infra}"
 
+# The subscription id is deliberately not printed, here or anywhere
+# else in these scripts. Prow logs for openshift repositories are
+# public, and it is the direct analogue of the AWS account id that
+# require_aws goes out of its way not to print. The cluster, resource
+# group and vnet names are printed, because they name resources that
+# exist for the length of one job and they are what makes a log worth
+# reading.
 info "cluster:       ${infra}"
-info "subscription:  ${subscription}"
 info "group:         ${rg}"
 [[ "${net_rg}" != "${rg}" ]] && info "network group: ${net_rg}"
 
