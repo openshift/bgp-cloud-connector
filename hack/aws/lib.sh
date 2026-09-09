@@ -167,18 +167,6 @@ require_route_server_api() {
 # would put any warning the CLI writes while still exiting 0 into the
 # route server id or the endpoint count, which then goes back to AWS as
 # --route-server-id.
-# One field per line, empties dropped. `aws --output text` separates
-# with tabs and prints a bare newline for an empty result, and the
-# obvious `| grep .` filter reports "no match" as a failure that then
-# has to be swallowed. Word splitting already drops empty fields, so
-# doing it here leaves no status to discard.
-print_fields() {
-    local field
-    for field in $1; do
-        printf '%s\n' "${field}"
-    done
-}
-
 aws_query() {
     local what="$1"; shift
     local out err rc=0
