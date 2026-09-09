@@ -45,8 +45,8 @@ set -o pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${here}/.." && pwd)"
-# shellcheck source=hack/lib/ci.sh
-source "${here}/lib/ci.sh"
+# shellcheck source=hack/aws/ci.sh
+source "${here}/aws/ci.sh"
 
 ci_bootstrap
 
