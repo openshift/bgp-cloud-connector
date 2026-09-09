@@ -73,7 +73,7 @@ ci_azure_credentials() {
         || die "could not log in as the service principal in ${sp}"
 
     az account set --subscription "${subscription_id}" \
-        || die "could not select subscription ${subscription_id}"
+        || die "could not select the subscription named in ${sp}"
 }
 
 ci_bootstrap() {

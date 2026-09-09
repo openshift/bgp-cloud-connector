@@ -43,7 +43,7 @@ teardown_done=false
 ci_bootstrap
 trap ci_remove_workdir EXIT
 
-require_cmd az oc jq setsid
+require_cmd az oc jq
 require_cluster
 require_platform Azure
 require_azure
@@ -84,8 +84,8 @@ on_signal() {
     # ci-e2e-azure-run.sh is a sequence of other scripts, and killing
     # only it orphans whichever one is running rather than stopping it:
     # the teardown then deletes an estate that a create it cannot see is
-    # still adding to. setsid put the test in its own group so this
-    # signal reaches all of it and none of us.
+    # still adding to. The test was started in its own process group so
+    # this signal reaches all of it and none of us.
     if (( test_pid > 0 )); then
         kill -TERM -"${test_pid}" 2>/dev/null || true
         wait "${test_pid}" 2>/dev/null || true
@@ -106,8 +106,25 @@ test_rc=0
 # grace period is spent before the teardown begins. Waiting on a
 # background child is interruptible, so the trap fires when the signal
 # arrives and hands the remaining time to the teardown.
-setsid "${here}/ci-e2e-azure-run.sh" &
+# In its own process group, so on_signal can stop the test and
+# everything it spawned without stopping this script, which still has
+# the teardown to run.
+#
+# Job control rather than setsid, which the AWS sequencer uses. setsid
+# forks when its caller is already a process group leader, and then $!
+# is the pid of a parent that exits immediately: measured, wait returns
+# in 0s while the test carries on, so the teardown would start deleting
+# a Route Server the create is still building. That only happens when
+# monitor mode is on, which prow's non-interactive shell does not do,
+# but it is a sharp edge for anybody running this by hand and there is
+# no reason to keep it. Enabling monitor mode for the launch puts the
+# child in a new group whose id is the pid recorded here, and every
+# script it spawns inherits that group -- measured, three processes in
+# the group and one signal clears them all.
+set -m
+"${here}/ci-e2e-azure-run.sh" &
 test_pid=$!
+set +m
 wait "${test_pid}" || test_rc=$?
 test_pid=0
 if (( test_rc == 0 )); then

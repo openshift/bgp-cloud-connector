@@ -179,9 +179,28 @@ route_server_addresses() {
 }
 
 # wait_until's contract: 0 ready, 1 not yet, 2 no point waiting.
+#
+# A failed read is not on its own a reason to stop waiting. The budget
+# above is an hour precisely because the control plane may be busy, and
+# handing back 2 on the first throttled describe would abandon the wait
+# for the same reason it was made long. So a few consecutive failures
+# count as "not yet" and only a run of them gives up, which keeps a
+# genuine failure -- an expired login, a deleted Route Server -- from
+# burning the whole hour.
+ready_read_failures=0
+ready_read_failures_max="${ROUTE_SERVER_READ_FAILURES:-3}"
+
 route_server_ready() {
     local ips
-    ips="$(route_server_addresses)" || return 2
+    if ! ips="$(route_server_addresses)"; then
+        ready_read_failures=$(( ready_read_failures + 1 ))
+        if (( ready_read_failures >= ready_read_failures_max )); then
+            return 2
+        fi
+        warn "  read ${ready_read_failures} of ${ready_read_failures_max} failed; still waiting"
+        return 1
+    fi
+    ready_read_failures=0
     [[ -n "${ips}" ]]
 }
 
