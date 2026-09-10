@@ -1,5 +1,7 @@
 resources:
 - monitor.yaml
+- rules.yaml
+- rules-frrk8s.yaml
 
 # [PROMETHEUS-WITH-CERTS] The following patch configures the ServiceMonitor in ../prometheus
 # to securely reference certificates created and managed by cert-manager.

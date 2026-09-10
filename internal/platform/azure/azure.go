@@ -119,6 +119,11 @@ func (p *Platform) ReconcileNodes(ctx context.Context, nodes []platform.RouterNo
 	if err != nil {
 		return fmt.Errorf("reconciling Route Server peerings: %w", err)
 	}
+	managed, err := p.countManagedPeers(ctx, nodes)
+	if err != nil {
+		return err
+	}
+	platform.SetCloudPeersManaged(platform.PlatformAzure, float64(managed))
 	if changed {
 		logger.Info("Route Server peerings updated",
 			"routeServer", p.cfg.RouteServerName, "nodes", len(nodes))
@@ -134,6 +139,7 @@ func (p *Platform) ReconcileNodes(ctx context.Context, nodes []platform.RouterNo
 func (p *Platform) reconcileOurPeerings(ctx context.Context, desired []Peer) (bool, error) {
 	current, err := p.rs.ListPeers(ctx)
 	if err != nil {
+		platform.RecordCloudAPIError(platform.PlatformAzure, platform.OpPeer)
 		return false, err
 	}
 	for _, c := range current {
@@ -141,7 +147,37 @@ func (p *Platform) reconcileOurPeerings(ctx context.Context, desired []Peer) (bo
 			desired = append(desired, c.Peer)
 		}
 	}
-	return p.rs.ReconcilePeers(ctx, desired)
+	changed, err := p.rs.ReconcilePeers(ctx, desired)
+	if err != nil {
+		platform.RecordCloudAPIError(platform.PlatformAzure, platform.OpPeer)
+	}
+	return changed, err
+}
+
+// countManagedPeers reads the Route Server back rather than counting the
+// peerings just written, so the gauge reports what Azure holds and not what
+// the operator asked for. Peerings belonging to another cluster are left out:
+// they are on the same Route Server but are not ours to report.
+func (p *Platform) countManagedPeers(ctx context.Context, nodes []platform.RouterNode) (int, error) {
+	current, err := p.rs.ListPeers(ctx)
+	if err != nil {
+		platform.RecordCloudAPIError(platform.PlatformAzure, platform.OpPeer)
+		return 0, err
+	}
+	desiredIPs := make(map[string]bool, len(nodes))
+	for _, n := range nodes {
+		desiredIPs[n.PrivateIP] = true
+	}
+	managed := 0
+	for _, c := range current {
+		if !isOurPeering(c.Name, p.cfg.ClusterID) {
+			continue
+		}
+		if desiredIPs[c.PeerIP] {
+			managed++
+		}
+	}
+	return managed, nil
 }
 
 // Cleanup removes this cluster's Route Server peerings and nothing else.
@@ -150,6 +186,7 @@ func (p *Platform) reconcileOurPeerings(ctx context.Context, desired []Peer) (bo
 func (p *Platform) Cleanup(ctx context.Context) error {
 	current, err := p.rs.ListPeers(ctx)
 	if err != nil {
+		platform.RecordCloudAPIError(platform.PlatformAzure, platform.OpPeer)
 		return fmt.Errorf("listing Route Server peerings: %w", err)
 	}
 	keep := make([]Peer, 0, len(current))
@@ -159,8 +196,10 @@ func (p *Platform) Cleanup(ctx context.Context) error {
 		}
 	}
 	if _, err := p.rs.ReconcilePeers(ctx, keep); err != nil {
+		platform.RecordCloudAPIError(platform.PlatformAzure, platform.OpPeer)
 		return fmt.Errorf("removing Route Server peerings: %w", err)
 	}
+	platform.SetCloudPeersManaged(platform.PlatformAzure, 0)
 	return nil
 }
 

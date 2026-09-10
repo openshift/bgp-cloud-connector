@@ -1,0 +1,31 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: openshift-bgp-cloud-connector
+  name: openshift-bgp-cloud-connector-bgp-cloud-connector-alerts
+spec:
+  groups:
+  - name: BGPCloudConnectorHealth
+    rules:
+    - alert: CloudAPIErrors
+      annotations:
+        description: The bgp-cloud-connector operator has encountered {{ $labels.platform
+          }} API errors (operation={{ $labels.operation }}) over the last 5 minutes.
+          Check operator logs for details.
+        summary: Cloud API errors detected
+      expr: increase(cloud_api_errors_total[5m]) > 0
+      labels:
+        severity: warning
+    - alert: CloudPeersMissing
+      annotations:
+        description: The operator reports 0 managed BGP peers on {{ $labels.platform
+          }} for more than 5 minutes. BGP-enabled worker nodes may not be peered with
+          the cloud BGP service.
+        summary: No cloud BGP peers managed
+      expr: cloud_peers_managed == 0 and max_over_time(cloud_peers_managed[24h]) >
+        0
+      for: 5m
+      labels:
+        severity: warning

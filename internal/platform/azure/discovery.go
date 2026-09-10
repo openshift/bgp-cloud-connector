@@ -19,8 +19,12 @@ import (
 func (p *Platform) DiscoverEndpoints(ctx context.Context) (*platform.DiscoveryResult, error) {
 	topology, err := p.topo.GetTopology(ctx)
 	if err != nil {
+		platform.RecordCloudAPIError(platform.PlatformAzure, platform.OpDiscover)
 		return nil, fmt.Errorf("reading Route Server %q: %w", p.cfg.RouteServerName, err)
 	}
+	// Neither refusal below is counted: Azure answered, and what it said is
+	// that this Route Server cannot be peered with. That is a cloud
+	// configuration problem, not a cloud API failure.
 	if len(topology.Addresses) == 0 {
 		return nil, fmt.Errorf("no addresses to peer with on Route Server %q", p.cfg.RouteServerName)
 	}

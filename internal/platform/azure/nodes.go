@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/openshift/bgp-cloud-connector/internal/platform"
 )
 
 // ensureNodesCanForward makes each router node's network interface accept
@@ -38,6 +40,7 @@ func (p *Platform) ensureNodesCanForward(ctx context.Context, vms []VirtualMachi
 	for group, groupVMs := range byGroup {
 		nics, err := p.nics.ListNICs(ctx, group)
 		if err != nil {
+			platform.RecordCloudAPIError(platform.PlatformAzure, platform.OpNodeForwarding)
 			return fmt.Errorf("listing network interfaces in %q: %w", group, err)
 		}
 
@@ -52,11 +55,14 @@ func (p *Platform) ensureNodesCanForward(ctx context.Context, vms []VirtualMachi
 					continue
 				}
 				if err := p.nics.EnableIPForwarding(ctx, nic.ResourceGroup, nic.Name); err != nil {
+					platform.RecordCloudAPIError(platform.PlatformAzure, platform.OpNodeForwarding)
 					return fmt.Errorf("enabling IP forwarding on %q: %w", nic.Name, err)
 				}
 				logger.Info("enabled IP forwarding", "nic", nic.Name, "instance", vm.Name)
 			}
 			if !found {
+				// Azure listed the interfaces without complaint; none of them
+				// belongs to this VM. Not a cloud API error.
 				return fmt.Errorf("no network interface is attached to %q", vm.Name)
 			}
 		}

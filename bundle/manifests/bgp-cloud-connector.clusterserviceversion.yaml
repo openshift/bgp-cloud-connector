@@ -46,7 +46,7 @@ metadata:
     capabilities: Basic Install
     categories: Networking
     containerImage: controller:latest
-    createdAt: "2026-09-07T12:03:33Z"
+    createdAt: "2026-09-08T14:49:59Z"
     description: Automates L3 direct routing between CUDN Pod networks and external
       networks via BGP on OpenShift. Cloud platform aware — auto-discovers BGP infrastructure
       on AWS (VPC Route Server) and works on-premise with explicit configuration.

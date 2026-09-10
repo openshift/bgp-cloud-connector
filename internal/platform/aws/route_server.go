@@ -99,7 +99,42 @@ func (p *Platform) reconcileRouteServerPeers(ctx context.Context, nodes []platfo
 		}
 	}
 
+	managed, err := p.countManagedPeers(ctx, nodesByAZ)
+	if err != nil {
+		return err
+	}
+	platform.SetCloudPeersManaged(platform.PlatformAWS, float64(managed))
 	return nil
+}
+
+// countManagedPeers asks EC2 what is there rather than counting what the loop
+// above asked for.
+//
+// The two are not the same number, and the difference is the whole point of
+// the gauge: a create that EC2 accepted but did not carry out, or a peer
+// deleted out from under the operator, shows up as the gauge sitting below the
+// node count. A gauge fed from the desired set could never report that, since
+// it would be right by construction. The cost is one more list per endpoint.
+func (p *Platform) countManagedPeers(ctx context.Context, nodesByAZ map[string]map[string]bool) (int, error) {
+	managed := 0
+	for az, endpointIDs := range p.endpointsByAZ {
+		desiredIPs := nodesByAZ[az]
+		for _, endpointID := range endpointIDs {
+			peers, err := p.listManagedPeers(ctx, endpointID)
+			if err != nil {
+				return 0, fmt.Errorf("listing managed peers for endpoint %s: %w", endpointID, err)
+			}
+			for _, peer := range peers {
+				if peer.PeerAddress == nil || isDeleted(peer) {
+					continue
+				}
+				if desiredIPs[*peer.PeerAddress] {
+					managed++
+				}
+			}
+		}
+	}
+	return managed, nil
 }
 
 func (p *Platform) listManagedPeers(ctx context.Context, endpointID string) ([]ec2types.RouteServerPeer, error) {
@@ -126,6 +161,7 @@ func (p *Platform) listAllPeers(ctx context.Context, endpointID string) ([]ec2ty
 			NextToken: nextToken,
 		})
 		if err != nil {
+			platform.RecordCloudAPIError(platform.PlatformAWS, platform.OpPeer)
 			return nil, err
 		}
 		for _, peer := range output.RouteServerPeers {
@@ -156,6 +192,9 @@ func (p *Platform) tagPeer(ctx context.Context, peerID string) error {
 		Tags:      p.peerTags(),
 	}
 	_, err := p.ec2Client.CreateTags(ctx, input)
+	if err != nil {
+		platform.RecordCloudAPIError(platform.PlatformAWS, platform.OpPeer)
+	}
 	return err
 }
 
@@ -178,6 +217,9 @@ func (p *Platform) createPeer(ctx context.Context, endpointID, peerAddress strin
 		},
 	}
 	_, err := p.ec2Client.CreateRouteServerPeer(ctx, input)
+	if err != nil {
+		platform.RecordCloudAPIError(platform.PlatformAWS, platform.OpPeer)
+	}
 	return err
 }
 
@@ -186,6 +228,9 @@ func (p *Platform) deletePeer(ctx context.Context, peerID string) error {
 		RouteServerPeerId: aws.String(peerID),
 	}
 	_, err := p.ec2Client.DeleteRouteServerPeer(ctx, input)
+	if err != nil {
+		platform.RecordCloudAPIError(platform.PlatformAWS, platform.OpPeer)
+	}
 	return err
 }
 
@@ -225,5 +270,6 @@ func (p *Platform) deleteAllManagedPeers(ctx context.Context) error {
 			}
 		}
 	}
+	platform.SetCloudPeersManaged(platform.PlatformAWS, 0)
 	return nil
 }

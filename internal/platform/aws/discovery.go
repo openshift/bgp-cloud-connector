@@ -102,9 +102,13 @@ func (p *Platform) describeRouteServer(ctx context.Context, routeServerID string
 		RouteServerIds: []string{routeServerID},
 	})
 	if err != nil {
+		platform.RecordCloudAPIError(platform.PlatformAWS, platform.OpDiscover)
 		return nil, err
 	}
 	if len(output.RouteServers) == 0 {
+		// EC2 answered, and the answer is that the route server named in the
+		// config is not there. That is the user's to fix, not AWS's, so it is
+		// not counted as a cloud API error.
 		return nil, &RouteServerNotFoundError{ID: routeServerID}
 	}
 	return &output.RouteServers[0], nil
@@ -118,6 +122,7 @@ func (p *Platform) describeRouteServerEndpoints(ctx context.Context, routeServer
 			NextToken: nextToken,
 		})
 		if err != nil {
+			platform.RecordCloudAPIError(platform.PlatformAWS, platform.OpDiscover)
 			return nil, err
 		}
 		for _, ep := range output.RouteServerEndpoints {
@@ -141,6 +146,7 @@ func (p *Platform) resolveSubnetAZs(ctx context.Context, subnetIDs []string) (ma
 		SubnetIds: subnetIDs,
 	})
 	if err != nil {
+		platform.RecordCloudAPIError(platform.PlatformAWS, platform.OpDiscover)
 		return nil, err
 	}
 	result := make(map[string]string, len(output.Subnets))

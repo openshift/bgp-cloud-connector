@@ -58,9 +58,12 @@ func New(ctx context.Context, cfg Config) (*Platform, error) {
 func (p *Platform) DiscoverEndpoints(ctx context.Context) (*platform.DiscoveryResult, error) {
 	topology, err := p.compute.GetRouterTopology(ctx, p.cfg.CloudRouterName)
 	if err != nil {
+		platform.RecordCloudAPIError(platform.PlatformGCP, platform.OpDiscover)
 		return nil, fmt.Errorf("reading Cloud Router %q topology: %w", p.cfg.CloudRouterName, err)
 	}
 	if len(topology.InterfaceIPs) == 0 {
+		// Not counted: the read succeeded, the router simply has no interface
+		// to peer with. Someone has to add one; GCP did nothing wrong.
 		return nil, fmt.Errorf("no interfaces on Cloud Router %q", p.cfg.CloudRouterName)
 	}
 
@@ -113,6 +116,7 @@ func (p *Platform) ReconcileNodes(ctx context.Context, nodes []platform.RouterNo
 	for _, node := range routerNodes {
 		changed, err := p.compute.EnsureCanIPForward(ctx, node)
 		if err != nil {
+			platform.RecordCloudAPIError(platform.PlatformGCP, platform.OpNodeForwarding)
 			return fmt.Errorf("enabling IP forwarding on %q: %w", node.Name, err)
 		}
 		if changed {
@@ -122,6 +126,7 @@ func (p *Platform) ReconcileNodes(ctx context.Context, nodes []platform.RouterNo
 		if p.cfg.NestedVirt {
 			changed, err := p.compute.EnsureNestedVirtualization(ctx, node)
 			if err != nil {
+				platform.RecordCloudAPIError(platform.PlatformGCP, platform.OpNodeForwarding)
 				return fmt.Errorf("enabling nested virtualization on %q: %w", node.Name, err)
 			}
 			if changed {
@@ -134,6 +139,7 @@ func (p *Platform) ReconcileNodes(ctx context.Context, nodes []platform.RouterNo
 	// appliance spoke, so the spokes come before the peers.
 	spokeChanges, err := ReconcileNCCSpokes(ctx, p.ncc, p.cfg.NCCHubName, p.cfg.NCCSpokePrefix, p.cfg.SiteToSite, routerNodes)
 	if err != nil {
+		platform.RecordCloudAPIError(platform.PlatformGCP, platform.OpNCC)
 		return fmt.Errorf("reconciling NCC spokes: %w", err)
 	}
 	if spokeChanges > 0 {
@@ -142,12 +148,20 @@ func (p *Platform) ReconcileNodes(ctx context.Context, nodes []platform.RouterNo
 
 	topology, err := p.compute.GetRouterTopology(ctx, p.cfg.CloudRouterName)
 	if err != nil {
+		platform.RecordCloudAPIError(platform.PlatformGCP, platform.OpPeer)
 		return fmt.Errorf("reading Cloud Router %q topology: %w", p.cfg.CloudRouterName, err)
 	}
 	changed, err := p.compute.ReconcilePeers(ctx, p.cfg.CloudRouterName, p.cfg.ClusterID, routerNodes, topology, int(p.cfg.LocalASN))
 	if err != nil {
+		platform.RecordCloudAPIError(platform.PlatformGCP, platform.OpPeer)
 		return fmt.Errorf("reconciling Cloud Router peers: %w", err)
 	}
+	// Unlike AWS and Azure, nothing is read back here. ReconcilePeers writes
+	// the Cloud Router's whole peer list in one patch, so it either applied or
+	// returned the error above; there is no half-written state for a re-read
+	// to catch, and asking again would only cost another API call.
+	managed := len(desiredPeers(p.cfg.ClusterID, routerNodes, topology, int(p.cfg.LocalASN)))
+	platform.SetCloudPeersManaged(platform.PlatformGCP, float64(managed))
 	if changed {
 		logger.Info("Cloud Router peers updated", "router", p.cfg.CloudRouterName, "nodes", len(routerNodes))
 	}
@@ -157,14 +171,18 @@ func (p *Platform) ReconcileNodes(ctx context.Context, nodes []platform.RouterNo
 // Cleanup releases the Cloud Router peers and NCC spokes this platform made.
 func (p *Platform) Cleanup(ctx context.Context) error {
 	if _, err := p.compute.ClearPeers(ctx, p.cfg.CloudRouterName, p.cfg.ClusterID); err != nil {
+		platform.RecordCloudAPIError(platform.PlatformGCP, platform.OpPeer)
 		return fmt.Errorf("clearing Cloud Router peers: %w", err)
 	}
+	platform.SetCloudPeersManaged(platform.PlatformGCP, 0)
 	ids, err := p.ncc.ListSpokesByPrefix(ctx, p.cfg.NCCHubName, p.cfg.NCCSpokePrefix)
 	if err != nil {
+		platform.RecordCloudAPIError(platform.PlatformGCP, platform.OpNCC)
 		return fmt.Errorf("listing NCC spokes: %w", err)
 	}
 	for _, id := range ids {
 		if _, err := p.ncc.DeleteSpoke(ctx, id); err != nil {
+			platform.RecordCloudAPIError(platform.PlatformGCP, platform.OpNCC)
 			return fmt.Errorf("deleting NCC spoke %q: %w", id, err)
 		}
 	}

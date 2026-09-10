@@ -42,6 +42,7 @@ func (p *Platform) getPrimaryENI(ctx context.Context, instanceID string) (eniID 
 	}
 	output, err := p.ec2Client.DescribeInstances(ctx, input)
 	if err != nil {
+		platform.RecordCloudAPIError(platform.PlatformAWS, platform.OpNodeForwarding)
 		return "", false, err
 	}
 
@@ -55,6 +56,8 @@ func (p *Platform) getPrimaryENI(ctx context.Context, instanceID string) (eniID 
 			}
 		}
 	}
+	// Not counted: the call worked, the instance just has no primary ENI in
+	// what it returned, which is not a failure of the AWS API.
 	return "", false, fmt.Errorf("primary ENI not found for instance %s", instanceID)
 }
 
@@ -64,5 +67,8 @@ func (p *Platform) setSourceDestCheck(ctx context.Context, eniID string, enabled
 		SourceDestCheck:    &ec2types.AttributeBooleanValue{Value: aws.Bool(enabled)},
 	}
 	_, err := p.ec2Client.ModifyNetworkInterfaceAttribute(ctx, input)
+	if err != nil {
+		platform.RecordCloudAPIError(platform.PlatformAWS, platform.OpNodeForwarding)
+	}
 	return err
 }
