@@ -75,11 +75,7 @@ type topologyClient struct {
 
 // NewTopologyReader builds a TopologyReader using the default Azure credential
 // chain.
-func NewTopologyReader(subscriptionID, resourceGroup, routeServerName string) (TopologyReader, error) {
-	cred, err := azidentity.NewDefaultAzureCredential(nil)
-	if err != nil {
-		return nil, fmt.Errorf("azure credential: %w", err)
-	}
+func NewTopologyReader(subscriptionID, resourceGroup, routeServerName string, cred azcore.TokenCredential) (TopologyReader, error) {
 	factory, err := armnetwork.NewClientFactory(subscriptionID, cred, nil)
 	if err != nil {
 		return nil, fmt.Errorf("azure network client factory: %w", err)
@@ -119,26 +115,25 @@ type nicClient struct {
 
 // NewNICClient builds a NICClient.
 //
-// With no clientID it uses the default credential chain, as the Route Server
-// clients do. With one it exchanges the operator's projected service account
-// token for that managed identity instead, which is how interfaces in a
-// resource group the operator's own identity cannot write to are reached. The
-// token file and tenant come from the environment the workload identity
-// webhook already populates.
-func NewNICClient(subscriptionID, clientID string) (NICClient, error) {
-	var (
-		cred azcore.TokenCredential
-		err  error
-	)
-	if clientID == "" {
-		cred, err = azidentity.NewDefaultAzureCredential(nil)
-	} else {
+// With no clientID it uses the credential the operator resolved, the same
+// one the Route Server clients use. With one it exchanges the operator's
+// projected service account token for that managed identity instead, which
+// is how interfaces in a resource group the operator's own identity cannot
+// write to are reached. The token file and tenant come from the environment
+// the workload identity webhook already populates.
+//
+// This is why the credential is passed in rather than each client building
+// its own from the SDK's chain: two identities can be in play at once, and
+// which one a client uses is a property of that client.
+func NewNICClient(subscriptionID, clientID string, cred azcore.TokenCredential) (NICClient, error) {
+	if clientID != "" {
+		var err error
 		cred, err = azidentity.NewWorkloadIdentityCredential(&azidentity.WorkloadIdentityCredentialOptions{
 			ClientID: clientID,
 		})
-	}
-	if err != nil {
-		return nil, fmt.Errorf("azure credential: %w", err)
+		if err != nil {
+			return nil, fmt.Errorf("azure credential: %w", err)
+		}
 	}
 	factory, err := armnetwork.NewClientFactory(subscriptionID, cred, nil)
 	if err != nil {

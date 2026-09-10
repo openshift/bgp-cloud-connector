@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
-	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v6"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -70,11 +70,7 @@ type peerKey struct {
 type peerSet map[peerKey]struct{}
 
 // NewRouteServerBackend builds a backend for a Route Server.
-func NewRouteServerBackend(subscriptionID, resourceGroup, routeServerName string) (*RouteServerBackend, error) {
-	cred, err := azidentity.NewDefaultAzureCredential(nil)
-	if err != nil {
-		return nil, fmt.Errorf("azure credential: %w", err)
-	}
+func NewRouteServerBackend(subscriptionID, resourceGroup, routeServerName string, cred azcore.TokenCredential) (*RouteServerBackend, error) {
 	factory, err := armnetwork.NewClientFactory(subscriptionID, cred, nil)
 	if err != nil {
 		return nil, fmt.Errorf("azure network client factory: %w", err)
