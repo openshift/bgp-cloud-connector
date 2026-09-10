@@ -110,17 +110,21 @@ test_rc=0
 # everything it spawned without stopping this script, which still has
 # the teardown to run.
 #
-# Job control rather than setsid, which the AWS sequencer uses. setsid
-# forks when its caller is already a process group leader, and then $!
-# is the pid of a parent that exits immediately: measured, wait returns
-# in 0s while the test carries on, so the teardown would start deleting
-# a Route Server the create is still building. That only happens when
-# monitor mode is on, which prow's non-interactive shell does not do,
-# but it is a sharp edge for anybody running this by hand and there is
-# no reason to keep it. Enabling monitor mode for the launch puts the
-# child in a new group whose id is the pid recorded here, and every
-# script it spawns inherits that group -- measured, three processes in
-# the group and one signal clears them all.
+# Job control rather than setsid. setsid forks when its caller is
+# already a process group leader, and then $! is the pid of a parent
+# that exits at once: wait returns immediately while the test runs on,
+# so the teardown would start deleting a Route Server the create is
+# still building.
+#
+# It takes monitor mode to reach that, and neither prow nor a shell
+# prompt turns it on for a script: `bash -i hack/ci-e2e-azure.sh` does,
+# and under it the teardown was measured starting before the test had
+# finished, with the test still running after the sequencer exited. So
+# this is a sharp edge rather than a live bug, and job control costs
+# nothing and cannot fail that way. Monitor mode for the launch alone
+# puts the child in a new group whose id is the pid recorded here, and
+# every script it spawns inherits that group -- measured, three
+# processes in the group and one signal clears them all.
 set -m
 "${here}/ci-e2e-azure-run.sh" &
 test_pid=$!
