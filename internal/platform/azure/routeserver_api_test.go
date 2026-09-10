@@ -163,6 +163,41 @@ func TestReconcilePeers_NoopWhenEqual(t *testing.T) {
 	}
 }
 
+// TestReconcilePeers_RewritesFailedPeering pins that a peering Azure left in
+// a terminal non-Succeeded state is rewritten rather than accepted.
+//
+// Observed on 10 September: two concurrent writes to the same Route Server
+// were refused with ConflictError, and Azure kept both peerings with their
+// name, IP and ASN intact and provisioningState Failed. Comparing only those
+// three fields made them indistinguishable from working ones, so the
+// reconcile returned early, the operator reported Ready with all six
+// conditions True, and two of six BGP sessions stayed down with nothing left
+// to repair them.
+func TestReconcilePeers_RewritesFailedPeering(t *testing.T) {
+	mutator := &fakeBgpMutator{}
+	failed := conn("a", "10.0.0.1", 65001)
+	failed.Properties.ProvisioningState = to.Ptr(armnetwork.ProvisioningStateFailed)
+
+	b := &RouteServerBackend{
+		ListClient:   &fakeBgpLister{errAt: -1, pages: [][]*armnetwork.BgpConnection{{failed}}},
+		MutateClient: mutator,
+	}
+
+	changed, err := b.ReconcilePeers(context.Background(), []Peer{{Name: "a", PeerIP: "10.0.0.1", PeerASN: 65001}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !changed {
+		t.Error("a Failed peering should be reported as a change")
+	}
+	if len(mutator.created) != 1 {
+		t.Fatalf("got %d create/update calls, want 1: %+v", len(mutator.created), mutator.created)
+	}
+	if len(mutator.deleted) != 0 {
+		t.Errorf("expected no deletes, got %v", mutator.deleted)
+	}
+}
+
 // TestReconcilePeers_CreatesMissingAndUpdatesChanged covers both reasons a
 // peer is written: it is absent, or it is present with the wrong IP/ASN.
 func TestReconcilePeers_CreatesMissingAndUpdatesChanged(t *testing.T) {

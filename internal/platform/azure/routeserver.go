@@ -153,7 +153,7 @@ func (b *RouteServerBackend) ReconcilePeers(ctx context.Context, desired []Peer)
 	changed := false
 	for name, want := range desiredByName {
 		cur, ok := findCurrent(current, name)
-		if !ok || cur.PeerIP != want.PeerIP || cur.PeerASN != want.PeerASN {
+		if !ok || !cur.applied() || cur.PeerIP != want.PeerIP || cur.PeerASN != want.PeerASN {
 			if err := b.createOrUpdate(ctx, want); err != nil {
 				return changed, err
 			}
@@ -261,9 +261,29 @@ func buildDesiredSet(peers []Peer) peerSet {
 	return s
 }
 
+// applied reports whether Azure actually has this peering in place.
+//
+// A write Azure refuses does not remove the peering: it keeps the name, the
+// IP and the ASN and records provisioningState Failed. Observed on 10
+// September, where two concurrent writes to one Route Server were rejected
+// with ConflictError and left exactly that. Succeeded is the only state that
+// means the peering is there, so every other one is treated as absent and
+// rewritten -- including the transient ones, where a rewrite Azure rejects
+// fails this reconcile and is retried on the next, which is the behaviour we
+// want when something else is changing our peerings underneath us.
+func (p ObservedPeer) applied() bool {
+	return p.ProvisioningState == string(armnetwork.ProvisioningStateSucceeded)
+}
+
+// buildPeerSet keys the peerings Azure has actually applied. One it has not
+// is left out, so the comparison against desired reports a difference and
+// the reconcile below rewrites it.
 func buildPeerSet(peers []ObservedPeer) peerSet {
 	s := make(peerSet, len(peers))
 	for _, p := range peers {
+		if !p.applied() {
+			continue
+		}
 		s[peerKey{p.Name, p.PeerIP, p.PeerASN}] = struct{}{}
 	}
 	return s
