@@ -18,6 +18,7 @@ package gcp_e2e
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"google.golang.org/api/compute/v1"
+	"google.golang.org/api/googleapi"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -359,10 +361,14 @@ func removePeer(ctx context.Context, name string) error {
 		}
 	}
 	patch := &compute.Router{BgpPeers: kept, ForceSendFields: []string{"BgpPeers"}}
-	op, err := computeSvc.Routers.Patch(
-		bgpConfig.Spec.GCP.Project, bgpConfig.Spec.GCP.Region,
-		bgpConfig.Spec.GCP.CloudRouterName, patch).Context(ctx).Do()
-	if err != nil {
+	var op *compute.Operation
+	if err := retryTransient(func() error {
+		var callErr error
+		op, callErr = computeSvc.Routers.Patch(
+			bgpConfig.Spec.GCP.Project, bgpConfig.Spec.GCP.Region,
+			bgpConfig.Spec.GCP.CloudRouterName, patch).Context(ctx).Do()
+		return callErr
+	}); err != nil {
 		return err
 	}
 	return waitRegionOp(ctx, op)
@@ -385,11 +391,41 @@ func setCanIPForward(ctx context.Context, node *corev1.Node, enabled bool) error
 		Fingerprint:     inst.Fingerprint,
 		ForceSendFields: []string{"CanIpForward"},
 	}
-	op, err := computeSvc.Instances.Update(vm.Project, vm.Zone, vm.Name, update).Context(ctx).Do()
-	if err != nil {
+	var op *compute.Operation
+	if err := retryTransient(func() error {
+		var callErr error
+		op, callErr = computeSvc.Instances.Update(vm.Project, vm.Zone, vm.Name, update).Context(ctx).Do()
+		return callErr
+	}); err != nil {
 		return err
 	}
 	return waitZoneOp(ctx, vm.Zone, op)
+}
+
+// retryTransient retries a call GCP refused for its own reasons.
+//
+// These helpers are how a spec perturbs the estate so it can watch the
+// operator repair it; they are setup, not the thing under test. Failing
+// a spec because Google returned a 503 tells you nothing about the
+// operator and makes the suite flaky. Observed: "Error 503: Internal
+// error. Please try again", on an Instances.Update, with the cluster
+// entirely healthy either side of it.
+//
+// Only server-side refusals are retried. A 4xx means the request was
+// wrong, which is a real failure and should stay one.
+func retryTransient(call func() error) error {
+	var err error
+	for attempt := 0; attempt < 4; attempt++ {
+		if err = call(); err == nil {
+			return nil
+		}
+		var apiErr *googleapi.Error
+		if !errors.As(err, &apiErr) || apiErr.Code < 500 {
+			return err
+		}
+		time.Sleep(time.Duration(attempt+1) * 5 * time.Second)
+	}
+	return err
 }
 
 func waitRegionOp(ctx context.Context, op *compute.Operation) error {
