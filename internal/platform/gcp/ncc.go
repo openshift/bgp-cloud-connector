@@ -14,9 +14,13 @@ import (
 	"google.golang.org/api/option"
 )
 
-// NewNCCClient builds an NCCClient using Application Default Credentials.
-func NewNCCClient(ctx context.Context, project, region string) (NCCClient, error) {
-	svc, err := networkconnectivity.NewService(ctx, option.WithScopes(networkconnectivity.CloudPlatformScope))
+// NewNCCClient builds an NCCClient from the credential the caller
+// resolved, falling back the same way NewComputeClient does.
+func NewNCCClient(ctx context.Context, project, region string, opts ...option.ClientOption) (NCCClient, error) {
+	if len(opts) == 0 {
+		opts = []option.ClientOption{option.WithScopes(networkconnectivity.CloudPlatformScope)}
+	}
+	svc, err := networkconnectivity.NewService(ctx, opts...)
 	if err != nil {
 		return nil, err
 	}

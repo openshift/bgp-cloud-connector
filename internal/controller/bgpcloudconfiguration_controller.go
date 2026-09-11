@@ -63,6 +63,7 @@ import (
 // +kubebuilder:rbac:groups=config.openshift.io,resources=infrastructures,verbs=get
 // +kubebuilder:rbac:groups=cloudcredential.openshift.io,resources=credentialsrequests,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups="",resources=secrets,resourceNames=bgp-cloud-connector-aws-credentials,verbs=get,namespace=openshift-bgp-cloud-connector
+// +kubebuilder:rbac:groups="",resources=secrets,resourceNames=bgp-cloud-connector-gcp-credentials,verbs=get,namespace=openshift-bgp-cloud-connector
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=create;delete;update;patch
 
 type PlatformBuilderFunc func(ctx context.Context, c client.Client, config *networkingapi.BGPCloudConfiguration) (platform.CloudPlatform, error)
@@ -431,7 +432,17 @@ func buildGCPPlatform(ctx context.Context, c client.Client, config *networkingap
 		return nil, fmt.Errorf("reading cluster infrastructure name: %w", err)
 	}
 
+	// May report platform.ErrCredentialsPending, which Reconcile waits
+	// out rather than treating as a fault. Where the pod already has a
+	// credential -- a manager run from a desk against a gcloud login --
+	// this returns at once and the cluster is left alone.
+	creds, err := gcpplatform.ResolveCredentials(ctx, c, OperatorNamespace())
+	if err != nil {
+		return nil, err
+	}
+
 	cfg := gcpplatform.Config{
+		Credentials:     creds,
 		Project:         gcpSpec.Project,
 		Region:          gcpSpec.Region,
 		CloudRouterName: gcpSpec.CloudRouterName,

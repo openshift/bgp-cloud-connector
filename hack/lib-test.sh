@@ -21,6 +21,8 @@ source "${here}/lib/frr.sh"       # pulls in common.sh
 source "${here}/lib/retry.sh"
 # shellcheck source=hack/aws/lib.sh
 source "${here}/aws/lib.sh"
+# shellcheck source=hack/aws/ci.sh
+source "${here}/aws/ci.sh"    # pulls in lib/ci.sh
 
 export RETRY_INTERVAL_SECS=1      # real sleeps would be too slow for the unit job
 
@@ -102,6 +104,25 @@ check "retry stopped as soon as it succeeded" "${flaky_calls}" "3"
 
 retry 3 1 "doomed" always_fails >/dev/null 2>&1
 check "retry gives up after the last attempt" "$?" "1"
+
+# print_fields is shared rather than AWS's, because `az -o tsv` has the
+# same shape as `aws --output text`: tab separated, and a bare newline
+# for an empty result.
+check "print_fields puts one field per line" \
+    "$(print_fields "$(printf 'a\tb\tc')" | tr '\n' ' ')" "a b c "
+check "print_fields says nothing for an empty result" \
+    "$(print_fields "$(printf '\n')" | wc -l)" "0"
+check "print_fields drops empty fields rather than emitting blank lines" \
+    "$(print_fields "$(printf 'a\t\tb')" | wc -l)" "2"
+check "print_fields handles a newline separated result too" \
+    "$(print_fields "$(printf 'a\nb')" | tr '\n' ' ')" "a b "
+
+# The point of it living here rather than in aws/lib.sh: a cloud that
+# does not source AWS's library still gets it.
+check "print_fields comes from common.sh alone" \
+    "$(bash -c 'source "${0}/lib/common.sh"; print_fields "$(printf "a\tb")" | tr "\n" " "' "${here}")" \
+    "a b "
+
 
 ######################################################################
 echo "--- lib/frr.sh ---"
@@ -320,6 +341,104 @@ check "endpoint_peers skips the dead states and nothing else" \
     "$(endpoint_peers rsep-1 | grep -c "State!='deleted' && State!='deleting'" || true)" "1"
 
 unset -f aws
+
+######################################################################
+echo "--- gcp/lib.sh ---"
+#
+# Same rule as the AWS reads: a failed query is not an answer. gcloud
+# writes deprecation notices and property chatter to stderr on calls it
+# answers with 0, so folding stderr in would leave that text inside a
+# router name, which then goes back to GCP as --router.
+
+# shellcheck source=hack/gcp/lib.sh
+source "${here}/gcp/lib.sh"
+
+# shellcheck disable=SC2329
+gcloud() {
+    echo "WARNING: the following filter keys were not present" >&2
+    printf '%s' "${stub_gcloud_out}"
+}
+stub_gcloud_out="amcdermo-cudn-cr"
+check "gcp_query keeps stderr out of the value" \
+    "$(gcp_query "list routers" gcloud compute routers list 2>/dev/null)" "amcdermo-cudn-cr"
+
+# shellcheck disable=SC2329
+gcloud() { echo "ERROR: (gcloud.compute.routers.list) reauth" >&2; return 1; }
+(gcp_query "list routers" gcloud compute routers list) >/dev/null 2>&1
+check "gcp_query fails rather than reporting nothing" "$?" "1"
+check "gcp_query says why" \
+    "$( (gcp_query "list routers" gcloud compute routers list) 2>&1 >/dev/null | grep -c 'cannot list routers')" "1"
+
+# The existence checks return 2 when they could not ask, which is
+# neither present nor absent: a create that read 2 as absent would build
+# a second estate, and a delete would report success over the first.
+# shellcheck disable=SC2329
+gcloud() { echo "ERROR: reauth" >&2; return 1; }
+gcp_router_exists cr us-east1 proj >/dev/null 2>&1
+check "gcp_router_exists reports a failed question as 2" "$?" "2"
+gcp_hub_exists hub proj >/dev/null 2>&1
+check "gcp_hub_exists reports a failed question as 2" "$?" "2"
+
+# shellcheck disable=SC2329
+gcloud() { printf ''; }
+gcp_router_exists cr us-east1 proj >/dev/null 2>&1
+check "gcp_router_exists reports absent as 1" "$?" "1"
+# shellcheck disable=SC2329
+gcloud() { printf 'cr'; }
+gcp_router_exists cr us-east1 proj >/dev/null 2>&1
+check "gcp_router_exists reports present as 0" "$?" "0"
+
+# The names every estate resource is derived from, so two clusters in
+# one project never collide.
+check "hub name is keyed on the infra id" "$(gcp_hub_name amcdermo-x)" "amcdermo-x-ncc-hub"
+check "router name is keyed on the infra id" "$(gcp_router_name amcdermo-x)" "amcdermo-x-cudn-cr"
+check "spoke prefix is keyed on the infra id" "$(gcp_spoke_prefix amcdermo-x)" "amcdermo-x-bgp-spoke"
+
+# The cluster reads, which must not fold stderr into the value either.
+# shellcheck disable=SC2329
+oc() {
+    echo "Warning: apps.openshift.io/v1 DeploymentConfig is deprecated" >&2
+    case "$*" in
+        *infrastructureName*) printf 'amcdermo-x' ;;
+        *gcp.projectID*)      printf 'openshift-qe' ;;
+        *gcp.region*)         printf 'us-east1' ;;
+    esac
+}
+check "gcp_cluster_facts keeps stderr out of the infrastructure name" \
+    "$( (gcp_cluster_facts 2>/dev/null; printf '%s' "${infra}") )" "amcdermo-x"
+check "gcp_cluster_facts keeps stderr out of the project" \
+    "$( (gcp_cluster_facts 2>/dev/null; printf '%s' "${project}") )" "openshift-qe"
+check "gcp_cluster_facts keeps stderr out of the region" \
+    "$( (gcp_cluster_facts 2>/dev/null; printf '%s' "${region}") )" "us-east1"
+
+# gcloud's --filter is not an identity test and is not consistent about
+# what it is, so the comparison is exact and in shell instead. Measured
+# against one cluster: firewall rules match by prefix, so
+# name=<infra>-bgp matched <infra>-bgp-worker-subnet and a rule that did
+# not exist read as present, which would leave nothing opening tcp:179.
+# shellcheck disable=SC2329
+gcloud() { printf 'amcdermo-bgp-worker-subnet\n'; }
+gcp_firewall_exists amcdermo-bgp proj >/dev/null 2>&1
+check "a prefix is not a match" "$?" "1"
+gcp_firewall_exists amcdermo-bgp-worker-subnet proj >/dev/null 2>&1
+check "the exact name is a match" "$?" "0"
+
+# shellcheck disable=SC2329
+gcloud() { printf 'hub-a\nhub-b\n'; }
+gcp_hub_exists hub-a proj >/dev/null 2>&1
+check "gcp_hub_exists finds a hub among several" "$?" "0"
+gcp_hub_exists hub-c proj >/dev/null 2>&1
+check "gcp_hub_exists reports a missing hub as absent" "$?" "1"
+
+# Interface addresses arrive as one semicolon-separated value, each
+# carrying the mask it was allocated with. A BGP neighbour address is
+# neither.
+# shellcheck disable=SC2329
+gcloud() { printf '10.0.128.5/17;10.0.128.6/17'; }
+check "interface addresses are split and stripped" \
+    "$(gcp_router_interface_addresses cr us-east1 proj | tr '\n' ' ')" "10.0.128.5 10.0.128.6 "
+
+unset -f gcloud oc
 
 ######################################################################
 echo "--- lib/retry.sh ---"
@@ -583,6 +702,73 @@ check "repeats what aws said" \
 stub_aws_rc=0
 
 unset -f oc aws
+
+######################################################################
+echo "--- lib/ci.sh ---"
+
+# The bootstrap is what a prow job does before it touches anything, so a
+# mistake here is one nobody sees until a job has already spent forty
+# minutes installing a cluster. It is split into pieces small enough to
+# assert on: the whole ci_bootstrap cannot be called here, because its
+# last step provisions a CLI and would fetch sixty megabytes.
+
+ci_home="$(mktemp -d "${workdir}/ci-XXXXXX")"
+
+check "ci_use_shared_kubeconfig leaves the environment alone with no SHARED_DIR" \
+    "$( (unset SHARED_DIR; KUBECONFIG=/mine; ci_use_shared_kubeconfig; echo "${KUBECONFIG}") )" \
+    "/mine"
+
+mkdir -p "${ci_home}/shared"
+: >"${ci_home}/shared/kubeconfig"
+check "ci_use_shared_kubeconfig takes prow's kubeconfig when there is one" \
+    "$( (SHARED_DIR="${ci_home}/shared"; KUBECONFIG=/mine; ci_use_shared_kubeconfig; echo "${KUBECONFIG}") )" \
+    "${ci_home}/shared/kubeconfig"
+
+# A SHARED_DIR with no kubeconfig in it means the install step did not
+# leave one, which is worth saying rather than silently carrying on
+# against whatever cluster the environment happens to point at.
+mkdir -p "${ci_home}/empty"
+out="$( ( set -o errexit; SHARED_DIR="${ci_home}/empty"; ci_use_shared_kubeconfig ) 2>&1 )"
+check "ci_use_shared_kubeconfig fails when prow left no kubeconfig" "$?" "1"
+check "and says where it looked" \
+    "$(printf '%s' "${out}" | grep -c "${ci_home}/empty")" "1"
+
+ci_make_workdir
+check "ci_make_workdir creates a directory" \
+    "$([[ -d "${ci_workdir}" ]] && echo yes)" "yes"
+made="${ci_workdir}"
+ci_remove_workdir
+check "ci_remove_workdir removes it" \
+    "$([[ -d "${made}" ]] && echo yes || echo no)" "no"
+
+# Called from an EXIT trap, where a non-zero status would replace the
+# script's own and turn a clean run into a failure.
+ci_workdir=""
+ci_remove_workdir
+check "ci_remove_workdir succeeds with nothing to remove" "$?" "0"
+
+######################################################################
+echo "--- aws/ci.sh ---"
+
+check "ci_aws_shared_credentials leaves the environment alone with no CLUSTER_PROFILE_DIR" \
+    "$( (unset CLUSTER_PROFILE_DIR AWS_SHARED_CREDENTIALS_FILE
+         ci_aws_shared_credentials; echo "${AWS_SHARED_CREDENTIALS_FILE:-unset}") )" \
+    "unset"
+
+mkdir -p "${ci_home}/profile"
+: >"${ci_home}/profile/.awscred"
+check "ci_aws_shared_credentials takes the cluster profile's credentials" \
+    "$( (CLUSTER_PROFILE_DIR="${ci_home}/profile"
+         ci_aws_shared_credentials; echo "${AWS_SHARED_CREDENTIALS_FILE}") )" \
+    "${ci_home}/profile/.awscred"
+
+mkdir -p "${ci_home}/profile-empty"
+out="$( ( set -o errexit; CLUSTER_PROFILE_DIR="${ci_home}/profile-empty"
+          ci_aws_shared_credentials ) 2>&1 )"
+check "ci_aws_shared_credentials fails when the profile carries no .awscred" "$?" "1"
+check "and says where it looked" \
+    "$(printf '%s' "${out}" | grep -c "${ci_home}/profile-empty")" "1"
+
 
 echo "---"
 echo "passed=${passed} failed=${failed}"
