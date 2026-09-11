@@ -385,16 +385,22 @@ func setCanIPForward(ctx context.Context, node *corev1.Node, enabled bool) error
 	if err != nil {
 		return err
 	}
-	update := &compute.Instance{
-		Name:            inst.Name,
-		CanIpForward:    enabled,
-		Fingerprint:     inst.Fingerprint,
-		ForceSendFields: []string{"CanIpForward"},
-	}
+	// The whole instance goes back, not a stripped-down one, and the
+	// disruption policy is named. Sending three fields and no policy is
+	// answered with a bare 503 rather than a useful 400, which reads as
+	// a flaky cloud and is not: it failed the same way twice, four
+	// retries apart, on an instance that was RUNNING and idle.
+	//
+	// This is what EnsureCanIPForward does, and the spec perturbs the
+	// estate the same way the operator changes it so that the only
+	// difference between them is the value.
+	inst.CanIpForward = enabled
 	var op *compute.Operation
 	if err := retryTransient(func() error {
 		var callErr error
-		op, callErr = computeSvc.Instances.Update(vm.Project, vm.Zone, vm.Name, update).Context(ctx).Do()
+		op, callErr = computeSvc.Instances.Update(vm.Project, vm.Zone, vm.Name, inst).
+			MostDisruptiveAllowedAction("REFRESH").
+			Context(ctx).Do()
 		return callErr
 	}); err != nil {
 		return err
