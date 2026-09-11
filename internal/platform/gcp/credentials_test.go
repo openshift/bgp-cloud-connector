@@ -213,4 +213,76 @@ func TestResolveCredentials_SecretWithNothingUsableIsAnError(t *testing.T) {
 	}
 }
 
+// TestResolveCredentials_KeepsTheRequestCurrentWhileUsingTheSecret pins
+// that a request left behind by an older build is brought up to date.
+//
+// Observed on a live cluster: the permission list grew, the secret
+// already existed, so nothing ever rewrote the request and the operator
+// kept failing with a 403 for a permission it was now asking for in code
+// and not in the cluster.
+func TestResolveCredentials_KeepsTheRequestCurrentWhileUsingTheSecret(t *testing.T) {
+	noAmbient(t)
+	stale := &unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{
+			"name":      CredentialsRequestName,
+			"namespace": CredentialsRequestNamespace,
+		},
+		"spec": map[string]any{
+			"providerSpec": map[string]any{
+				"apiVersion":  "cloudcredential.openshift.io/v1",
+				"kind":        "GCPProviderSpec",
+				"permissions": []any{"compute.routers.get"},
+			},
+		},
+	}}
+	stale.SetGroupVersionKind(CredentialsRequestGVK)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: CredentialsSecretName, Namespace: testNamespace},
+		Data:       map[string][]byte{secretServiceAccountKey: []byte(serviceAccountJSON)},
+	}
+	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).
+		WithObjects(secret, stale).Build()
+
+	if _, err := ResolveCredentials(context.Background(), c, testNamespace); err != nil {
+		t.Fatalf("ResolveCredentials: %v", err)
+	}
+
+	got := &unstructured.Unstructured{}
+	got.SetGroupVersionKind(CredentialsRequestGVK)
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: CredentialsRequestName, Namespace: CredentialsRequestNamespace,
+	}, got); err != nil {
+		t.Fatalf("reading the request back: %v", err)
+	}
+	perms, _, _ := unstructured.NestedStringSlice(got.Object, "spec", "providerSpec", "permissions")
+	if len(perms) != len(permissions) {
+		t.Errorf("the request still asks for %d permissions, want %d: a stale request is never corrected",
+			len(perms), len(permissions))
+	}
+}
+
+// TestResolveCredentials_AmbientLeavesTheClusterAlone pins the promise that
+// a manager run from a desk creates nothing.
+func TestResolveCredentials_AmbientLeavesTheClusterAlone(t *testing.T) {
+	previous := ambientCredentials
+	ambientCredentials = func(context.Context) ([]byte, error) {
+		return []byte(serviceAccountJSON), nil
+	}
+	t.Cleanup(func() { ambientCredentials = previous })
+
+	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).Build()
+	if _, err := ResolveCredentials(context.Background(), c, testNamespace); err != nil {
+		t.Fatalf("ResolveCredentials: %v", err)
+	}
+
+	cr := &unstructured.Unstructured{}
+	cr.SetGroupVersionKind(CredentialsRequestGVK)
+	err := c.Get(context.Background(), types.NamespacedName{
+		Name: CredentialsRequestName, Namespace: CredentialsRequestNamespace,
+	}, cr)
+	if err == nil {
+		t.Error("a request was raised even though the process already had a credential")
+	}
+}
+
 var _ client.Client = (client.Client)(nil)

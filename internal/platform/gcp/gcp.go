@@ -3,6 +3,7 @@ package gcp
 import (
 	"context"
 	"fmt"
+	"google.golang.org/api/option"
 	"strconv"
 	"strings"
 
@@ -14,6 +15,12 @@ import (
 // Config is everything the GCP platform needs that the controller cannot work
 // out for itself. It is spec.gcp plus the two values every platform is given.
 type Config struct {
+	// Credentials is what the caller resolved with ResolveCredentials.
+	// Empty means fall back to the Google libraries' own chain, which is
+	// only useful from a desk: in a pod that chain reaches the metadata
+	// server, and no pod here can.
+	Credentials []option.ClientOption
+
 	Project         string
 	Region          string
 	CloudRouterName string
@@ -39,11 +46,11 @@ type Platform struct {
 
 // New builds a Platform against the live Google APIs.
 func New(ctx context.Context, cfg Config) (*Platform, error) {
-	computeClient, err := NewComputeClient(ctx, cfg.Project, cfg.Region)
+	computeClient, err := NewComputeClient(ctx, cfg.Project, cfg.Region, cfg.Credentials...)
 	if err != nil {
 		return nil, &platform.CredentialError{Msg: fmt.Sprintf("GCP compute client: %v", err)}
 	}
-	nccClient, err := NewNCCClient(ctx, cfg.Project, cfg.Region)
+	nccClient, err := NewNCCClient(ctx, cfg.Project, cfg.Region, cfg.Credentials...)
 	if err != nil {
 		return nil, &platform.CredentialError{Msg: fmt.Sprintf("GCP network connectivity client: %v", err)}
 	}
