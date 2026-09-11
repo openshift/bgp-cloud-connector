@@ -411,6 +411,26 @@ check "gcp_cluster_facts keeps stderr out of the project" \
 check "gcp_cluster_facts keeps stderr out of the region" \
     "$( (gcp_cluster_facts 2>/dev/null; printf '%s' "${region}") )" "us-east1"
 
+# The two GCP APIs disagree about what a name filter matches, which a
+# stub cannot show you and a cluster did: hubs filter on the full
+# resource path while the value projection prints the last segment, so
+# an equality filter matches nothing and a hub that is plainly there
+# reads as absent.
+# shellcheck disable=SC2329
+# -F because the filter ends in $, which grep would otherwise read as
+# an end-of-line anchor and never match.
+gcloud() { printf '%s' "$*" | grep -qF -- 'name~/hub-a$' && printf 'hub-a'; }
+gcp_hub_exists hub-a proj >/dev/null 2>&1
+check "gcp_hub_exists matches a hub by its path suffix" "$?" "0"
+
+# Interface addresses arrive as one semicolon-separated value, each
+# carrying the mask it was allocated with. A BGP neighbour address is
+# neither.
+# shellcheck disable=SC2329
+gcloud() { printf '10.0.128.5/17;10.0.128.6/17'; }
+check "interface addresses are split and stripped" \
+    "$(gcp_router_interface_addresses cr us-east1 proj | tr '\n' ' ')" "10.0.128.5 10.0.128.6 "
+
 unset -f gcloud oc
 
 ######################################################################
