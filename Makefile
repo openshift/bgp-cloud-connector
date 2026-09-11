@@ -182,6 +182,12 @@ test-e2e-aws: ## Run AWS e2e tests (requires cluster + IRSA configured). Usage: 
 	@[ -n "$(E2E_PROFILE)$(E2E_MANIFEST_DIR)" ] || { echo "Usage: make test-e2e-aws <profile-name>, or set E2E_MANIFEST_DIR"; exit 1; }
 	E2E_PROFILE=$(E2E_PROFILE) go test ./test/e2e/aws/ -v -timeout 60m -count=1
 
+.PHONY: test-e2e-azure
+test-e2e-azure: ## Run Azure e2e tests (requires cluster + Route Server estate). Usage: make test-e2e-azure <profile>
+	$(eval E2E_PROFILE := $(filter-out $@,$(MAKECMDGOALS)))
+	@[ -n "$(E2E_PROFILE)$(E2E_MANIFEST_DIR)" ] || { echo "Usage: make test-e2e-azure <profile-name>, or set E2E_MANIFEST_DIR"; exit 1; }
+	E2E_PROFILE=$(E2E_PROFILE) go test ./test/e2e/azure/ -v -timeout 90m -count=1
+
 .PHONY: lint
 lint: ## Run golangci-lint linter
 	$(GOLANGCI_LINT) run
