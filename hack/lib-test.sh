@@ -343,6 +343,77 @@ check "endpoint_peers skips the dead states and nothing else" \
 unset -f aws
 
 ######################################################################
+echo "--- gcp/lib.sh ---"
+#
+# Same rule as the AWS reads: a failed query is not an answer. gcloud
+# writes deprecation notices and property chatter to stderr on calls it
+# answers with 0, so folding stderr in would leave that text inside a
+# router name, which then goes back to GCP as --router.
+
+# shellcheck source=hack/gcp/lib.sh
+source "${here}/gcp/lib.sh"
+
+# shellcheck disable=SC2329
+gcloud() {
+    echo "WARNING: the following filter keys were not present" >&2
+    printf '%s' "${stub_gcloud_out}"
+}
+stub_gcloud_out="amcdermo-cudn-cr"
+check "gcp_query keeps stderr out of the value" \
+    "$(gcp_query "list routers" gcloud compute routers list 2>/dev/null)" "amcdermo-cudn-cr"
+
+# shellcheck disable=SC2329
+gcloud() { echo "ERROR: (gcloud.compute.routers.list) reauth" >&2; return 1; }
+(gcp_query "list routers" gcloud compute routers list) >/dev/null 2>&1
+check "gcp_query fails rather than reporting nothing" "$?" "1"
+check "gcp_query says why" \
+    "$( (gcp_query "list routers" gcloud compute routers list) 2>&1 >/dev/null | grep -c 'cannot list routers')" "1"
+
+# The existence checks return 2 when they could not ask, which is
+# neither present nor absent: a create that read 2 as absent would build
+# a second estate, and a delete would report success over the first.
+# shellcheck disable=SC2329
+gcloud() { echo "ERROR: reauth" >&2; return 1; }
+gcp_router_exists cr us-east1 proj >/dev/null 2>&1
+check "gcp_router_exists reports a failed question as 2" "$?" "2"
+gcp_hub_exists hub proj >/dev/null 2>&1
+check "gcp_hub_exists reports a failed question as 2" "$?" "2"
+
+# shellcheck disable=SC2329
+gcloud() { printf ''; }
+gcp_router_exists cr us-east1 proj >/dev/null 2>&1
+check "gcp_router_exists reports absent as 1" "$?" "1"
+# shellcheck disable=SC2329
+gcloud() { printf 'cr'; }
+gcp_router_exists cr us-east1 proj >/dev/null 2>&1
+check "gcp_router_exists reports present as 0" "$?" "0"
+
+# The names every estate resource is derived from, so two clusters in
+# one project never collide.
+check "hub name is keyed on the infra id" "$(gcp_hub_name amcdermo-x)" "amcdermo-x-ncc-hub"
+check "router name is keyed on the infra id" "$(gcp_router_name amcdermo-x)" "amcdermo-x-cudn-cr"
+check "spoke prefix is keyed on the infra id" "$(gcp_spoke_prefix amcdermo-x)" "amcdermo-x-bgp-spoke"
+
+# The cluster reads, which must not fold stderr into the value either.
+# shellcheck disable=SC2329
+oc() {
+    echo "Warning: apps.openshift.io/v1 DeploymentConfig is deprecated" >&2
+    case "$*" in
+        *infrastructureName*) printf 'amcdermo-x' ;;
+        *gcp.projectID*)      printf 'openshift-qe' ;;
+        *gcp.region*)         printf 'us-east1' ;;
+    esac
+}
+check "gcp_cluster_facts keeps stderr out of the infrastructure name" \
+    "$( (gcp_cluster_facts 2>/dev/null; printf '%s' "${infra}") )" "amcdermo-x"
+check "gcp_cluster_facts keeps stderr out of the project" \
+    "$( (gcp_cluster_facts 2>/dev/null; printf '%s' "${project}") )" "openshift-qe"
+check "gcp_cluster_facts keeps stderr out of the region" \
+    "$( (gcp_cluster_facts 2>/dev/null; printf '%s' "${region}") )" "us-east1"
+
+unset -f gcloud oc
+
+######################################################################
 echo "--- lib/retry.sh ---"
 #
 # The teardown has two claims behind it. That AWS answers "not ready
