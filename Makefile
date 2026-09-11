@@ -186,6 +186,20 @@ test-e2e-azure: ## Run Azure e2e tests (requires cluster + Route Server estate).
 	@[ -n "$(E2E_PROFILE)$(E2E_MANIFEST_DIR)" ] || { echo "Usage: make test-e2e-azure <profile-name>, or set E2E_MANIFEST_DIR"; exit 1; }
 	E2E_PROFILE=$(E2E_PROFILE) go test ./test/e2e/azure/ -v -timeout 90m -count=1
 
+.PHONY: test-e2e-gcp
+test-e2e-gcp: ## Run GCP e2e tests (requires cluster + Cloud Router estate). Usage: make test-e2e-gcp <profile>
+	$(eval E2E_PROFILE := $(filter-out $@,$(MAKECMDGOALS)))
+	@[ -n "$(E2E_PROFILE)$(E2E_MANIFEST_DIR)" ] || { echo "Usage: make test-e2e-gcp <profile-name>, or set E2E_MANIFEST_DIR"; exit 1; }
+	E2E_PROFILE=$(E2E_PROFILE) go test ./test/e2e/gcp/ -v -timeout 60m -count=1
+
+.PHONY: ci-e2e-gcp
+ci-e2e-gcp: ## Run the GCP e2e job: stand the estate up, then tear it down.
+	./hack/ci-e2e-gcp.sh
+
+.PHONY: ci-e2e-gcp-teardown
+ci-e2e-gcp-teardown: ## Remove whatever a GCP e2e run left behind.
+	./hack/ci-e2e-gcp-teardown.sh
+
 .PHONY: lint
 lint: ## Run golangci-lint linter
 	$(GOLANGCI_LINT) run
