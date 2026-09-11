@@ -86,15 +86,28 @@ var permissions = []string{
 	// own network. No other operator here asks for it, because none of
 	// them touch router peers.
 	"compute.networks.updatePolicy",
+	// Creating the router appliance spoke fetches the network the
+	// instances are in, and fails with code=7 on "failed to fetch
+	// resource .../global/networks/<name>" without this. It only shows
+	// up when the operator creates the spoke rather than adopting one
+	// somebody else made.
+	"compute.networks.get",
 	// canIpForward and nested virtualisation are both whole-instance
 	// updates, not interface ones: compute.instances.updateNetworkInterface
 	// is not enough, which a cluster said with a 403 rather than a
 	// reading of the docs.
 	"compute.instances.get",
 	"compute.instances.update",
-	// Every mutation above returns an operation that has to be polled.
+	// Every mutation returns a long-running operation that has to be
+	// polled, and the two API families name that permission
+	// separately: compute has zone and region operations,
+	// networkconnectivity has its own. Missing the latter is not a
+	// failure to create -- the spoke is made and then the poll is
+	// refused, so the reconcile errors while the resource quietly
+	// appears, and the next pass reports complete. Measured.
 	"compute.zoneOperations.get",
 	"compute.regionOperations.get",
+	"networkconnectivity.operations.get",
 	// The NCC spoke carrying the router nodes, which is created,
 	// listed, patched and removed.
 	"networkconnectivity.hubs.get",
