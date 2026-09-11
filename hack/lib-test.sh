@@ -411,17 +411,24 @@ check "gcp_cluster_facts keeps stderr out of the project" \
 check "gcp_cluster_facts keeps stderr out of the region" \
     "$( (gcp_cluster_facts 2>/dev/null; printf '%s' "${region}") )" "us-east1"
 
-# The two GCP APIs disagree about what a name filter matches, which a
-# stub cannot show you and a cluster did: hubs filter on the full
-# resource path while the value projection prints the last segment, so
-# an equality filter matches nothing and a hub that is plainly there
-# reads as absent.
+# gcloud's --filter is not an identity test and is not consistent about
+# what it is, so the comparison is exact and in shell instead. Measured
+# against one cluster: firewall rules match by prefix, so
+# name=<infra>-bgp matched <infra>-bgp-worker-subnet and a rule that did
+# not exist read as present, which would leave nothing opening tcp:179.
 # shellcheck disable=SC2329
-# -F because the filter ends in $, which grep would otherwise read as
-# an end-of-line anchor and never match.
-gcloud() { printf '%s' "$*" | grep -qF -- 'name~/hub-a$' && printf 'hub-a'; }
+gcloud() { printf 'amcdermo-bgp-worker-subnet\n'; }
+gcp_firewall_exists amcdermo-bgp proj >/dev/null 2>&1
+check "a prefix is not a match" "$?" "1"
+gcp_firewall_exists amcdermo-bgp-worker-subnet proj >/dev/null 2>&1
+check "the exact name is a match" "$?" "0"
+
+# shellcheck disable=SC2329
+gcloud() { printf 'hub-a\nhub-b\n'; }
 gcp_hub_exists hub-a proj >/dev/null 2>&1
-check "gcp_hub_exists matches a hub by its path suffix" "$?" "0"
+check "gcp_hub_exists finds a hub among several" "$?" "0"
+gcp_hub_exists hub-c proj >/dev/null 2>&1
+check "gcp_hub_exists reports a missing hub as absent" "$?" "1"
 
 # Interface addresses arrive as one semicolon-separated value, each
 # carrying the mask it was allocated with. A BGP neighbour address is
