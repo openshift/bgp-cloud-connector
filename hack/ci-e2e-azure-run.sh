@@ -37,6 +37,7 @@ set -o errexit
 set -o pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "${here}/.." && pwd)"
 # shellcheck source=hack/azure/ci.sh
 source "${here}/azure/ci.sh"
 
@@ -81,100 +82,21 @@ info "profile written to ${profile_dir}:"
 sed -e 's/^/  /' -e 's/\(subscriptionID:\).*/\1 <redacted>/' \
     "${profile_dir}/bgpcloudconfiguration.yaml"
 
-# Hand the estate to the operator and wait for it to say it found it.
+# The suite owns the CRs, not this script. It creates the
+# configuration, the routing CR and the namespace, asserts against what
+# the operator does with them, and removes all three again -- at the
+# start of a run as well as the end, so a run killed by Ctrl-C or by a
+# timeout does not leave the next one failing on AlreadyExists.
 #
-# This is the one thing here that a suite would otherwise be the first
-# to exercise, and it is the piece with no other cover: resolving Azure
-# credentials from inside a cluster runs only where the pod cannot
-# reach IMDS -- measured, curl rc 7 -- and there is no service account
-# issuer, which is every IPI cluster and no unit test. Reaching
-# CloudEndpointsDiscovered means the operator obtained a credential,
-# authenticated, and read the Route Server this run built.
-#
-# Only the configuration. The BGPRouting alongside it needs a namespace
-# carrying both user-defined-network labels, created with generateName,
-# and none of that earns its keep until something asserts on the
-# result.
+# Nothing is applied here, deliberately. Two owners would mean every
+# suite run began by deleting what this script had just built, and
+# paying for the peerings twice: Azure applies one write to a Route
+# Server at a time, at minutes each.
+info "--- e2e suite ---"
+E2E_MANIFEST_DIR="${profile_dir}" make -C "${repo_root}" test-e2e-azure
+
+info "e2e suite passed"
 info ""
-info "--- operator ---"
-
-# A configuration left mid-deletion by an earlier run is not something
-# to apply over. The operator clears that finalizer, so where none is
-# running the object simply stays, oc apply says "unchanged" about
-# something nothing will reconcile, and the conditions on it are
-# whatever the previous run left behind. Observed on a development
-# cluster, where it looked exactly like success.
-deletion_ts="$(oc get bgpcloudconfiguration cluster \
-    -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null || true)"
-[[ -z "${deletion_ts}" ]] \
-    || die "a BGPCloudConfiguration from an earlier run is still being deleted, since ${deletion_ts}" \
-           "Its finalizer is the operator's, and nothing clears it while no operator is running." \
-           "Start one, or remove the leftovers with hack/delete-e2e-crs.sh."
-
-oc apply -f "${profile_dir}/bgpcloudconfiguration.yaml"
-
-# What the operator has to be seen to have acted on. Compared below
-# rather than the condition alone, because a True left by an earlier
-# run satisfies a plain condition check before this configuration has
-# been looked at even once -- observed, all six conditions True at
-# observedGeneration 1 against a generation of 2.
-generation="$(oc get bgpcloudconfiguration cluster -o jsonpath='{.metadata.generation}')"
-
-# Reached through wait_until's "$@".
-# shellcheck disable=SC2329
-endpoints_discovered() {
-    local status seen
-    read -r status seen <<<"$(oc get bgpcloudconfiguration cluster \
-        -o jsonpath="{range .status.conditions[?(@.type=='CloudEndpointsDiscovered')]}{.status} {.observedGeneration}{end}" \
-        2>/dev/null)" || return 1
-    [[ "${status}" == "True" && -n "${seen}" ]] || return 1
-    (( seen >= generation ))
-}
-
-# Long, because this cannot report early even though discovery happens
-# early. The operator writes status once, at the end of a reconcile, so
-# the condition does not appear until the cloud reconcile after it has
-# also finished -- measured on 10 September against a three router node
-# cluster in centralus: discovery logged 1s after the apply, the three
-# Route Server peerings took 3m40s, 2m21s and 2m24s, and the condition
-# landed 8m50s after the apply. A 600s budget passed that run by
-# seventy seconds, which is not a budget.
-#
-# The credential can also be missing when this starts: with none of its
-# own the operator raises a CredentialsRequest and waits for the
-# cloud-credential operator to mint the secret before the first
-# reconcile that can discover anything.
-discovery_timeout="${DISCOVERY_TIMEOUT:-1200}"
-
-if ! wait_until "${discovery_timeout}" 10 \
-        "the operator to discover the Route Server" endpoints_discovered; then
-    # The status alone. The spec carries the subscription id, and prow
-    # logs for openshift repositories are public.
-    warn "the operator did not report the estate; its status at generation ${generation} follows"
-    oc get bgpcloudconfiguration cluster -o json | jq '.status' >&2 || true
-    die "the operator did not discover the Route Server within ${discovery_timeout}s" \
-        "Remove what this built with:" \
-        "  INFRA=${infra} AZURE_RESOURCE_GROUP=${rg} \\" \
-        "    AZURE_NETWORK_RESOURCE_GROUP=${net_rg} hack/ci-e2e-azure-teardown.sh"
-fi
-
-info "the operator discovered the estate; status.peerGroups:"
-oc get bgpcloudconfiguration cluster -o json | jq '.status.peerGroups'
-
-# There is no Azure suite to run yet, and this exits non-zero rather
-# than reporting success, because a job that goes green having tested
-# nothing is worse than one that is honestly red. One thing is missing:
-# test/e2e/azure does not exist. The shared suite under test/e2e reads
-# spec.bgp.peerGroups, which the CRD requires under platform Manual and
-# forbids under every cloud, so it serves Manual only and cannot stand
-# in for this.
-#
-# Everything above this line is the part that works, and it is worth
-# running on its own: it proves the estate stands up, that the profile
-# describes it, that the operator can reach Azure from inside the
-# cluster, and that the teardown removes what was built.
-die "the estate is up and the operator discovered it, but there is no Azure e2e suite to run against it yet" \
-    "This is the expected outcome until test/e2e/azure exists." \
-    "Remove what this built with:" \
-    "  INFRA=${infra} AZURE_RESOURCE_GROUP=${rg} \\" \
-    "    AZURE_NETWORK_RESOURCE_GROUP=${net_rg} hack/ci-e2e-azure-teardown.sh"
+info "the estate is still up, and the operator is still installed. To remove the estate:"
+info "  INFRA=${infra} AZURE_RESOURCE_GROUP=${rg} \\"
+info "    AZURE_NETWORK_RESOURCE_GROUP=${net_rg} hack/ci-e2e-azure-teardown.sh"
