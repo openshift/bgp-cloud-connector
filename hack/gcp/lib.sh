@@ -79,18 +79,32 @@ gcp_router_exists() {
     [[ -n "${out}" ]]
 }
 
+# The hub filter is a suffix match, not an equality one, and the two GCP
+# APIs disagree about this. compute routers filter on the short name, so
+# name=<name> works above. network-connectivity hubs filter on the full
+# resource path, projects/<p>/locations/global/hubs/<name>, while
+# --format='value(name)' prints only the last segment -- so name=<name>
+# silently matches nothing and the hub reads as absent. Measured against
+# a hub that was plainly there.
 gcp_hub_exists() {
     local out
     out="$(gcp_query "list NCC hubs" \
         gcloud network-connectivity hubs list --project="$2" \
-        --filter="name=$1" --format='value(name)')" || return 2
+        --filter="name~/${1}\$" --format='value(name)')" || return 2
     [[ -n "${out}" ]]
 }
 
 # The Cloud Router's interface addresses are what the router nodes peer
 # with, and what the generated profile has to describe.
+#
+# One per line and without the prefix length. gcloud returns a repeated
+# field as one semicolon-separated value, and each entry carries the
+# mask it was allocated with -- 10.0.128.5/17 -- which is not what a BGP
+# neighbour address is.
 gcp_router_interface_addresses() {
-    gcp_query "read the interfaces of Cloud Router $1" \
+    local raw
+    raw="$(gcp_query "read the interfaces of Cloud Router $1" \
         gcloud compute routers describe "$1" --project="$3" --region="$2" \
-        --format='value(interfaces[].ipRange)'
+        --format='value(interfaces[].ipRange)')" || return 1
+    printf '%s' "${raw}" | tr ';' '\n' | sed 's|/.*||' | grep .
 }
