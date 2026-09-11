@@ -345,6 +345,14 @@ spec:
           - secrets
           verbs:
           - get
+        - apiGroups:
+          - ""
+          resourceNames:
+          - bgp-cloud-connector-azure-credentials
+          resources:
+          - secrets
+          verbs:
+          - get
         serviceAccountName: openshift-bgp-cloud-connector-controller-manager
     strategy: deployment
   installModes:

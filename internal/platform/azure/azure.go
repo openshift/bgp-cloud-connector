@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/openshift/bgp-cloud-connector/internal/platform"
@@ -29,6 +31,15 @@ type Config struct {
 	// NICClientID is the managed identity to use for network interface calls.
 	// Empty means the same identity as everything else.
 	NICClientID string
+	// Credential authenticates every Azure call this platform makes,
+	// except the network interface calls when NICClientID names a
+	// different identity for those.
+	//
+	// Passed in rather than built here, because what it should be is a
+	// property of the cluster the operator is running on -- a secret the
+	// cloud credential operator wrote, or whatever a manager run from a
+	// desk already has -- and only the caller can see that.
+	Credential azcore.TokenCredential
 }
 
 // Platform reconciles Azure Route Server peerings and router node interfaces.
@@ -41,15 +52,15 @@ type Platform struct {
 
 // New builds a Platform against the live Azure APIs.
 func New(cfg Config) (*Platform, error) {
-	rs, err := NewRouteServerBackend(cfg.SubscriptionID, cfg.ResourceGroup, cfg.RouteServerName)
+	rs, err := NewRouteServerBackend(cfg.SubscriptionID, cfg.ResourceGroup, cfg.RouteServerName, cfg.Credential)
 	if err != nil {
 		return nil, &platform.CredentialError{Msg: fmt.Sprintf("Azure Route Server client: %v", err)}
 	}
-	topo, err := NewTopologyReader(cfg.SubscriptionID, cfg.ResourceGroup, cfg.RouteServerName)
+	topo, err := NewTopologyReader(cfg.SubscriptionID, cfg.ResourceGroup, cfg.RouteServerName, cfg.Credential)
 	if err != nil {
 		return nil, &platform.CredentialError{Msg: fmt.Sprintf("Azure virtual hub client: %v", err)}
 	}
-	nics, err := NewNICClient(cfg.SubscriptionID, cfg.NICClientID)
+	nics, err := NewNICClient(cfg.SubscriptionID, cfg.NICClientID, cfg.Credential)
 	if err != nil {
 		return nil, &platform.CredentialError{Msg: fmt.Sprintf("Azure network interface client: %v", err)}
 	}

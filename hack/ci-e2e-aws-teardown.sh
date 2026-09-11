@@ -28,8 +28,8 @@ set -o errexit
 set -o pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=hack/lib/ci.sh
-source "${here}/lib/ci.sh"
+# shellcheck source=hack/aws/ci.sh
+source "${here}/aws/ci.sh"
 
 attempts="${TEARDOWN_ATTEMPTS:-3}"
 

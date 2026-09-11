@@ -21,6 +21,12 @@ source "${here}/lib/frr.sh"       # pulls in common.sh
 source "${here}/lib/retry.sh"
 # shellcheck source=hack/aws/lib.sh
 source "${here}/aws/lib.sh"
+# shellcheck source=hack/aws/ci.sh
+source "${here}/aws/ci.sh"    # pulls in lib/ci.sh
+# shellcheck source=hack/azure/lib.sh
+source "${here}/azure/lib.sh"
+# shellcheck source=hack/azure/ci.sh
+source "${here}/azure/ci.sh"
 
 export RETRY_INTERVAL_SECS=1      # real sleeps would be too slow for the unit job
 
@@ -102,6 +108,25 @@ check "retry stopped as soon as it succeeded" "${flaky_calls}" "3"
 
 retry 3 1 "doomed" always_fails >/dev/null 2>&1
 check "retry gives up after the last attempt" "$?" "1"
+
+# print_fields is shared rather than AWS's, because `az -o tsv` has the
+# same shape as `aws --output text`: tab separated, and a bare newline
+# for an empty result.
+check "print_fields puts one field per line" \
+    "$(print_fields "$(printf 'a\tb\tc')" | tr '\n' ' ')" "a b c "
+check "print_fields says nothing for an empty result" \
+    "$(print_fields "$(printf '\n')" | wc -l)" "0"
+check "print_fields drops empty fields rather than emitting blank lines" \
+    "$(print_fields "$(printf 'a\t\tb')" | wc -l)" "2"
+check "print_fields handles a newline separated result too" \
+    "$(print_fields "$(printf 'a\nb')" | tr '\n' ' ')" "a b "
+
+# The point of it living here rather than in aws/lib.sh: a cloud that
+# does not source AWS's library still gets it.
+check "print_fields comes from common.sh alone" \
+    "$(bash -c 'source "${0}/lib/common.sh"; print_fields "$(printf "a\tb")" | tr "\n" " "' "${here}")" \
+    "a b "
+
 
 ######################################################################
 echo "--- lib/frr.sh ---"
@@ -583,6 +608,356 @@ check "repeats what aws said" \
 stub_aws_rc=0
 
 unset -f oc aws
+
+######################################################################
+echo "--- lib/ci.sh ---"
+
+# The bootstrap is what a prow job does before it touches anything, so a
+# mistake here is one nobody sees until a job has already spent forty
+# minutes installing a cluster. It is split into pieces small enough to
+# assert on: the whole ci_bootstrap cannot be called here, because its
+# last step provisions a CLI and would fetch sixty megabytes.
+
+ci_home="$(mktemp -d "${workdir}/ci-XXXXXX")"
+
+check "ci_use_shared_kubeconfig leaves the environment alone with no SHARED_DIR" \
+    "$( (unset SHARED_DIR; KUBECONFIG=/mine; ci_use_shared_kubeconfig; echo "${KUBECONFIG}") )" \
+    "/mine"
+
+mkdir -p "${ci_home}/shared"
+: >"${ci_home}/shared/kubeconfig"
+check "ci_use_shared_kubeconfig takes prow's kubeconfig when there is one" \
+    "$( (SHARED_DIR="${ci_home}/shared"; KUBECONFIG=/mine; ci_use_shared_kubeconfig; echo "${KUBECONFIG}") )" \
+    "${ci_home}/shared/kubeconfig"
+
+# A SHARED_DIR with no kubeconfig in it means the install step did not
+# leave one, which is worth saying rather than silently carrying on
+# against whatever cluster the environment happens to point at.
+mkdir -p "${ci_home}/empty"
+out="$( ( set -o errexit; SHARED_DIR="${ci_home}/empty"; ci_use_shared_kubeconfig ) 2>&1 )"
+check "ci_use_shared_kubeconfig fails when prow left no kubeconfig" "$?" "1"
+check "and says where it looked" \
+    "$(printf '%s' "${out}" | grep -c "${ci_home}/empty")" "1"
+
+ci_make_workdir
+check "ci_make_workdir creates a directory" \
+    "$([[ -d "${ci_workdir}" ]] && echo yes)" "yes"
+made="${ci_workdir}"
+ci_remove_workdir
+check "ci_remove_workdir removes it" \
+    "$([[ -d "${made}" ]] && echo yes || echo no)" "no"
+
+# Called from an EXIT trap, where a non-zero status would replace the
+# script's own and turn a clean run into a failure.
+ci_workdir=""
+ci_remove_workdir
+check "ci_remove_workdir succeeds with nothing to remove" "$?" "0"
+
+######################################################################
+echo "--- aws/ci.sh ---"
+
+check "ci_aws_shared_credentials leaves the environment alone with no CLUSTER_PROFILE_DIR" \
+    "$( (unset CLUSTER_PROFILE_DIR AWS_SHARED_CREDENTIALS_FILE
+         ci_aws_shared_credentials; echo "${AWS_SHARED_CREDENTIALS_FILE:-unset}") )" \
+    "unset"
+
+mkdir -p "${ci_home}/profile"
+: >"${ci_home}/profile/.awscred"
+check "ci_aws_shared_credentials takes the cluster profile's credentials" \
+    "$( (CLUSTER_PROFILE_DIR="${ci_home}/profile"
+         ci_aws_shared_credentials; echo "${AWS_SHARED_CREDENTIALS_FILE}") )" \
+    "${ci_home}/profile/.awscred"
+
+mkdir -p "${ci_home}/profile-empty"
+out="$( ( set -o errexit; CLUSTER_PROFILE_DIR="${ci_home}/profile-empty"
+          ci_aws_shared_credentials ) 2>&1 )"
+check "ci_aws_shared_credentials fails when the profile carries no .awscred" "$?" "1"
+check "and says where it looked" \
+    "$(printf '%s' "${out}" | grep -c "${ci_home}/profile-empty")" "1"
+
+
+######################################################################
+echo "--- azure/lib.sh: az_query ---"
+
+# The rule the whole file exists for: a read that failed is not an
+# answer. The scripts this was ported from wrote `2>/dev/null || true`
+# on nearly every read, so an expired login came back as "there is no
+# Route Server", which the create script acts on by building a second
+# one and the delete script acts on by reporting success.
+
+stub_az_rc=0
+stub_az_out=""
+stub_az_err=""
+
+# Reached through az_query's "$@" rather than by name.
+# shellcheck disable=SC2329
+az() {
+    [[ -n "${stub_az_err}" ]] && printf '%s\n' "${stub_az_err}" >&2
+    printf '%s' "${stub_az_out}"
+    return "${stub_az_rc}"
+}
+
+stub_az_out="rs-name"
+check "az_query prints what az printed" \
+    "$(az_query "read the route server" az whatever)" "rs-name"
+check "az_query succeeds when az does" \
+    "$(az_query "read the route server" az whatever >/dev/null; echo $?)" "0"
+
+# az writes deprecation and upgrade notices to stderr on calls that
+# succeed. Folding those into the value with 2>&1 would put "WARNING:
+# You have 2 update(s) available" inside a resource name, which then
+# goes back to Azure as --name.
+stub_az_err="WARNING: You have 2 update(s) available."
+check "az_query keeps az's chatter out of the value" \
+    "$(az_query "read the route server" az whatever)" "rs-name"
+stub_az_err=""
+
+stub_az_rc=1
+stub_az_out=""
+stub_az_err="ERROR: (ExpiredAuthenticationToken) The access token has expired."
+out="$(az_query "read the route server" az whatever 2>&1)"
+check "az_query fails when az does" "$?" "1"
+check "az_query names what it could not do" \
+    "$(printf '%s' "${out}" | grep -c 'cannot read the route server')" "1"
+check "az_query repeats what az said" \
+    "$(printf '%s' "${out}" | grep -c 'ExpiredAuthenticationToken')" "1"
+check "az_query returns nothing on failure" \
+    "$(az_query "read the route server" az whatever 2>/dev/null)" ""
+stub_az_rc=0
+stub_az_err=""
+
+######################################################################
+echo "--- azure/lib.sh: azure_cluster_vnet ---"
+
+# Finding the vnet by the tag the installer puts on what it owns, with
+# the name as a fallback. The fallback is the dangerous half: a query
+# that failed and a query that matched nothing must not both end up
+# guessing a name, because on a cluster whose vnet is named something
+# else the guess is wrong and everything built into it goes somewhere
+# nobody looks.
+
+stub_vnet=""
+# Reached through az_query's "$@" rather than by name.
+# shellcheck disable=SC2329
+az() {
+    case "$*" in
+        *"vnet list"*)
+            if (( stub_az_rc != 0 )); then
+                printf '%s\n' "ERROR: (AuthorizationFailed) not authorized" >&2
+                return "${stub_az_rc}"
+            fi
+            printf '%s' "${stub_vnet}" ;;
+        *) echo "unstubbed az call: $*" >&2; return 1 ;;
+    esac
+}
+
+stub_vnet="mycluster-abcde-vnet"
+check "takes the vnet the installer tagged" \
+    "$(azure_cluster_vnet net-rg mycluster-abcde 2>/dev/null)" "mycluster-abcde-vnet"
+
+# Azure prints the literal None for a query that matched nothing.
+stub_vnet="None"
+check "falls back to the installer's name when nothing is tagged" \
+    "$(azure_cluster_vnet net-rg mycluster-abcde 2>/dev/null)" "mycluster-abcde-vnet"
+check "and says so, rather than falling back silently" \
+    "$(azure_cluster_vnet net-rg mycluster-abcde 2>&1 >/dev/null | grep -c 'falling back')" "1"
+
+stub_vnet=""
+check "falls back on an empty answer too" \
+    "$(azure_cluster_vnet net-rg mycluster-abcde 2>/dev/null)" "mycluster-abcde-vnet"
+
+# The distinction this file exists to make.
+stub_az_rc=1
+azure_cluster_vnet net-rg mycluster-abcde >/dev/null 2>&1
+check "fails rather than guessing when the query itself failed" "$?" "1"
+check "and prints nothing, so no caller can use the guess" \
+    "$(azure_cluster_vnet net-rg mycluster-abcde 2>/dev/null)" ""
+stub_az_rc=0
+
+######################################################################
+echo "--- azure/lib.sh: azure_cluster_facts ---"
+
+stub_infra="mycluster-abcde"
+stub_rg="mycluster-abcde-rg"
+stub_net_rg=""
+stub_oc_rc=0
+
+# Reached through azure_cluster_facts rather than by name.
+# shellcheck disable=SC2329
+oc() {
+    if (( stub_oc_rc != 0 )); then
+        # To stderr, which is where oc puts it, and where
+        # azure_cluster_facts now reads it from rather than folding it
+        # into the value.
+        echo "error: You must be logged in to the server" >&2
+        return "${stub_oc_rc}"
+    fi
+    case "$*" in
+        *infrastructureName*)          printf '%s' "${stub_infra}" ;;
+        *azure.resourceGroupName*)     printf '%s' "${stub_rg}" ;;
+        *azure.networkResourceGroupName*) printf '%s' "${stub_net_rg}" ;;
+        *) echo "unstubbed oc call: $*" >&2; return 1 ;;
+    esac
+}
+
+( azure_cluster_facts; echo "${infra} ${rg} ${net_rg}" ) >"${workdir}/facts" 2>&1
+check "reads the cluster's identity" "$(cat "${workdir}/facts")" \
+    "mycluster-abcde mycluster-abcde-rg mycluster-abcde-rg"
+
+# Azure populates networkResourceGroupName even when it equals
+# resourceGroupName, but a cluster installed into a vnet it does not own
+# is the case that makes the two differ, and it is the case the estate
+# scripts have to get right.
+stub_net_rg="someone-elses-network-rg"
+( azure_cluster_facts; echo "${net_rg}" ) >"${workdir}/facts" 2>&1
+check "keeps a network resource group that differs" \
+    "$(cat "${workdir}/facts")" "someone-elses-network-rg"
+stub_net_rg=""
+
+stub_oc_rc=1
+out="$( ( set -o errexit; azure_cluster_facts ) 2>&1 )"
+check "fails when the cluster cannot be read" "$?" "1"
+check "repeats what oc said" \
+    "$(printf '%s' "${out}" | grep -c 'must be logged in')" "1"
+stub_oc_rc=0
+
+stub_infra=""
+out="$( ( set -o errexit; azure_cluster_facts ) 2>&1 )"
+check "fails on an empty infrastructure name" "$?" "1"
+stub_infra="mycluster-abcde"
+
+unset -f az oc
+
+
+######################################################################
+echo "--- azure/ci.sh ---"
+
+# az writes its own state -- the token cache, the profile, the
+# subscription it is pointed at -- under AZURE_CONFIG_DIR, defaulting to
+# $HOME/.azure. A prow test container runs as a random uid whose home
+# may not be writable, so the login has to be told where to put it, and
+# the scratch directory is the right place: it goes away with the run,
+# and it takes the service principal's token cache with it.
+
+# Into a file rather than a variable: ci_azure_credentials is called in
+# a subshell below, because it exports AZURE_CONFIG_DIR and its failure
+# paths call die, which would take this harness with it. A variable set
+# inside that subshell would not come back.
+az_calls="${ci_home}/az-calls"
+: >"${az_calls}"
+# Recorded rather than run. Reached by name here, unlike the stubs above.
+# shellcheck disable=SC2329
+az() { printf 'az %s\n' "$*" >>"${az_calls}"; }
+
+check "ci_azure_credentials leaves the environment alone with no CLUSTER_PROFILE_DIR" \
+    "$( (unset CLUSTER_PROFILE_DIR AZURE_CONFIG_DIR
+         ci_azure_credentials; echo "${AZURE_CONFIG_DIR:-unset}") )" \
+    "unset"
+
+mkdir -p "${ci_home}/azure-profile"
+cat >"${ci_home}/azure-profile/osServicePrincipal.json" <<'JSON'
+{"clientId":"cid","clientSecret":"secret","tenantId":"tid","subscriptionId":"sub"}
+JSON
+
+ci_workdir="${ci_home}/work"
+mkdir -p "${ci_workdir}"
+( CLUSTER_PROFILE_DIR="${ci_home}/azure-profile"; ci_azure_credentials ) >/dev/null 2>&1
+check "ci_azure_credentials succeeds with a service principal" "$?" "0"
+
+: >"${az_calls}"
+( CLUSTER_PROFILE_DIR="${ci_home}/azure-profile"; ci_azure_credentials ) >/dev/null 2>&1
+check "it logs in as the service principal" \
+    "$(grep -c -- '--service-principal' "${az_calls}")" "1"
+check "it selects the subscription the profile names" \
+    "$(grep -c 'account set --subscription sub' "${az_calls}")" "1"
+
+# The secret must not reach the log. Prow logs for openshift
+# repositories are public.
+check "it keeps the client secret out of what it prints" \
+    "$( (CLUSTER_PROFILE_DIR="${ci_home}/azure-profile"; ci_azure_credentials) 2>&1 | grep -c 'secret' )" "0"
+
+check "it points az at the scratch directory rather than at a home it may not own" \
+    "$( (CLUSTER_PROFILE_DIR="${ci_home}/azure-profile"
+         ci_azure_credentials >/dev/null 2>&1; echo "${AZURE_CONFIG_DIR}") )" \
+    "${ci_workdir}/azure"
+
+mkdir -p "${ci_home}/azure-empty"
+out="$( ( set -o errexit; CLUSTER_PROFILE_DIR="${ci_home}/azure-empty"
+          ci_azure_credentials ) 2>&1 )"
+check "ci_azure_credentials fails when the profile carries no service principal" "$?" "1"
+check "and says where it looked" \
+    "$(printf '%s' "${out}" | grep -c "${ci_home}/azure-empty")" "1"
+
+unset -f az
+ci_workdir=""
+
+
+######################################################################
+echo "--- lib/retry.sh: retry_on_azure_conflict ---"
+
+# Observed on 2026-09-09: a run cancelled 45s into a Route Server
+# create left the create running server-side, and every delete the
+# teardown then attempted was refused with AnotherOperationInProgress.
+# Three attempts thirty seconds apart gave up after ninety seconds and
+# leaked a Route Server, a public IP, a subnet and a widened vnet. The
+# create takes about fifteen minutes, so the wait has to be minutes not
+# seconds.
+
+# The call count goes in a file, because retry_on_azure_conflict runs
+# the command inside a command substitution and a variable set there
+# does not come back.
+conflict_calls="${workdir}/conflict-calls"
+: >"${conflict_calls}"
+# Reached through retry_on_azure_conflict's "$@".
+# shellcheck disable=SC2329
+az_conflict_then_ok() {
+    echo x >>"${conflict_calls}"
+    if (( $(wc -l <"${conflict_calls}") < 3 )); then
+        echo "ERROR: (AnotherOperationInProgress) Another operation on this or dependent resource is in progress." >&2
+        return 1
+    fi
+    echo "deleted"
+}
+# shellcheck disable=SC2329
+az_always_conflict() {
+    echo "ERROR: (AnotherOperationInProgress) still going" >&2
+    return 1
+}
+# shellcheck disable=SC2329
+az_hard_failure() {
+    echo "ERROR: (AuthorizationFailed) not permitted" >&2
+    return 1
+}
+
+check "retries until the conflicting operation finishes" \
+    "$(retry_on_azure_conflict "delete it" 30 az_conflict_then_ok)" "deleted"
+check "and took the attempts it needed" "$(wc -l <"${conflict_calls}" | tr -d ' ')" "3"
+
+started=${SECONDS}
+retry_on_azure_conflict "delete it" 2 az_always_conflict >/dev/null 2>&1
+rc=$?; elapsed=$((SECONDS - started))
+check "gives up when the budget runs out" "${rc}" "1"
+check "and spends the budget rather than returning at once" "$(( elapsed >= 2 ))" "1"
+
+# Observed after the conflict cleared, on the next attempt, with the
+# delete succeeding later: a 500 is not a verdict.
+# shellcheck disable=SC2329
+az_internal_error() {
+    echo "ERROR: (InternalServerError) An error occurred." >&2
+    return 1
+}
+started=${SECONDS}
+retry_on_azure_conflict "delete it" 2 az_internal_error >/dev/null 2>&1
+check "keeps trying through an InternalServerError" "$(( SECONDS - started >= 2 ))" "1"
+unset -f az_internal_error
+
+out="$(retry_on_azure_conflict "delete it" 30 az_hard_failure 2>&1)"
+check "does not retry an error that will not clear" "$?" "1"
+check "and repeats what az said" \
+    "$(printf '%s' "${out}" | grep -c 'AuthorizationFailed')" "1"
+
+unset -f az_conflict_then_ok az_always_conflict az_hard_failure
+
 
 echo "---"
 echo "passed=${passed} failed=${failed}"

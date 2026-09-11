@@ -63,6 +63,7 @@ import (
 // +kubebuilder:rbac:groups=config.openshift.io,resources=infrastructures,verbs=get
 // +kubebuilder:rbac:groups=cloudcredential.openshift.io,resources=credentialsrequests,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups="",resources=secrets,resourceNames=bgp-cloud-connector-aws-credentials,verbs=get,namespace=openshift-bgp-cloud-connector
+// +kubebuilder:rbac:groups="",resources=secrets,resourceNames=bgp-cloud-connector-azure-credentials,verbs=get,namespace=openshift-bgp-cloud-connector
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=create;delete;update;patch
 
 type PlatformBuilderFunc func(ctx context.Context, c client.Client, config *networkingapi.BGPCloudConfiguration) (platform.CloudPlatform, error)
@@ -413,7 +414,23 @@ func buildAzurePlatform(ctx context.Context, c client.Client, config *networking
 		return nil, fmt.Errorf("reading cluster infrastructure name: %w", err)
 	}
 
+	// May report platform.ErrCredentialsPending, which Reconcile waits
+	// out rather than treating as a fault. Where the pod already has a
+	// credential -- a manager run from a desk against an az login --
+	// this returns at once and the cluster is left alone.
+	//
+	// It also asks for a token, which is the only way to know whether
+	// the credential works: azidentity builds one successfully when
+	// nothing in its chain can produce a token, so without this the
+	// failure arrives from DiscoverEndpoints and reads as a discovery
+	// problem rather than a credentials one.
+	cred, err := azureplatform.ResolveCredentials(ctx, c, OperatorNamespace())
+	if err != nil {
+		return nil, err
+	}
+
 	return azureplatform.New(azureplatform.Config{
+		Credential:      cred,
 		SubscriptionID:  azureSpec.SubscriptionID,
 		ResourceGroup:   azureSpec.ResourceGroup,
 		RouteServerName: azureSpec.RouteServerName,
