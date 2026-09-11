@@ -9,6 +9,7 @@
 # building a second estate and the delete script acts on by reporting
 # success over the first.
 
+# shellcheck source=hack/lib/common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/common.sh"
 
 # The project id is deliberately not defaulted, like the AWS account id:
@@ -68,30 +69,44 @@ gcp_router_name()   { printf '%s-cudn-cr' "$1"; }
 gcp_firewall_name() { printf '%s-bgp' "$1"; }
 gcp_spoke_prefix()  { printf '%s-bgp-spoke' "$1"; }
 
-# Existence checks are filtered lists rather than describes: a describe
-# cannot tell "it is gone" from "the question failed", and both exit
-# non-zero.
-gcp_router_exists() {
+# Existence is decided here, not by gcloud.
+#
+# --filter is not an identity test and is not even consistent about what
+# it is. Measured on 2026-09-11 against one cluster: compute routers
+# match the short name; network-connectivity hubs match the full
+# resource path, projects/<p>/locations/global/hubs/<name>, while the
+# value projection prints only the last segment, so name=<name> finds
+# nothing and a hub that is there reads as absent; and firewall rules
+# match by prefix, so name=<infra>-bgp matched <infra>-bgp-worker-subnet
+# and a rule that did not exist read as present.
+#
+# Each of those fails in the expensive direction. An absent thing read
+# as present is never created, and an existing thing read as absent is
+# created twice. So the list is unfiltered on identity and the
+# comparison is exact, in shell, where it means one thing.
+gcp_name_exists() {
+    local want="$1" what="$2"; shift 2
     local out
-    out="$(gcp_query "list Cloud Routers in ${2}" \
-        gcloud compute routers list --project="$3" --regions="$2" \
-        --filter="name=$1" --format='value(name)')" || return 2
-    [[ -n "${out}" ]]
+    out="$(gcp_query "${what}" "$@")" || return 2
+    printf '%s\n' "${out}" | grep -Fxq -- "${want}"
 }
 
-# The hub filter is a suffix match, not an equality one, and the two GCP
-# APIs disagree about this. compute routers filter on the short name, so
-# name=<name> works above. network-connectivity hubs filter on the full
-# resource path, projects/<p>/locations/global/hubs/<name>, while
-# --format='value(name)' prints only the last segment -- so name=<name>
-# silently matches nothing and the hub reads as absent. Measured against
-# a hub that was plainly there.
+gcp_router_exists() {
+    gcp_name_exists "$1" "list Cloud Routers in $2" \
+        gcloud compute routers list --project="$3" --regions="$2" \
+        --format='value(name)'
+}
+
 gcp_hub_exists() {
-    local out
-    out="$(gcp_query "list NCC hubs" \
+    gcp_name_exists "$1" "list NCC hubs" \
         gcloud network-connectivity hubs list --project="$2" \
-        --filter="name~/${1}\$" --format='value(name)')" || return 2
-    [[ -n "${out}" ]]
+        --format='value(name)'
+}
+
+gcp_firewall_exists() {
+    gcp_name_exists "$1" "list firewall rules" \
+        gcloud compute firewall-rules list --project="$2" \
+        --format='value(name)'
 }
 
 # The Cloud Router's interface addresses are what the router nodes peer
