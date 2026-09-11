@@ -36,6 +36,7 @@ import (
 
 const (
 	frrNamespace           = "openshift-frr-k8s"
+	operatorNamespace      = "openshift-bgp-cloud-connector"
 	frrConfigNamePrefix    = "bgp-cc-"
 	routeAdvertisementName = "bgp-cc-route-advertisements"
 

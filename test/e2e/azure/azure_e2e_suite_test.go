@@ -21,6 +21,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -31,6 +32,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v6"
+	ginkgotypes "github.com/onsi/ginkgo/v2/types"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -38,6 +40,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/yaml"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -48,6 +51,10 @@ import (
 
 var (
 	k8sClient client.Client
+	// A typed clientset as well, because pod logs are not something a
+	// controller-runtime client can fetch, and the operator's log is
+	// the first thing worth having when a spec fails.
+	clientset *kubernetes.Clientset
 
 	// The Azure clients are the SDK's own rather than the operator's
 	// backend, for the reason the AWS suite talks to EC2 directly: a
@@ -84,6 +91,7 @@ var _ = BeforeSuite(func() {
 		manifestDir = filepath.Join("..", "..", "..", "test", "e2e", "manifests", profile)
 	}
 
+	GinkgoWriter.Printf("e2e profile directory: %s\n", manifestDir)
 	By("loading BGPCloudConfiguration manifest from " + manifestDir)
 	bgpConfig = &networkingapi.BGPCloudConfiguration{}
 	loadManifest(filepath.Join(manifestDir, "bgpcloudconfiguration.yaml"), bgpConfig)
@@ -114,6 +122,8 @@ var _ = BeforeSuite(func() {
 	).ClientConfig()
 	Expect(err).NotTo(HaveOccurred())
 	k8sClient, err = client.New(restCfg, client.Options{Scheme: scheme})
+	Expect(err).NotTo(HaveOccurred())
+	clientset, err = kubernetes.NewForConfig(restCfg)
 	Expect(err).NotTo(HaveOccurred())
 
 	By("building Azure clients using the default credential chain")
@@ -358,4 +368,306 @@ func resourceGroupOf(id string) string {
 		}
 	}
 	return ""
+}
+
+// ReportAfterEach prints everything worth having when a spec fails.
+//
+// In CI this is the only record that survives. hack/ci-e2e-azure.sh tears
+// the estate down whatever the result, which deletes the configuration and
+// scales the operator to zero, so by the time prow gathers artefacts the
+// conditions, the peerings and the pod log have all gone. Leaving objects
+// behind for someone to inspect works at a desk and not here.
+//
+// It is deliberately everything at once rather than the one thing that
+// looked relevant. A run costs about two hours end to end, so a diagnostic
+// that sends you round again to ask the next question is worth very little.
+//
+// Nothing here asserts. A failure inside a reporting node would replace the
+// failure you are trying to read.
+var _ = ReportAfterEach(func(report SpecReport) {
+	if !report.Failed() {
+		return
+	}
+	dumpEverything(report.LeafNodeText)
+})
+
+// ReportAfterSuite covers the case ReportAfterEach cannot: a failure in
+// BeforeSuite, where no spec ever runs and nothing above fires. The
+// start-of-run cleanup waiting out a finalizer is the likely one, and a
+// silent failure there costs a whole run to diagnose.
+var _ = ReportAfterSuite("diagnostics", func(report Report) {
+	if report.SuiteSucceeded {
+		return
+	}
+	for _, spec := range report.SpecReports {
+		if spec.State.Is(ginkgotypes.SpecStatePassed | ginkgotypes.SpecStateFailed) {
+			return // a spec ran, so ReportAfterEach has already spoken
+		}
+	}
+	dumpEverything("suite setup")
+})
+
+// dumpEverything is deliberately everything at once rather than the one
+// thing that looked relevant. A run costs about two hours end to end, so a
+// diagnostic that sends you round again to ask the next question is worth
+// very little.
+//
+// Nothing here asserts, and every step tolerates the clients being nil: a
+// failure inside a reporting node would replace the failure you are trying
+// to read.
+func dumpEverything(what string) {
+	if k8sClient == nil || clientset == nil {
+		GinkgoWriter.Printf("diagnostics unavailable: the clients were never built\n")
+		return
+	}
+	ctx := context.Background()
+	say("================ diagnostics for %s ================", what)
+	dumpOperator(ctx)
+	dumpConfiguration(ctx)
+	dumpRouting(ctx)
+	dumpCredentials(ctx)
+	dumpNodes(ctx)
+	dumpFRR(ctx)
+	dumpAzure(ctx)
+	dumpWarnings(ctx)
+	dumpOperatorLog(ctx)
+	say("================ end diagnostics ================")
+}
+
+func say(format string, args ...any) {
+	GinkgoWriter.Printf(format+"\n", args...)
+}
+
+// dumpOperator names the build under test. A surprising result is often a
+// stale image rather than a bug.
+func dumpOperator(ctx context.Context) {
+	say("--- operator ---")
+	dep, err := clientset.AppsV1().Deployments(operatorNamespace).
+		Get(ctx, "openshift-bgp-cloud-connector-controller-manager", metav1.GetOptions{})
+	if err != nil {
+		say("  cannot read the deployment: %v", err)
+		return
+	}
+	say("  replicas: %d ready, %d desired", dep.Status.ReadyReplicas, *dep.Spec.Replicas)
+	for _, c := range dep.Spec.Template.Spec.Containers {
+		say("  container %s: %s", c.Name, c.Image)
+	}
+}
+
+func dumpConfiguration(ctx context.Context) {
+	say("--- BGPCloudConfiguration ---")
+	cfg := &networkingapi.BGPCloudConfiguration{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: bgpConfig.Name}, cfg); err != nil {
+		say("  not there: %v", err)
+		return
+	}
+	// Status only. The spec carries the subscription id and prow logs
+	// for openshift repositories are public.
+	say("  generation %d, phase %s", cfg.Generation, cfg.Status.Phase)
+	for _, c := range cfg.Status.Conditions {
+		say("  %-30s %-7s obsGen=%d %s: %s", c.Type, c.Status, c.ObservedGeneration, c.Reason, c.Message)
+	}
+	if len(cfg.Status.PeerGroups) == 0 {
+		say("  status.peerGroups: empty")
+	}
+	for _, g := range cfg.Status.PeerGroups {
+		for _, n := range g.Neighbors {
+			say("  peer group %s: %s asn=%d multihop=%v", g.Key, n.Address, n.RemoteASN, n.EBGPMultiHop)
+		}
+	}
+}
+
+func dumpRouting(ctx context.Context) {
+	say("--- BGPRouting ---")
+	routing := &networkingapi.BGPRouting{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: bgpRouting.Name}, routing); err != nil {
+		say("  not there: %v", err)
+		return
+	}
+	say("  phase %s", routing.Status.Phase)
+	for _, c := range routing.Status.Conditions {
+		say("  %-30s %-7s %s: %s", c.Type, c.Status, c.Reason, c.Message)
+	}
+	for _, kind := range []string{"ClusterUserDefinedNetwork", "RouteAdvertisements"} {
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(schema.GroupVersionKind{Group: "k8s.ovn.org", Version: "v1", Kind: kind})
+		name := routeAdvertisementName
+		if kind == "ClusterUserDefinedNetwork" {
+			name = "cluster-udn-" + bgpRouting.Spec.Network.Name
+		}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: name}, u); err != nil {
+			say("  %s/%s: %v", kind, name, err)
+			continue
+		}
+		conds, _, _ := unstructured.NestedSlice(u.Object, "status", "conditions")
+		say("  %s/%s: %d conditions", kind, name, len(conds))
+		for _, c := range conds {
+			if m, ok := c.(map[string]any); ok {
+				say("    %v %v %v", m["type"], m["status"], m["reason"])
+			}
+		}
+	}
+}
+
+// dumpCredentials is the first fork in the road: no request at all means
+// the operator failed before it resolved a credential, which is a very
+// different problem from one it resolved and could not use.
+func dumpCredentials(ctx context.Context) {
+	say("--- credentials ---")
+	cr := &unstructured.Unstructured{}
+	cr.SetGroupVersionKind(schema.GroupVersionKind{
+		Group: "cloudcredential.openshift.io", Version: "v1", Kind: "CredentialsRequest",
+	})
+	err := k8sClient.Get(ctx, types.NamespacedName{
+		Name: "bgp-cloud-connector-azure", Namespace: "openshift-cloud-credential-operator",
+	}, cr)
+	if err != nil {
+		say("  CredentialsRequest: %v", err)
+	} else {
+		provisioned, _, _ := unstructured.NestedBool(cr.Object, "status", "provisioned")
+		say("  CredentialsRequest: provisioned=%v", provisioned)
+	}
+	// Keys only, never values.
+	secret, err := clientset.CoreV1().Secrets(operatorNamespace).
+		Get(ctx, "bgp-cloud-connector-azure-credentials", metav1.GetOptions{})
+	if err != nil {
+		say("  secret: %v", err)
+		return
+	}
+	keys := make([]string, 0, len(secret.Data))
+	for k := range secret.Data {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	say("  secret keys: %s", strings.Join(keys, " "))
+}
+
+func dumpNodes(ctx context.Context) {
+	say("--- router nodes (selector %v) ---", bgpConfig.Spec.RouterNodeSelector)
+	nodes, err := routerNodes(ctx)
+	if err != nil {
+		say("  cannot list: %v", err)
+		return
+	}
+	if len(nodes) == 0 {
+		say("  none matched, which is why nothing was peered")
+	}
+	for i := range nodes {
+		say("  %s ip=%s provider=%s", nodes[i].Name, nodeInternalIP(&nodes[i]), nodes[i].Spec.ProviderID)
+	}
+}
+
+func dumpFRR(ctx context.Context) {
+	say("--- FRR ---")
+	cfgs := &unstructured.UnstructuredList{}
+	cfgs.SetGroupVersionKind(schema.GroupVersionKind{
+		Group: "frrk8s.metallb.io", Version: "v1beta1", Kind: "FRRConfigurationList",
+	})
+	if err := k8sClient.List(ctx, cfgs, client.InNamespace(frrNamespace)); err != nil {
+		say("  cannot list FRRConfigurations: %v", err)
+	} else {
+		say("  %d FRRConfiguration(s)", len(cfgs.Items))
+		for _, c := range cfgs.Items {
+			say("    %s", c.GetName())
+		}
+	}
+	sessions := &unstructured.UnstructuredList{}
+	sessions.SetGroupVersionKind(bgpSessionStateGVK)
+	if err := k8sClient.List(ctx, sessions, client.InNamespace(frrNamespace)); err != nil {
+		say("  cannot list BGPSessionStates: %v", err)
+		return
+	}
+	say("  %d BGP session(s)", len(sessions.Items))
+	for _, s := range sessions.Items {
+		status, _, _ := unstructured.NestedString(s.Object, "status", "bgpStatus")
+		peer, _, _ := unstructured.NestedString(s.Object, "status", "peer")
+		node, _, _ := unstructured.NestedString(s.Object, "status", "node")
+		say("    %s -> %s %s", node, peer, status)
+	}
+}
+
+// dumpAzure is what the cloud says, as opposed to what the cluster believes.
+// The two disagreeing is the whole point of an e2e.
+func dumpAzure(ctx context.Context) {
+	say("--- Azure ---")
+	peerings, err := managedPeerings(ctx)
+	if err != nil {
+		say("  cannot list peerings: %v", err)
+	} else {
+		say("  %d peering(s) named %s*", len(peerings), peeringPrefix)
+		for _, p := range peerings {
+			say("    %s ip=%s asn=%d %s", p.Name, p.PeerIP, p.PeerASN, p.ProvisioningState)
+		}
+	}
+	nodes, nodeErr := routerNodes(ctx)
+	if nodeErr != nil {
+		return
+	}
+	for i := range nodes {
+		nic, nicErr := nicForNode(ctx, &nodes[i])
+		switch {
+		case nicErr != nil:
+			say("    %s: cannot read interface: %v", nodes[i].Name, nicErr)
+		case nic == nil:
+			say("    %s: no interface found", nodes[i].Name)
+		case nic.Properties == nil || nic.Properties.EnableIPForwarding == nil:
+			say("    %s: %s forwarding unset", nodes[i].Name, *nic.Name)
+		default:
+			say("    %s: %s forwarding=%v", nodes[i].Name, *nic.Name, *nic.Properties.EnableIPForwarding)
+		}
+	}
+}
+
+func dumpWarnings(ctx context.Context) {
+	say("--- warning events in %s ---", operatorNamespace)
+	events, err := clientset.CoreV1().Events(operatorNamespace).List(ctx, metav1.ListOptions{
+		FieldSelector: "type=Warning",
+	})
+	if err != nil {
+		say("  cannot list: %v", err)
+		return
+	}
+	if len(events.Items) == 0 {
+		say("  none")
+	}
+	for _, e := range events.Items {
+		say("  %s %s/%s: %s", e.Reason, e.InvolvedObject.Kind, e.InvolvedObject.Name, e.Message)
+	}
+}
+
+// dumpOperatorLog prints the tail of whichever manager pod is running, and
+// the previous container's tail too when it has restarted, because the
+// interesting failure is often the one that caused the restart.
+func dumpOperatorLog(ctx context.Context) {
+	say("--- operator log ---")
+	pods, err := clientset.CoreV1().Pods(operatorNamespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		say("  cannot list pods: %v", err)
+		return
+	}
+	tail := int64(300)
+	for _, pod := range pods.Items {
+		if !strings.Contains(pod.Name, "controller-manager") {
+			continue
+		}
+		restarted := false
+		for _, cs := range pod.Status.ContainerStatuses {
+			if cs.Name == "manager" && cs.RestartCount > 0 {
+				restarted = true
+			}
+		}
+		for _, previous := range []bool{false, true} {
+			if previous && !restarted {
+				continue
+			}
+			raw, logErr := clientset.CoreV1().Pods(operatorNamespace).GetLogs(pod.Name, &corev1.PodLogOptions{
+				Container: "manager", TailLines: &tail, Previous: previous,
+			}).DoRaw(ctx)
+			if logErr != nil {
+				say("  cannot read log for %s (previous=%v): %v", pod.Name, previous, logErr)
+				continue
+			}
+			say("  last %d lines of %s (previous=%v):\n%s", tail, pod.Name, previous, raw)
+		}
+	}
 }
