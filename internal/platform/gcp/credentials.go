@@ -77,17 +77,32 @@ const (
 // rewrites the NCC spoke that carries the router nodes, and sets
 // canIpForward on those instances.
 var permissions = []string{
+	// Reading the Cloud Router's interfaces, and rewriting its peers.
 	"compute.routers.get",
 	"compute.routers.update",
+	// Rewriting a Cloud Router's BGP peers is a change to the network's
+	// policy as far as IAM is concerned, not just to the router:
+	// measured, a 403 for compute.networks.updatePolicy on the cluster's
+	// own network. No other operator here asks for it, because none of
+	// them touch router peers.
+	"compute.networks.updatePolicy",
+	// canIpForward and nested virtualisation are both whole-instance
+	// updates, not interface ones: compute.instances.updateNetworkInterface
+	// is not enough, which a cluster said with a 403 rather than a
+	// reading of the docs.
 	"compute.instances.get",
-	"compute.instances.updateNetworkInterface",
-	"compute.subnetworks.get",
-	"compute.subnetworks.use",
+	"compute.instances.update",
+	// Every mutation above returns an operation that has to be polled.
 	"compute.zoneOperations.get",
 	"compute.regionOperations.get",
+	// The NCC spoke carrying the router nodes, which is created,
+	// listed, patched and removed.
 	"networkconnectivity.hubs.get",
 	"networkconnectivity.spokes.get",
+	"networkconnectivity.spokes.list",
+	"networkconnectivity.spokes.create",
 	"networkconnectivity.spokes.update",
+	"networkconnectivity.spokes.delete",
 }
 
 // ambientCredentials is the chain the Google libraries would use on their
@@ -130,6 +145,14 @@ func ResolveCredentials(ctx context.Context, c client.Client, namespace string) 
 	case err == nil:
 		raw, err := credentialsJSONFromSecret(secret)
 		if err != nil {
+			return nil, err
+		}
+		// Keep asking for what this build needs, not what an older one
+		// did. The request is desired state: leaving it alone once the
+		// secret exists means a permission added in code never reaches
+		// the cluster, and the operator fails with a 403 for something
+		// it believes it asked for. Observed on a live cluster.
+		if err := reconcileCredentialsRequest(ctx, c, namespace); err != nil {
 			return nil, err
 		}
 		logger.V(1).Info("using the credential provided by the cloud credential operator",
