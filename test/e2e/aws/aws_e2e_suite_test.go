@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -31,6 +32,7 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -42,6 +44,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	networkingapi "github.com/openshift/bgp-cloud-connector/api/v1beta1"
+	"github.com/openshift/bgp-cloud-connector/test/e2e/dataplane"
 )
 
 var (
@@ -54,6 +57,9 @@ var (
 	clusterID     string
 	managedByTag  string
 	endpointsByAZ map[string][]string
+
+	dataPlaneProbe    *dataplane.ProbeConfig
+	dataPlaneScenario *dataplane.Scenario
 )
 
 func TestAWSE2E(t *testing.T) {
@@ -88,6 +94,7 @@ var _ = BeforeSuite(func() {
 	By("building kubernetes client")
 	scheme := runtime.NewScheme()
 	Expect(clientgoscheme.AddToScheme(scheme)).To(Succeed())
+	Expect(batchv1.AddToScheme(scheme)).To(Succeed())
 	Expect(networkingapi.AddToScheme(scheme)).To(Succeed())
 	addUnstructuredTypes(scheme)
 
@@ -105,6 +112,12 @@ var _ = BeforeSuite(func() {
 	)
 	Expect(err).NotTo(HaveOccurred())
 	ec2Client = ec2.NewFromConfig(awsCfg)
+
+	if probeConfigPath := os.Getenv("E2E_DATAPLANE_CONFIG"); probeConfigPath != "" {
+		By("loading data-plane probe configuration from " + probeConfigPath)
+		dataPlaneProbe, err = dataplane.LoadProbeConfig(probeConfigPath)
+		Expect(err).NotTo(HaveOccurred())
+	}
 
 	By("reading cluster infrastructure name")
 	infra := &unstructured.Unstructured{}
@@ -221,6 +234,53 @@ func routerNodes(ctx context.Context) ([]corev1.Node, error) {
 		}
 	}
 	return result, nil
+}
+
+func activeRouteTargetNode(ctx context.Context, cidrs []string) (string, error) {
+	wanted := make(map[string]bool, len(cidrs))
+	for _, cidr := range cidrs {
+		wanted[cidr] = true
+	}
+	routes, err := ec2Client.DescribeRouteTables(ctx, &ec2.DescribeRouteTablesInput{})
+	if err != nil {
+		return "", err
+	}
+	targets := make(map[string]bool)
+	for _, table := range routes.RouteTables {
+		for _, route := range table.Routes {
+			if wanted[aws.ToString(route.DestinationCidrBlock)] &&
+				route.State == ec2types.RouteStateActive && aws.ToString(route.NetworkInterfaceId) != "" {
+				targets[aws.ToString(route.NetworkInterfaceId)] = true
+			}
+		}
+	}
+	if len(targets) != 1 {
+		return "", fmt.Errorf("active CUDN routes target %d worker ENIs, want 1", len(targets))
+	}
+	var eniID string
+	for id := range targets {
+		eniID = id
+	}
+	interfaces, err := ec2Client.DescribeNetworkInterfaces(ctx, &ec2.DescribeNetworkInterfacesInput{
+		NetworkInterfaceIds: []string{eniID},
+	})
+	if err != nil {
+		return "", err
+	}
+	if len(interfaces.NetworkInterfaces) != 1 || interfaces.NetworkInterfaces[0].Attachment == nil {
+		return "", fmt.Errorf("active route target ENI %s has no instance attachment", eniID)
+	}
+	instanceID := aws.ToString(interfaces.NetworkInterfaces[0].Attachment.InstanceId)
+	nodes, err := routerNodes(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, node := range nodes {
+		if strings.HasSuffix(node.Spec.ProviderID, "/"+instanceID) {
+			return node.Name, nil
+		}
+	}
+	return "", fmt.Errorf("active route target ENI %s belongs to instance %s, which is not a router node", eniID, instanceID)
 }
 
 func nodeInternalIP(node *corev1.Node) string {

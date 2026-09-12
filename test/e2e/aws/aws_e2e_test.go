@@ -36,6 +36,7 @@ import (
 
 	networkingapi "github.com/openshift/bgp-cloud-connector/api/v1beta1"
 	awsplatform "github.com/openshift/bgp-cloud-connector/internal/platform/aws"
+	"github.com/openshift/bgp-cloud-connector/test/e2e/dataplane"
 )
 
 const (
@@ -53,6 +54,11 @@ const (
 )
 
 var _ = Describe("AWS E2E", Ordered, func() {
+	AfterAll(func(ctx context.Context) {
+		if dataPlaneScenario != nil {
+			_ = dataPlaneScenario.Cleanup(ctx)
+		}
+	})
 
 	// ---------------------------------------------------------------
 	// E2E-AWS-01: Full stack reconcile
@@ -175,6 +181,61 @@ var _ = Describe("AWS E2E", Ordered, func() {
 			for _, pod := range frrPods.Items {
 				Expect(pod.Status.Phase).To(Equal(corev1.PodRunning), "FRR pod %s should be Running", pod.Name)
 			}
+		})
+	})
+
+	// ---------------------------------------------------------------
+	// E2E-AWS-DP-01: Baseline data-plane connectivity
+	// ---------------------------------------------------------------
+	Context("E2E-AWS-DP-01: Baseline data-plane connectivity", func() {
+		It("should carry IPv4 traffic in both directions between the CUDN and VPC", func(ctx context.Context) {
+			if dataPlaneProbe == nil {
+				Skip("E2E_DATAPLANE_CONFIG is not set; no external VPC probe was provisioned")
+			}
+
+			// Ready does not imply that BGP sessions are up.
+			By("waiting for every expected AWS BGP session to be up")
+			nodes, err := routerNodes(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			expectedPeers := 0
+			for _, node := range nodes {
+				expectedPeers += len(endpointsByAZ[node.Labels["topology.kubernetes.io/zone"]])
+			}
+			Expect(expectedPeers).To(BeNumerically(">", 0))
+			Eventually(func(g Gomega) {
+				peers, err := allManagedPeers(ctx)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(peers).To(HaveLen(expectedPeers))
+				for _, peer := range peers {
+					g.Expect(peer.State).To(Equal(ec2types.RouteServerPeerStateAvailable))
+					g.Expect(peer.BgpStatus).NotTo(BeNil(),
+						"peer %s has no BGP status", aws.ToString(peer.RouteServerPeerId))
+					g.Expect(peer.BgpStatus.Status).To(Equal(ec2types.RouteServerBgpStateUp),
+						"peer %s BGP session is not up", aws.ToString(peer.RouteServerPeerId))
+				}
+			}).WithTimeout(peerSettleTimeout).WithPolling(pollInterval).Should(Succeed())
+
+			By("discovering the worker selected by the active AWS CUDN route")
+			var dataPlaneNode string
+			Eventually(func() error {
+				var err error
+				dataPlaneNode, err = activeRouteTargetNode(ctx, bgpRouting.Spec.Network.Subnets)
+				return err
+			}).WithTimeout(reconcileTimeout).WithPolling(pollInterval).Should(Succeed())
+			GinkgoWriter.Printf("pinning data-plane workloads to active AWS route target %s\n", dataPlaneNode)
+
+			By("creating an HTTP server pod on the primary CUDN")
+			dataPlaneScenario = dataplane.New(
+				k8sClient,
+				bgpRouting.Spec.Network.Name,
+				bgpRouting.Spec.Network.Subnets,
+				*dataPlaneProbe,
+				dataPlaneNode,
+			)
+			Expect(dataPlaneScenario.Setup(ctx)).To(Succeed())
+
+			By("checking CUDN pod to VPC probe and VPC probe to direct CUDN pod IP")
+			Expect(dataPlaneScenario.CheckIPv4(ctx)).To(Succeed())
 		})
 	})
 
@@ -341,6 +402,12 @@ var _ = Describe("AWS E2E", Ordered, func() {
 	// ---------------------------------------------------------------
 	Context("E2E-AWS-05: Full cleanup lifecycle", func() {
 		It("should block config deletion while routing CR exists, then clean up everything", func(ctx context.Context) {
+			if dataPlaneScenario != nil {
+				By("deleting the data-plane workload")
+				Expect(dataPlaneScenario.Cleanup(ctx)).To(Succeed())
+				dataPlaneScenario = nil
+			}
+
 			By("attempting to delete config CR (should be blocked by routing CR)")
 			configCR := &networkingapi.BGPCloudConfiguration{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: bgpConfig.Name}, configCR)).To(Succeed())
