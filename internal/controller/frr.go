@@ -19,10 +19,13 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
@@ -116,9 +119,12 @@ func EnsureFRRConfigurationsFromGroups(
 		client.InNamespace(FRRNamespace),
 		client.MatchingLabels{LabelManagedBy: LabelManagedByVal},
 	); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("listing managed FRRConfigurations in %s: %w", FRRNamespace, err)
 	}
 	for i := range list.Items {
+		if !ownedFRRConfiguration(&list.Items[i], config) {
+			continue
+		}
 		if !expected[list.Items[i].GetName()] {
 			if err := c.Delete(ctx, &list.Items[i]); err != nil && !apierrors.IsNotFound(err) {
 				return 0, fmt.Errorf("pruning stale %s: %w", list.Items[i].GetName(), err)
@@ -211,24 +217,110 @@ func ensureSingleFRRConfiguration(
 		}
 	}
 
-	return createOrUpdate(ctx, c, obj)
+	setFRRConfigurationOwnerReference(obj, config)
+	return createOrUpdate(ctx, c, obj, legacyManagedFRRConfiguration)
 }
 
-func DeleteFRRConfigurations(ctx context.Context, c client.Client) error {
+func DeleteFRRConfigurations(ctx context.Context, c client.Client, config *networkingapi.BGPCloudConfiguration) error {
 	list := &unstructured.UnstructuredList{}
 	list.SetGroupVersionKind(FRRConfigurationGVK)
-	if err := c.List(ctx, list,
-		client.InNamespace(FRRNamespace),
-		client.MatchingLabels{LabelManagedBy: LabelManagedByVal},
-	); err != nil {
-		return err
+	if err := c.List(ctx, list, client.InNamespace(FRRNamespace)); err != nil {
+		return fmt.Errorf("listing FRRConfigurations in %s: %w", FRRNamespace, err)
 	}
 	for i := range list.Items {
+		if !ownedFRRConfiguration(&list.Items[i], config) {
+			continue
+		}
 		if err := c.Delete(ctx, &list.Items[i]); err != nil && !apierrors.IsNotFound(err) {
-			return err
+			return fmt.Errorf("deleting FRRConfiguration %s/%s: %w",
+				list.Items[i].GetNamespace(), list.Items[i].GetName(), err)
 		}
 	}
 	return nil
+}
+
+// foreignFRRConfigurations returns "namespace/name", sorted, for every
+// FRRConfiguration in the cluster this BGPCloudConfiguration does not own. Ours
+// are excluded, including ones still terminating after DeleteFRRConfigurations
+// and legacy ones an older build labelled but never owner-referenced, so our own
+// leftovers are not counted as another consumer of the Network/cluster patch.
+//
+// The list is served from the manager cache and can lag a very recent write.
+func foreignFRRConfigurations(ctx context.Context, c client.Client, config *networkingapi.BGPCloudConfiguration) ([]string, error) {
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(FRRConfigurationGVK)
+	if err := c.List(ctx, list); err != nil {
+		return nil, fmt.Errorf("listing FRRConfigurations: %w", err)
+	}
+	names := make([]string, 0, len(list.Items))
+	for i := range list.Items {
+		if ownedFRRConfiguration(&list.Items[i], config) {
+			continue
+		}
+		names = append(names, list.Items[i].GetNamespace()+"/"+list.Items[i].GetName())
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+func setFRRConfigurationOwnerReference(obj *unstructured.Unstructured, config *networkingapi.BGPCloudConfiguration) {
+	if config.UID == "" {
+		return
+	}
+	controller := true
+	ref := metav1.OwnerReference{
+		APIVersion: networkingapi.GroupVersion.String(),
+		Kind:       "BGPCloudConfiguration",
+		Name:       config.Name,
+		UID:        config.UID,
+		Controller: &controller,
+	}
+	refs := obj.GetOwnerReferences()
+	for i := range refs {
+		if refs[i].Kind == "BGPCloudConfiguration" && refs[i].Name == config.Name {
+			refs[i] = ref
+			obj.SetOwnerReferences(refs)
+			return
+		}
+	}
+	obj.SetOwnerReferences(append(refs, ref))
+}
+
+// ownedFRRConfiguration reports whether obj belongs to this BGPCloudConfiguration.
+// Adoption, pruning, deletion and the foreign-consumer check all go through this
+// one predicate so they cannot disagree about what is ours.
+func ownedFRRConfiguration(obj *unstructured.Unstructured, config *networkingapi.BGPCloudConfiguration) bool {
+	return isFRRConfigurationOwnedBy(obj, config) || legacyManagedFRRConfiguration(obj)
+}
+
+func isFRRConfigurationOwnedBy(obj *unstructured.Unstructured, config *networkingapi.BGPCloudConfiguration) bool {
+	if config.UID == "" {
+		return false
+	}
+	for _, ref := range obj.GetOwnerReferences() {
+		if ref.APIVersion == networkingapi.GroupVersion.String() &&
+			ref.Kind == "BGPCloudConfiguration" &&
+			ref.Name == config.Name &&
+			ref.UID == config.UID {
+			return true
+		}
+	}
+	return false
+}
+
+// legacyManagedFRRConfiguration reports whether obj looks like one this operator
+// wrote before it set owner references: our namespace, our generated name prefix,
+// our managed-by label, and no owner reference at all.
+//
+// This is a heuristic, not proof of ownership. Anything satisfying all four is
+// treated as ours and may be adopted or deleted, so an object someone else placed
+// in our namespace under our name prefix with our managed-by label and no owner
+// would be claimed. Objects owned by anyone else are excluded by the last term.
+func legacyManagedFRRConfiguration(obj *unstructured.Unstructured) bool {
+	return obj.GetNamespace() == FRRNamespace &&
+		strings.HasPrefix(obj.GetName(), FRRConfigNamePrefix) &&
+		obj.GetLabels()[LabelManagedBy] == LabelManagedByVal &&
+		len(obj.GetOwnerReferences()) == 0
 }
 
 func mergeLabels(base, overlay map[string]string) map[string]string {
@@ -250,30 +342,54 @@ func toInterfaceMap(m map[string]string) map[string]interface{} {
 	return result
 }
 
-func createOrUpdate(ctx context.Context, c client.Client, obj *unstructured.Unstructured) error {
+// createOrUpdate creates obj, or updates the object of the same name when what we
+// manage differs. adoptable is an optional escape hatch: it is consulted for an
+// existing object that does not yet carry obj's owner reference, and lets a
+// caller take over objects an older build wrote without one. Pass nil to refuse
+// every such object.
+func createOrUpdate(ctx context.Context, c client.Client, obj *unstructured.Unstructured, adoptable func(*unstructured.Unstructured) bool) error {
 	existing := &unstructured.Unstructured{}
 	existing.SetGroupVersionKind(obj.GroupVersionKind())
 	key := types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
 
 	if err := c.Get(ctx, key, existing); err != nil {
 		if apierrors.IsNotFound(err) {
-			return c.Create(ctx, obj)
+			if err := c.Create(ctx, obj); err != nil {
+				return fmt.Errorf("creating %s %s/%s: %w",
+					obj.GetKind(), obj.GetNamespace(), obj.GetName(), err)
+			}
+			return nil
 		}
-		return err
+		return fmt.Errorf("getting existing %s %s/%s: %w",
+			obj.GetKind(), obj.GetNamespace(), obj.GetName(), err)
 	}
 
-	if specEqual(existing, obj) && labelsSatisfied(existing.GetLabels(), obj.GetLabels()) {
+	if !canAdopt(existing, obj, adoptable) {
+		return adoptionRefusedError(obj)
+	}
+
+	// The objects written here are watched by the controller that writes them, so
+	// skip the write when nothing we manage differs and avoid re-triggering reconcile.
+	if specEqual(existing, obj) && labelsSatisfied(existing.GetLabels(), obj.GetLabels()) && ownerRefsSatisfied(existing, obj) {
 		return nil
 	}
 
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		if err := c.Get(ctx, key, existing); err != nil {
-			return err
+			return fmt.Errorf("refreshing existing %s %s/%s: %w",
+				obj.GetKind(), obj.GetNamespace(), obj.GetName(), err)
+		}
+		if !canAdopt(existing, obj, adoptable) {
+			return adoptionRefusedError(obj)
 		}
 		obj.SetResourceVersion(existing.GetResourceVersion())
 		obj.SetLabels(mergeLabels(existing.GetLabels(), obj.GetLabels()))
 		obj.SetAnnotations(mergeLabels(existing.GetAnnotations(), obj.GetAnnotations()))
-		return c.Update(ctx, obj)
+		if err := c.Update(ctx, obj); err != nil {
+			return fmt.Errorf("updating %s %s/%s: %w",
+				obj.GetKind(), obj.GetNamespace(), obj.GetName(), err)
+		}
+		return nil
 	})
 }
 
@@ -320,6 +436,50 @@ func specSatisfied(existing, desired interface{}) bool {
 func labelsSatisfied(existing, desired map[string]string) bool {
 	for k, v := range desired {
 		if existing[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// canAdopt reports whether existing may be written as desired. An object that
+// already carries the desired owner reference is ours; one that does not is only
+// taken over when the caller's adoptable predicate says so.
+func canAdopt(existing, desired *unstructured.Unstructured, adoptable func(*unstructured.Unstructured) bool) bool {
+	if len(desired.GetOwnerReferences()) == 0 || ownerRefsSatisfied(existing, desired) {
+		return true
+	}
+	return adoptable != nil && adoptable(existing)
+}
+
+// adoptionRefusedError names the owner we expected, and the two ways an object can
+// lack it: a genuine name collision, or a leftover from a previous instance of the
+// owner that garbage collection has not removed yet.
+func adoptionRefusedError(desired *unstructured.Unstructured) error {
+	owner := "this controller"
+	if refs := desired.GetOwnerReferences(); len(refs) > 0 {
+		owner = refs[0].Kind + "/" + refs[0].Name
+	}
+	return fmt.Errorf("refusing to adopt existing %s %s/%s: it carries no owner reference to %s "+
+		"(name collision, or a leftover of a previous %s awaiting garbage collection)",
+		desired.GetKind(), desired.GetNamespace(), desired.GetName(), owner, owner)
+}
+
+func ownerRefsSatisfied(existing, desired *unstructured.Unstructured) bool {
+	want := desired.GetOwnerReferences()
+	if len(want) == 0 {
+		return true
+	}
+	have := existing.GetOwnerReferences()
+	for _, ref := range want {
+		found := false
+		for _, h := range have {
+			if h.APIVersion == ref.APIVersion && h.Kind == ref.Kind && h.Name == ref.Name && h.UID == ref.UID {
+				found = true
+				break
+			}
+		}
+		if !found {
 			return false
 		}
 	}

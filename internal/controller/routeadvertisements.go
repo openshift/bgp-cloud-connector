@@ -55,7 +55,7 @@ func EnsureRouteAdvertisements(ctx context.Context, c client.Client) error {
 		},
 	}
 
-	return createOrUpdate(ctx, c, obj)
+	return createOrUpdate(ctx, c, obj, nil)
 }
 
 func DeleteRouteAdvertisements(ctx context.Context, c client.Client) error {

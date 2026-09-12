@@ -20,9 +20,12 @@ import (
 	"context"
 	"testing"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	networkingapi "github.com/openshift/bgp-cloud-connector/api/v1beta1"
 )
 
 func newFRRConfigObject(name string, labels map[string]interface{}, nodeSelectorValue string) *unstructured.Unstructured {
@@ -53,7 +56,7 @@ func TestCreateOrUpdate_CreatesWhenMissing(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(s).Build()
 
 	desired := newFRRConfigObject("bgp-cc-1", map[string]interface{}{LabelManagedBy: LabelManagedByVal}, "true")
-	if err := createOrUpdate(ctx, c, desired); err != nil {
+	if err := createOrUpdate(ctx, c, desired, nil); err != nil {
 		t.Fatalf("createOrUpdate: %v", err)
 	}
 
@@ -80,7 +83,7 @@ func TestCreateOrUpdate_SkipsUpdateWhenSpecAndLabelsUnchanged(t *testing.T) {
 	}
 
 	desired := newFRRConfigObject("bgp-cc-1", map[string]interface{}{LabelManagedBy: LabelManagedByVal}, "true")
-	if err := createOrUpdate(ctx, c, desired); err != nil {
+	if err := createOrUpdate(ctx, c, desired, nil); err != nil {
 		t.Fatalf("createOrUpdate: %v", err)
 	}
 
@@ -111,7 +114,7 @@ func TestCreateOrUpdate_UpdatesWhenSpecChanges(t *testing.T) {
 	}
 
 	desired := newFRRConfigObject("bgp-cc-1", map[string]interface{}{LabelManagedBy: LabelManagedByVal}, "false")
-	if err := createOrUpdate(ctx, c, desired); err != nil {
+	if err := createOrUpdate(ctx, c, desired, nil); err != nil {
 		t.Fatalf("createOrUpdate: %v", err)
 	}
 
@@ -146,7 +149,7 @@ func TestCreateOrUpdate_UpdatesWhenManagedLabelMissing(t *testing.T) {
 	}
 
 	desired := newFRRConfigObject("bgp-cc-1", map[string]interface{}{LabelManagedBy: LabelManagedByVal}, "true")
-	if err := createOrUpdate(ctx, c, desired); err != nil {
+	if err := createOrUpdate(ctx, c, desired, nil); err != nil {
 		t.Fatalf("createOrUpdate: %v", err)
 	}
 
@@ -160,6 +163,72 @@ func TestCreateOrUpdate_UpdatesWhenManagedLabelMissing(t *testing.T) {
 	}
 	if after.GetLabels()[LabelManagedBy] != LabelManagedByVal {
 		t.Fatalf("expected managed-by label to be set, got %q", after.GetLabels()[LabelManagedBy])
+	}
+}
+
+// TestCreateOrUpdate_RefusesToAdoptUnownedObject verifies that an existing
+// foreign FRRConfiguration is not adopted just because the name matches.
+func TestCreateOrUpdate_RefusesToAdoptUnownedObject(t *testing.T) {
+	ctx := context.Background()
+	s := testScheme()
+	s.AddKnownTypeWithName(FRRConfigurationGVK.GroupVersion().WithKind("FRRConfiguration"), &unstructured.Unstructured{})
+	s.AddKnownTypeWithName(FRRConfigurationGVK.GroupVersion().WithKind("FRRConfigurationList"), &unstructured.UnstructuredList{})
+
+	// Same name, but this object is not ours.
+	existing := newFRRConfigObject("bgp-cc-1", map[string]interface{}{"owner": "someone-else"}, "true")
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(existing).Build()
+
+	config := &networkingapi.BGPCloudConfiguration{ObjectMeta: metav1.ObjectMeta{Name: "cluster", UID: testConfigUID}}
+	// A different spec so a wrongful adopt would also overwrite it.
+	desired := newFRRConfigObject("bgp-cc-1", map[string]interface{}{LabelManagedBy: LabelManagedByVal}, "false")
+	setFRRConfigurationOwnerReference(desired, config)
+
+	if err := createOrUpdate(ctx, c, desired, legacyManagedFRRConfiguration); err == nil {
+		t.Fatal("expected createOrUpdate to refuse adopting an object without our owner reference")
+	}
+
+	after := &unstructured.Unstructured{}
+	after.SetGroupVersionKind(FRRConfigurationGVK)
+	if err := c.Get(ctx, types.NamespacedName{Name: "bgp-cc-1", Namespace: FRRNamespace}, after); err != nil {
+		t.Fatalf("get after: %v", err)
+	}
+	if len(after.GetOwnerReferences()) != 0 {
+		t.Fatalf("expected object to remain unowned, got owner refs %v", after.GetOwnerReferences())
+	}
+	value, _, _ := unstructured.NestedString(after.Object, "spec", "nodeSelector", "matchLabels", "bgp_router")
+	if value != "true" {
+		t.Fatalf("expected existing spec to remain unchanged, got bgp_router=%q", value)
+	}
+}
+
+func TestCreateOrUpdate_AdoptsLegacyManagedObjectWithoutOwnerReference(t *testing.T) {
+	ctx := context.Background()
+	s := testScheme()
+	s.AddKnownTypeWithName(FRRConfigurationGVK.GroupVersion().WithKind("FRRConfiguration"), &unstructured.Unstructured{})
+	s.AddKnownTypeWithName(FRRConfigurationGVK.GroupVersion().WithKind("FRRConfigurationList"), &unstructured.UnstructuredList{})
+
+	existing := newFRRConfigObject("bgp-cc-1", map[string]interface{}{LabelManagedBy: LabelManagedByVal}, "true")
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(existing).Build()
+
+	config := &networkingapi.BGPCloudConfiguration{ObjectMeta: metav1.ObjectMeta{Name: "cluster", UID: testConfigUID}}
+	desired := newFRRConfigObject("bgp-cc-1", map[string]interface{}{LabelManagedBy: LabelManagedByVal}, "false")
+	setFRRConfigurationOwnerReference(desired, config)
+
+	if err := createOrUpdate(ctx, c, desired, legacyManagedFRRConfiguration); err != nil {
+		t.Fatalf("createOrUpdate: %v", err)
+	}
+
+	after := &unstructured.Unstructured{}
+	after.SetGroupVersionKind(FRRConfigurationGVK)
+	if err := c.Get(ctx, types.NamespacedName{Name: "bgp-cc-1", Namespace: FRRNamespace}, after); err != nil {
+		t.Fatalf("get after: %v", err)
+	}
+	if !ownerRefsSatisfied(after, desired) {
+		t.Fatalf("expected legacy managed object to be adopted, got owner refs %v", after.GetOwnerReferences())
+	}
+	value, _, _ := unstructured.NestedString(after.Object, "spec", "nodeSelector", "matchLabels", "bgp_router")
+	if value != "false" {
+		t.Fatalf("expected adopted spec to be updated, got bgp_router=%q", value)
 	}
 }
 
@@ -236,7 +305,7 @@ func TestCreateOrUpdate_SkipsUpdateWhenExistingHasServerDefaultedField(t *testin
 	}
 
 	desired := newFRRConfigObject("bgp-cc-1", map[string]interface{}{LabelManagedBy: LabelManagedByVal}, "true")
-	if err := createOrUpdate(ctx, c, desired); err != nil {
+	if err := createOrUpdate(ctx, c, desired, nil); err != nil {
 		t.Fatalf("createOrUpdate: %v", err)
 	}
 
@@ -268,7 +337,7 @@ func TestCreateOrUpdate_PreservesForeignLabelsAndAnnotationsOnUpdate(t *testing.
 	// A real spec change forces createOrUpdate down the Update path, which is
 	// where a wholesale metadata replacement would lose anything we didn't set.
 	desired := newFRRConfigObject("bgp-cc-1", map[string]interface{}{LabelManagedBy: LabelManagedByVal}, "false")
-	if err := createOrUpdate(ctx, c, desired); err != nil {
+	if err := createOrUpdate(ctx, c, desired, nil); err != nil {
 		t.Fatalf("createOrUpdate: %v", err)
 	}
 

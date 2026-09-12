@@ -23,6 +23,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"reflect"
 
@@ -73,6 +74,84 @@ type BGPCloudConfigurationReconciler struct {
 	PlatformBuilder PlatformBuilderFunc
 }
 
+// settleNetworkOwnership records, once, whether this controller may revert one
+// Network/cluster field on deletion.
+func settleNetworkOwnership(ownership *networkingapi.NetworkPatchOwnership, enabledByUs bool) {
+	if *ownership != "" {
+		return
+	}
+	if enabledByUs {
+		*ownership = networkingapi.NetworkPatchOwnershipOwned
+	} else {
+		*ownership = networkingapi.NetworkPatchOwnershipExternal
+	}
+}
+
+// reconcileNetworkOperatorPatch runs Phase 1: it patches Network/cluster with
+// FRR and routeAdvertisements, records which of those this controller now owns,
+// and sets the NetworkOperatorPatched condition.
+//
+// The first return reports that Phase 1 did not complete and the caller must
+// return the accompanying result and error unchanged. It is explicit rather
+// than inferred from those two, because setDegraded yields (ctrl.Result{}, nil)
+// for a terminal reason, which is indistinguishable from success.
+func (r *BGPCloudConfigurationReconciler) reconcileNetworkOperatorPatch(
+	ctx context.Context,
+	config *networkingapi.BGPCloudConfiguration,
+	baselineStatus networkingapi.BGPCloudConfigurationStatus,
+) (bool, ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+	log.Info("Phase 1: patching Network operator")
+
+	network, frrEnabled, routeAdsEnabled, err := ReadNetworkOperatorState(ctx, r.Client)
+	if err != nil {
+		res, err := r.setDegraded(ctx, config, baselineStatus, networkingapi.ConditionNetworkOperatorPatched,
+			ReasonNetworkReadFailed, fmt.Sprintf("failed to read Network/cluster: %v", err))
+		return true, res, err
+	}
+
+	// Patch whatever is off on every reconcile so we repair drift instead of
+	// reporting success over a stale Network/cluster.
+	patchResult, err := PatchNetworkOperator(ctx, r.Client, network, !frrEnabled, !routeAdsEnabled)
+	if err != nil {
+		// A missing Network/cluster is not a patch fault. Report it as the read
+		// failure it is, so the condition names the object that is absent.
+		reason, message := ReasonPatchFailed, fmt.Sprintf("failed to patch Network operator: %v", err)
+		if errors.Is(err, errNoNetworkCluster) {
+			reason, message = ReasonNetworkReadFailed, fmt.Sprintf("failed to read Network/cluster: %v", err)
+		}
+		res, err := r.setDegraded(ctx, config, baselineStatus, networkingapi.ConditionNetworkOperatorPatched, reason, message)
+		return true, res, err
+	}
+
+	settleNetworkOwnership(&config.Status.FRRProviderOwnership, patchResult.enabledFRRProvider)
+	settleNetworkOwnership(&config.Status.RouteAdvertisementsOwnership, patchResult.enabledRouteAds)
+
+	if config.Status.FRRProviderOwnership != baselineStatus.FRRProviderOwnership ||
+		config.Status.RouteAdvertisementsOwnership != baselineStatus.RouteAdvertisementsOwnership {
+		// Persist ownership before later status writes so a restart cannot lose the
+		// attribution needed for delete-time cleanup.
+		if err := r.persistNetworkOwnership(ctx, config); err != nil {
+			if revertErr := UnpatchNetworkOperator(ctx, r.Client, patchResult.enabledFRRProvider, patchResult.enabledRouteAds); revertErr != nil {
+				// Neither the record nor the rollback survived: Network/cluster stays
+				// patched with nothing claiming it. The next reconcile reads FRR as
+				// already enabled and settles External, so this patch is never reverted
+				// on deletion. Both errors go out; recovering needs a human.
+				return true, ctrl.Result{}, fmt.Errorf("persisting Network/cluster ownership: %w (also failed to revert Network operator patch: %v)", err, revertErr)
+			}
+			return true, ctrl.Result{}, fmt.Errorf("persisting Network/cluster ownership: %w", err)
+		}
+	}
+	meta.SetStatusCondition(&config.Status.Conditions, metav1.Condition{
+		Type:               networkingapi.ConditionNetworkOperatorPatched,
+		Status:             metav1.ConditionTrue,
+		Reason:             ReasonPatched,
+		Message:            "Network operator patched with FRR and routeAdvertisements",
+		ObservedGeneration: config.Generation,
+	})
+	return false, ctrl.Result{}, nil
+}
+
 func (r *BGPCloudConfigurationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -103,18 +182,9 @@ func (r *BGPCloudConfigurationReconciler) Reconcile(ctx context.Context, req ctr
 	config.Status.ObservedGeneration = config.Generation
 
 	// Phase 1: Patch Network Operator
-	log.Info("Phase 1: patching Network operator")
-	if err := PatchNetworkOperator(ctx, r.Client); err != nil {
-		return r.setDegraded(ctx, config, *baselineStatus, networkingapi.ConditionNetworkOperatorPatched,
-			"PatchFailed", fmt.Sprintf("failed to patch Network operator: %v", err))
+	if handled, res, err := r.reconcileNetworkOperatorPatch(ctx, config, *baselineStatus); handled {
+		return res, err
 	}
-	meta.SetStatusCondition(&config.Status.Conditions, metav1.Condition{
-		Type:               networkingapi.ConditionNetworkOperatorPatched,
-		Status:             metav1.ConditionTrue,
-		Reason:             "Patched",
-		Message:            "Network operator patched with FRR and routeAdvertisements",
-		ObservedGeneration: config.Generation,
-	})
 
 	// Phase 2: Wait for FRR
 	log.Info("Phase 2: checking FRR readiness")
@@ -531,11 +601,38 @@ func formatIncompleteNodesMessage(incomplete []platform.RouterNode) string {
 		}
 		parts = append(parts, n.Name+" (missing "+strings.Join(missing, "/")+")")
 	}
-	msg := fmt.Sprintf("%d router node(s) incomplete: %s", len(incomplete), strings.Join(parts, "; "))
-	if len(msg) > 32768 {
-		return msg[:32768]
+	return truncateConditionMessage(fmt.Sprintf("%d router node(s) incomplete: %s", len(incomplete), strings.Join(parts, "; ")))
+}
+
+// truncateConditionMessage keeps a message inside the 32768-byte limit the API
+// server enforces on condition messages. An over-long message fails status
+// validation, which on the deletion path would wedge the finalizer.
+func truncateConditionMessage(msg string) string {
+	const maxConditionMessage = 32768
+	if len(msg) <= maxConditionMessage {
+		return msg
 	}
-	return msg
+	// Cut back to a rune boundary: a byte-exact cut can split a multi-byte
+	// sequence, and invalid UTF-8 is rejected just as an over-long message is.
+	truncated := msg[:maxConditionMessage]
+	for len(truncated) > 0 && !utf8.ValidString(truncated) {
+		truncated = truncated[:len(truncated)-1]
+	}
+	return truncated
+}
+
+// manualNetworkCleanupHint names what is left on Network/cluster when deletion
+// completes without reverting it, so the log line is actionable rather than just
+// a record that something went wrong.
+func manualNetworkCleanupHint(frr, routeAds bool) string {
+	left := make([]string, 0, 2)
+	if frr {
+		left = append(left, "remove "+FRRProviderName+" from spec.additionalRoutingCapabilities.providers")
+	}
+	if routeAds {
+		left = append(left, "set spec.defaultNetwork.ovnKubernetesConfig.routeAdvertisements to "+RouteAdvertisementsDisabled)
+	}
+	return fmt.Sprintf("on network.operator.openshift.io/%s: %s", SingletonName, strings.Join(left, "; "))
 }
 
 func (r *BGPCloudConfigurationReconciler) reconcileDelete(ctx context.Context, config *networkingapi.BGPCloudConfiguration) (ctrl.Result, error) {
@@ -572,8 +669,67 @@ func (r *BGPCloudConfigurationReconciler) reconcileDelete(ctx context.Context, c
 	}
 
 	log.Info("cleaning up FRR configurations")
-	if err := DeleteFRRConfigurations(ctx, r.Client); err != nil {
-		return ctrl.Result{}, err
+	if err := DeleteFRRConfigurations(ctx, r.Client, config); err != nil {
+		return ctrl.Result{}, fmt.Errorf("deleting FRR configurations: %w", err)
+	}
+
+	// Revert the Network/cluster fields marked Owned. Fields marked External were
+	// already on before the first Phase 1 reconcile and are never touched.
+	//
+	// Reverting is best effort: on failure we log the manual cleanup and let
+	// deletion finish, because a leaked Network/cluster field can be undone by
+	// hand while an object stuck in Terminating blocks reinstall. Remaining
+	// consumers (below) are the one exception: that is not a failure, and waiting
+	// is what lets the revert happen later rather than never.
+	//
+	// Only FRRConfiguration consumers are checked. RouteAdvertisements CRs also
+	// depend on the routeAdvertisements toggle and are not looked at, so an
+	// unrelated RouteAdvertisements CR can be broken by this revert.
+	revertFRR := config.Status.FRRProviderOwnership == networkingapi.NetworkPatchOwnershipOwned
+	revertRouteAds := config.Status.RouteAdvertisementsOwnership == networkingapi.NetworkPatchOwnershipOwned
+	if revertFRR || revertRouteAds {
+		// DeleteFRRConfigurations only removes objects owned by this BGPCloudConfiguration.
+		// Other FRRConfiguration consumers may still require the Network patch.
+		foreign, err := foreignFRRConfigurations(ctx, r.Client, config)
+		switch {
+		case err != nil:
+			// We cannot tell whether anything else still needs the patch, so leave
+			// Network/cluster as it is and complete the deletion.
+			log.Error(err, "completing deletion without reverting the Network operator patch: listing FRRConfigurations failed",
+				"manualCleanup", manualNetworkCleanupHint(revertFRR, revertRouteAds))
+		case len(foreign) > 0:
+			// Retain the finalizer and requeue rather than complete deletion: the
+			// ownership flags live in this object's status, so releasing it now would
+			// lose the ability to revert once those consumers are gone. This is the one
+			// path that can hold the object in Terminating indefinitely, so the
+			// condition names what to remove and how to force deletion instead.
+			log.Info("deletion blocked: FRRConfiguration objects owned by others still exist; retaining finalizer until they are removed",
+				"count", len(foreign), "frrConfigurations", foreign)
+			if err := r.patchConfigStatus(ctx, config, *baselineStatus, func(c *networkingapi.BGPCloudConfiguration) {
+				meta.SetStatusCondition(&c.Status.Conditions, metav1.Condition{
+					Type:   ConditionDeletionBlocked,
+					Status: metav1.ConditionTrue,
+					Reason: ReasonExternalFRRConfigsExist,
+					Message: truncateConditionMessage(fmt.Sprintf(
+						"%d FRRConfiguration(s) not owned by this BGPCloudConfiguration still consume the Network/cluster FRR patch; "+
+							"deletion is blocked until they are removed: %s. "+
+							"To finish deletion without reverting the patch, remove the %s finalizer.",
+						len(foreign), strings.Join(foreign, ", "), ConfigFinalizerName)),
+					ObservedGeneration: c.Generation,
+				})
+			}); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		default:
+			log.Info("reverting Network operator patch")
+			if err := UnpatchNetworkOperator(ctx, r.Client, revertFRR, revertRouteAds); err != nil {
+				log.Error(err, "completing deletion without reverting the Network operator patch: unpatch failed",
+					"manualCleanup", manualNetworkCleanupHint(revertFRR, revertRouteAds))
+			} else {
+				log.Info("Network operator patch reverted")
+			}
+		}
 	}
 
 	controllerutil.RemoveFinalizer(config, ConfigFinalizerName)

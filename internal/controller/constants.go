@@ -28,10 +28,13 @@ const (
 	FRRNamespace  = "openshift-frr-k8s"
 	// DefaultOperatorNamespace is where the operator runs unless the
 	// Deployment says otherwise through POD_NAMESPACE.
-	DefaultOperatorNamespace = "openshift-bgp-cloud-connector"
-	FRRConfigNamePrefix      = "bgp-cc-"
-	ClusterUDNNamePrefix     = "cluster-udn-"
-	RouteAdvertisementName   = "bgp-cc-route-advertisements"
+	DefaultOperatorNamespace    = "openshift-bgp-cloud-connector"
+	FRRConfigNamePrefix         = "bgp-cc-"
+	ClusterUDNNamePrefix        = "cluster-udn-"
+	RouteAdvertisementName      = "bgp-cc-route-advertisements"
+	FRRProviderName             = "FRR"
+	RouteAdvertisementsOn       = "Enabled"
+	RouteAdvertisementsDisabled = "Disabled"
 
 	// RawFRRConfigPriority orders this raw block against the raw blocks of
 	// other FRRConfigurations, a higher value being appended later. It says
@@ -58,6 +61,7 @@ const (
 
 	// Transient degraded reasons
 	ReasonPatchFailed          = "PatchFailed"
+	ReasonNetworkReadFailed    = "NetworkReadFailed"
 	ReasonCheckFailed          = "CheckFailed"
 	ReasonCloudDiscoveryFailed = "CloudDiscoveryFailed"
 	ReasonApplyFailed          = "ApplyFailed"
@@ -67,14 +71,15 @@ const (
 	ReasonRAFailed             = "RAFailed"
 
 	// Success / informational reasons
-	ReasonPatched         = "Patched"
-	ReasonWaitingForFRR   = "WaitingForFRR"
-	ReasonFRRReady        = "Ready"
-	ReasonDiscovered      = "Discovered"
-	ReasonApplied         = "Applied"
-	ReasonReconciled      = "Reconciled"
-	ReasonCreated         = "Created"
-	ReasonRoutingCRsExist = "RoutingCRsExist"
+	ReasonPatched                 = "Patched"
+	ReasonWaitingForFRR           = "WaitingForFRR"
+	ReasonFRRReady                = "Ready"
+	ReasonDiscovered              = "Discovered"
+	ReasonApplied                 = "Applied"
+	ReasonReconciled              = "Reconciled"
+	ReasonCreated                 = "Created"
+	ReasonRoutingCRsExist         = "RoutingCRsExist"
+	ReasonExternalFRRConfigsExist = "ExternalFRRConfigsExist"
 )
 
 // TerminalDegradedReasons returns condition reasons that must not schedule RequeueAfter.

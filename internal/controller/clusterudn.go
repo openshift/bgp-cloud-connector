@@ -96,7 +96,7 @@ func EnsureClusterUDN(ctx context.Context, c client.Client, routing *networkinga
 }
 
 func createOrUpdateCUDN(ctx context.Context, c client.Client, obj *unstructured.Unstructured) error {
-	err := createOrUpdate(ctx, c, obj)
+	err := createOrUpdate(ctx, c, obj, nil)
 	if err != nil && apierrors.IsInvalid(err) {
 		return &CUDNValidationError{Cause: err}
 	}

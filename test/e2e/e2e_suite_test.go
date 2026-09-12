@@ -153,6 +153,7 @@ func addUnstructuredTypes(s *runtime.Scheme) {
 		raGVK,
 		bgpSessionStateGVK,
 		frrNodeStateGVK,
+		NetworkOperatorGVK,
 	} {
 		s.AddKnownTypeWithName(gvk, &unstructured.Unstructured{})
 		s.AddKnownTypeWithName(gvk.GroupVersion().WithKind(gvk.Kind+"List"), &unstructured.UnstructuredList{})

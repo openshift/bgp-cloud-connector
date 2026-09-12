@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -25,6 +26,8 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	networkingapi "github.com/openshift/bgp-cloud-connector/api/v1beta1"
 )
@@ -58,6 +61,26 @@ func (r *BGPCloudConfigurationReconciler) patchConfigStatus(
 
 	config.Status = desired.Status
 	return r.Status().Update(ctx, config)
+}
+
+// persistNetworkOwnership writes the two Network/cluster ownership fields on
+// their own, as soon as the patch that earned them succeeded.
+func (r *BGPCloudConfigurationReconciler) persistNetworkOwnership(ctx context.Context, config *networkingapi.BGPCloudConfiguration) error {
+	patch, err := json.Marshal(map[string]interface{}{
+		"metadata": map[string]interface{}{
+			"resourceVersion": config.ResourceVersion,
+		},
+		"status": map[string]interface{}{
+			"frrProviderOwnership":         config.Status.FRRProviderOwnership,
+			"routeAdvertisementsOwnership": config.Status.RouteAdvertisementsOwnership,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	inProgress := config.Status
+	defer func() { config.Status = inProgress }()
+	return r.Status().Patch(ctx, config, client.RawPatch(types.MergePatchType, patch))
 }
 
 // patchRoutingStatus updates status when desired differs from the etcd baseline.
@@ -94,8 +117,8 @@ func (r *BGPCloudConfigurationReconciler) reportDeletionBlocked(
 	}
 	sort.Strings(names)
 
-	condMessage := fmt.Sprintf("%d BGPRouting CR(s) must be deleted first: %s",
-		len(names), strings.Join(names, ", "))
+	condMessage := truncateConditionMessage(fmt.Sprintf("%d BGPRouting CR(s) must be deleted first: %s",
+		len(names), strings.Join(names, ", ")))
 
 	return r.patchConfigStatus(ctx, config, baselineStatus, func(c *networkingapi.BGPCloudConfiguration) {
 		meta.SetStatusCondition(&c.Status.Conditions, metav1.Condition{

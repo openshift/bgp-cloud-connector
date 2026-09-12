@@ -20,6 +20,7 @@ import (
 	"context"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -162,5 +163,35 @@ func TestPatchRoutingStatus_SkipsUnchangedPending(t *testing.T) {
 	}
 	if after.ResourceVersion != before.ResourceVersion {
 		t.Fatalf("expected no status update, resourceVersion changed from %q to %q", before.ResourceVersion, after.ResourceVersion)
+	}
+}
+
+func TestPersistNetworkOwnership_RejectsStaleResourceVersion(t *testing.T) {
+	ctx := context.Background()
+
+	config := &networkingapi.BGPCloudConfiguration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: SingletonName,
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(testScheme()).WithStatusSubresource(config).WithObjects(config).Build()
+	r := &BGPCloudConfigurationReconciler{Client: c, Scheme: testScheme()}
+
+	stale := &networkingapi.BGPCloudConfiguration{}
+	if err := c.Get(ctx, types.NamespacedName{Name: SingletonName}, stale); err != nil {
+		t.Fatalf("get stale config: %v", err)
+	}
+
+	live := stale.DeepCopy()
+	live.Status.FRRProviderOwnership = networkingapi.NetworkPatchOwnershipOwned
+	if err := c.Status().Update(ctx, live); err != nil {
+		t.Fatalf("seed live ownership: %v", err)
+	}
+
+	stale.Status.RouteAdvertisementsOwnership = networkingapi.NetworkPatchOwnershipExternal
+	err := r.persistNetworkOwnership(ctx, stale)
+	if !apierrors.IsConflict(err) {
+		t.Fatalf("expected conflict from stale resourceVersion, got %v", err)
 	}
 }
