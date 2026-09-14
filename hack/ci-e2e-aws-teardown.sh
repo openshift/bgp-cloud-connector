@@ -72,6 +72,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # The INFRA form exists precisely for a cluster that has gone, so there
 # is nothing to ask it and nothing to clean up on it.
 cluster_side_failed=false
+probe_cleanup_failed=false
 
 # Reachability, not INFRA. Conflating the two skips cleanup on every run
 # where the caller happened to pass the facts in, which is every CI run.
@@ -107,6 +108,12 @@ else
     info "no cluster is reachable; skipping cluster-side cleanup"
 fi
 
+# Delete the probe before the Route Server estate.
+if ! INFRA="${infra}" AWS_REGION="${region}" "${here}/aws/delete-dataplane-probe.sh"; then
+    warn "data-plane probe cleanup failed; continuing to Route Server cleanup"
+    probe_cleanup_failed=true
+fi
+
 # Tried more than once, which the developer-facing script does not do
 # and does not need to: there a failure prints and you deal with it.
 # Here nobody is watching and the resources bill by the hour, so a
@@ -115,6 +122,11 @@ fi
 # a call and nothing else.
 for attempt in $(seq 1 "${attempts}"); do
     if INFRA="${infra}" AWS_REGION="${region}" "${here}/aws/delete-route-servers.sh"; then
+        if [[ "${probe_cleanup_failed}" == true ]]; then
+            die "the Route Server estate is gone, but data-plane probe cleanup failed" \
+                "The probe instance or security group may still exist and may still bill." \
+                "Retry: INFRA=${infra} AWS_REGION=${region} hack/aws/delete-dataplane-probe.sh"
+        fi
         if [[ "${cluster_side_failed}" == true ]]; then
             die "the cloud resources are gone, but cluster-side cleanup failed" \
                 "Nothing is billing. The next run against this cluster may trip" \

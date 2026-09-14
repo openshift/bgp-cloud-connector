@@ -21,6 +21,7 @@
 #   stand up the estate            hack/aws/create-route-servers.sh
 #   label the router nodes         hack/label-router-nodes.sh
 #   describe what was built        hack/aws/write-e2e-profile.sh
+#   create a packet probe          hack/aws/create-dataplane-probe.sh
 #   run the suite                  make test-e2e-aws
 #
 # The order is not arbitrary. The operator discovers route servers and
@@ -89,8 +90,13 @@ require_route_server_api
 profile_dir="${ci_workdir}/e2e-profile"
 "${here}/aws/write-e2e-profile.sh" "${profile_dir}" >/dev/null
 
+# Create the external data-plane probe.
+probe_config="${ci_workdir}/dataplane-probe.json"
+"${here}/aws/create-dataplane-probe.sh" "${probe_config}"
+
 info "--- e2e suite ---"
-E2E_MANIFEST_DIR="${profile_dir}" make -C "${repo_root}" test-e2e-aws
+E2E_MANIFEST_DIR="${profile_dir}" E2E_DATAPLANE_CONFIG="${probe_config}" \
+    make -C "${repo_root}" test-e2e-aws
 
 info "e2e suite passed"
 info ""
