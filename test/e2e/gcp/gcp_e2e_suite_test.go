@@ -19,6 +19,8 @@ package gcp_e2e
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -414,6 +416,13 @@ func dumpCredentials(ctx context.Context) {
 		provisioned, _, _ := unstructured.NestedBool(cr.Object, "status", "provisioned")
 		perms, _, _ := unstructured.NestedStringSlice(cr.Object, "spec", "providerSpec", "permissions")
 		say("  CredentialsRequest: provisioned=%v, %d permissions", provisioned, len(perms))
+		// Generation and lastSync say whether the cloud credential
+		// operator has been back since it first minted, and
+		// serviceAccountID names the identity it believes it gave us.
+		gen, _, _ := unstructured.NestedInt64(cr.Object, "metadata", "generation")
+		sync, _, _ := unstructured.NestedString(cr.Object, "status", "lastSyncTimestamp")
+		minted, _, _ := unstructured.NestedString(cr.Object, "status", "providerStatus", "serviceAccountID")
+		say("  CredentialsRequest: generation=%d lastSync=%s mintedServiceAccount=%s", gen, sync, minted)
 	}
 	secret, err := clientset.CoreV1().Secrets(operatorNamespace).
 		Get(ctx, gcpplatform.CredentialsSecretName, metav1.GetOptions{})
@@ -427,6 +436,39 @@ func dumpCredentials(ctx context.Context) {
 	}
 	sort.Strings(keys)
 	say("  secret keys: %s", strings.Join(keys, " "))
+	// The identity actually in the operator's hand, next to the one the
+	// cloud credential operator says it minted. A GCP call that fails
+	// with invalid_grant cannot be told apart otherwise: the same error
+	// covers an account that has been deleted underneath a good secret
+	// and a secret naming an account that was never ours. The account
+	// part only, because prow redacts the project and these logs are
+	// public; resourceVersion says whether the secret moved mid-run.
+	say("  secret resourceVersion: %s", secret.ResourceVersion)
+	say("  credential in the secret: %s", credentialIdentity(secret))
+}
+
+// credentialIdentity names the service account a minted credential
+// belongs to, with the project stripped off.
+func credentialIdentity(secret *corev1.Secret) string {
+	for _, key := range []string{"service_account.json", "credentials"} {
+		raw, ok := secret.Data[key]
+		if !ok || len(raw) == 0 {
+			continue
+		}
+		var fields struct {
+			Type        string `json:"type"`
+			ClientEmail string `json:"client_email"`
+		}
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			return fmt.Sprintf("%s: not JSON: %v", key, err)
+		}
+		account, _, _ := strings.Cut(fields.ClientEmail, "@")
+		if account == "" {
+			account = "<none>"
+		}
+		return fmt.Sprintf("%s type=%s account=%s", key, fields.Type, account)
+	}
+	return "no credential key recognised"
 }
 
 func dumpNodes(ctx context.Context) {
