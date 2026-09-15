@@ -110,6 +110,8 @@ type BGPNeighbor struct {
 // per subnet give one group per availability zone, because a node peers with
 // the ones in its own; endpoints presented once for a region give a single
 // group covering every router node.
+//
+// +kubebuilder:validation:XValidation:rule="self.neighbors.all(n, self.neighbors.filter(x, ip(x.address) == ip(n.address)).size() == 1)",message="duplicate neighbor addresses within a peer group are not allowed"
 type PeerGroup struct {
 	// NodeSelector is a set of labels used to select the router nodes
 	// that belong to this peer group.
@@ -124,6 +126,8 @@ type PeerGroup struct {
 // AWSConfig names the VPC Route Servers to discover. A VPC can hold several
 // and their endpoints are per subnet, which is why AWS is the cloud that
 // produces more than one peer group.
+//
+// +kubebuilder:validation:XValidation:rule="self.routeServerIDs.all(id, self.routeServerIDs.filter(x, x == id).size() == 1)",message="duplicate route server IDs are not allowed"
 type AWSConfig struct {
 	// Region is the AWS region where the ROSA cluster and Route Servers are deployed.
 	// +kubebuilder:validation:MinLength=1
@@ -131,6 +135,8 @@ type AWSConfig struct {
 	// RouteServerIDs is the list of VPC Route Server IDs used for auto-discovery
 	// of BGP endpoints, neighbor IPs, availability zones, and remote ASN.
 	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:MaxLength=128
 	// +listType=atomic
 	RouteServerIDs []string `json:"routeServerIDs"`
 }
@@ -261,6 +267,8 @@ type BGPConfig struct {
 // +kubebuilder:validation:XValidation:rule="(self.platform == 'GCP') == has(self.gcp)",message="spec.gcp must be set when spec.platform is GCP, and must be absent otherwise"
 // +kubebuilder:validation:XValidation:rule="self.platform != 'Manual' || (has(self.bgp.peerGroups) && size(self.bgp.peerGroups) > 0)",message="spec.bgp.peerGroups is required when spec.platform is Manual"
 // +kubebuilder:validation:XValidation:rule="self.platform == 'Manual' || !has(self.bgp.peerGroups) || size(self.bgp.peerGroups) == 0",message="spec.bgp.peerGroups may only be set when spec.platform is Manual"
+// +kubebuilder:validation:XValidation:rule="size(self.routerNodeSelector) > 0",message="routerNodeSelector must not be empty"
+// +kubebuilder:validation:XValidation:rule="self.platform == oldSelf.platform",message="spec.platform cannot be changed after creation"
 type BGPCloudConfigurationSpec struct {
 	// Platform selects the cloud provider integration mode.
 	// AWS auto-discovers BGP endpoints from VPC Route Servers.
