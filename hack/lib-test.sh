@@ -473,6 +473,77 @@ gcloud() { printf '10.0.128.5/17;10.0.128.6/17'; }
 check "interface addresses are split and stripped" \
     "$(gcp_router_interface_addresses cr us-east1 proj | tr '\n' ' ')" "10.0.128.5 10.0.128.6 "
 
+# What this credential can actually do, asked of GCP rather than worked
+# out from which call failed first. In CI the estate died on a single
+# PERMISSION_DENIED for networkconnectivity.hubs.create and said nothing
+# about the rest of the role, so the whole list is asked at once.
+# shellcheck disable=SC2329
+gcloud() { printf 'ya29.a0-fake-token'; }
+# shellcheck disable=SC2329
+curl() { printf '{"permissions":["compute.routers.list","networkconnectivity.hubs.list"]}'; }
+check "held permissions come back one per line" \
+    "$(gcp_permissions_held proj compute.routers.list networkconnectivity.hubs.list | tr '\n' ' ')" \
+    "compute.routers.list networkconnectivity.hubs.list "
+check "a permission the answer omits is not reported as held" \
+    "$(gcp_permissions_held proj compute.routers.list networkconnectivity.hubs.create | tr '\n' ' ')" \
+    "compute.routers.list "
+
+# The answer is a set of exact names, compared the way gcp_name_exists
+# compares: compute.routers.get must not read as held because
+# compute.routers.getIamPolicy is.
+# shellcheck disable=SC2329
+curl() { printf '{"permissions":["compute.routers.getIamPolicy","compute.firewalls.list"]}'; }
+check "a longer permission does not satisfy a shorter one" \
+    "$(gcp_permissions_held proj compute.routers.get compute.firewalls.list | tr '\n' ' ')" \
+    "compute.firewalls.list "
+
+# Holding none of them is an answer. Not being able to ask is not, and
+# the two must not arrive looking the same -- the rule the whole of
+# gcp/lib.sh is built around.
+# shellcheck disable=SC2329
+curl() { printf '{}'; }
+gcp_permissions_held proj compute.routers.get >/dev/null 2>&1
+check "holding nothing is still an answer" "$?" "0"
+# shellcheck disable=SC2329
+curl() { echo "curl: (22) The requested URL returned error: 403" >&2; return 22; }
+gcp_permissions_held proj compute.routers.get >/dev/null 2>&1
+check "a question that could not be asked fails" "$?" "1"
+# shellcheck disable=SC2329
+curl() { printf '{"permissions":[]}'; }
+# shellcheck disable=SC2329
+gcloud() { echo "ERROR: reauth" >&2; return 1; }
+gcp_permissions_held proj compute.routers.get >/dev/null 2>&1
+check "no token means no answer" "$?" "1"
+
+# Every denial is named, not just the one that would have failed first.
+# Learning a role one PERMISSION_DENIED per CI run is the cost this
+# exists to remove.
+# shellcheck disable=SC2329
+gcloud() { printf 'ya29.a0-fake-token'; }
+# shellcheck disable=SC2329
+curl() { printf '{"permissions":["compute.routers.list"]}'; }
+perm_report="$( (gcp_require_permissions proj \
+    compute.routers.list compute.routers.create networkconnectivity.hubs.create) 2>&1 )" || true
+check "the report names every denied permission" \
+    "$(printf '%s' "${perm_report}" | grep -c 'DENIED')" "2"
+check "the report names the granted ones too" \
+    "$(printf '%s' "${perm_report}" | grep -c 'granted')" "1"
+(gcp_require_permissions proj compute.routers.list compute.routers.create) >/dev/null 2>&1
+check "a credential missing a permission does not get to build" "$?" "1"
+# shellcheck disable=SC2329
+curl() { printf '{"permissions":["compute.routers.list","compute.routers.create"]}'; }
+(gcp_require_permissions proj compute.routers.list compute.routers.create) >/dev/null 2>&1
+check "a credential holding all of them proceeds" "$?" "0"
+
+# The estate asks for what its own calls need, so a permission dropped
+# from the list here is a call left unguarded.
+check "the estate list covers creating the hub" \
+    "$(printf '%s\n' "${gcp_estate_permissions[@]}" | grep -Fxc 'networkconnectivity.hubs.create')" "1"
+check "the estate list covers deleting the hub" \
+    "$(printf '%s\n' "${gcp_estate_permissions[@]}" | grep -Fxc 'networkconnectivity.hubs.delete')" "1"
+
+unset -f curl
+
 unset -f gcloud oc
 
 ######################################################################

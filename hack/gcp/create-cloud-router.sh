@@ -61,6 +61,22 @@ info "cluster:  ${infra}"
 info "project:  ${project}"
 info "region:   ${region}"
 info "asn:      ${asn} (the cluster's localASN must differ)"
+info ""
+
+# --- what this credential is allowed to do --------------------------
+#
+# Asked before anything is read or created, and asked of GCP rather than
+# worked out from which call happened to fail first. Measured on
+# 2026-09-14 in CI: the account could list NCC hubs and not create one,
+# so the run died on the first resource with a single PERMISSION_DENIED
+# and no account of the rest of the role. A cluster install per
+# permission is too slow a way to learn one.
+#
+# Reported in full on the way past, so a green run says what it was
+# allowed to do rather than leaving it to be inferred from not failing.
+info "permissions:"
+gcp_require_permissions "${project}" "${gcp_estate_permissions[@]}"
+info ""
 
 # The network and the worker subnet the installer built. Both are read
 # rather than assumed: a cluster can be given a network, and the name

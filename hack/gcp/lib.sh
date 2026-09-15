@@ -109,6 +109,114 @@ gcp_firewall_exists() {
         --format='value(name)'
 }
 
+# The permissions the scripts here need, as IAM names them.
+#
+# This is the CI cluster profile's account in a job and yours at a desk.
+# It is not the operator's: that identity is minted by the cloud
+# credential operator against the list in
+# internal/platform/gcp/credentials.go, and the two are granted by
+# different people in different places. Confusing them costs a day.
+#
+# Derived from the calls below, and refined the only way a GCP role ever
+# is -- by being denied. compute.networks.updatePolicy follows from no
+# single call: attaching a firewall rule or a Cloud Router to a network
+# counts as changing that network's policy, which is why the operator
+# has to ask for it to rewrite router peers.
+#
+# Consumed by the scripts that source this, not here.
+# shellcheck disable=SC2034
+gcp_estate_permissions=(
+    compute.firewalls.create        # create-cloud-router.sh, firewall
+    compute.firewalls.delete        # delete-cloud-router.sh
+    compute.firewalls.list          # gcp_firewall_exists
+    compute.networks.list           # create-cloud-router.sh, the network read
+    compute.networks.updatePolicy   # attaching the rule and the router
+    compute.routers.create          # create-cloud-router.sh
+    compute.routers.delete          # delete-cloud-router.sh
+    compute.routers.get             # write-e2e-profile.sh, via describe
+    compute.routers.list            # gcp_router_exists
+    compute.routers.update          # add-interface, twice
+    compute.subnetworks.list        # create-cloud-router.sh, the subnet read
+    networkconnectivity.hubs.create # create-cloud-router.sh
+    networkconnectivity.hubs.delete # delete-cloud-router.sh
+    networkconnectivity.hubs.list   # gcp_hub_exists
+    networkconnectivity.spokes.list # delete-cloud-router.sh, before the hub goes
+)
+
+# gcp_permissions_held prints which of the named permissions this
+# credential actually holds on the project, one per line.
+#
+# testIamPermissions rather than a policy read: get-iam-policy needs
+# resourcemanager.projects.getIamPolicy, which an account can itself be
+# denied, and answers in roles that would have to be expanded into
+# permissions here. testIamPermissions needs no permission of its own
+# and answers in the same vocabulary the denials use.
+#
+# Over REST because gcloud has no surface for it on a project -- checked
+# against 565.0.0, where `gcloud projects test-iam-permissions` is not a
+# command and `gcloud iam list-testable-permissions` answers a different
+# question: what may be granted on the resource, not what this caller
+# holds. curl is already required by ensure-cli.sh.
+gcp_permissions_held() {
+    local project="$1"; shift
+
+    local token
+    token="$(gcp_query "mint an access token" \
+        gcloud auth print-access-token)" || return 1
+
+    local list
+    printf -v list '"%s",' "$@"
+
+    local answer
+    answer="$(gcp_query "ask GCP which of these $# permissions the credential holds" \
+        curl -fsS --max-time 30 \
+        -H "Authorization: Bearer ${token}" \
+        -H "Content-Type: application/json" \
+        -d "{\"permissions\":[${list%,}]}" \
+        "https://cloudresourcemanager.googleapis.com/v1/projects/${project}:testIamPermissions")" \
+        || return 1
+
+    # Matched as whole quoted names rather than parsed as JSON. The
+    # closing quote is what stops compute.routers.get reading as held
+    # because compute.routers.getIamPolicy is -- the same trap
+    # gcp_name_exists avoids by comparing with grep -Fxq.
+    local p
+    for p in "$@"; do
+        case "${answer}" in *"\"${p}\""*) printf '%s\n' "${p}" ;; esac
+    done
+}
+
+# gcp_require_permissions says what this credential can and cannot do,
+# and stops before anything is built unless it can do all of it.
+#
+# The whole list every time, and reported whether or not it passes. A
+# role learned one PERMISSION_DENIED per CI run costs a cluster install
+# per permission, and the run that found networkconnectivity.hubs.create
+# missing could say nothing about whether anything else was.
+gcp_require_permissions() {
+    local project="$1"; shift
+
+    local held
+    held="$(gcp_permissions_held "${project}" "$@")" \
+        || die "could not ask GCP what this credential is allowed to do" \
+               "Nothing was created."
+
+    local p missing=()
+    for p in "$@"; do
+        if printf '%s\n' "${held}" | grep -Fxq -- "${p}"; then
+            info "  granted  ${p}"
+        else
+            info "  DENIED   ${p}"
+            missing+=("${p}")
+        fi
+    done
+
+    (( ${#missing[@]} == 0 )) || die \
+        "this credential cannot build the GCP estate" \
+        "Denied: ${missing[*]}" \
+        "Nothing was created."
+}
+
 # The Cloud Router's interface addresses are what the router nodes peer
 # with, and what the generated profile has to describe.
 #
