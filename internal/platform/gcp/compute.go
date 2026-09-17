@@ -14,9 +14,14 @@ import (
 	"google.golang.org/api/option"
 )
 
-// NewComputeClient builds a ComputeClient using Application Default Credentials.
-func NewComputeClient(ctx context.Context, project, region string) (ComputeClient, error) {
-	svc, err := compute.NewService(ctx, option.WithScopes(compute.CloudPlatformScope))
+// NewComputeClient builds a ComputeClient from the credential the caller
+// resolved. With none it falls back to the Google libraries' own chain,
+// which works from a desk and not in a pod.
+func NewComputeClient(ctx context.Context, project, region string, opts ...option.ClientOption) (ComputeClient, error) {
+	if len(opts) == 0 {
+		opts = []option.ClientOption{option.WithScopes(compute.CloudPlatformScope)}
+	}
+	svc, err := compute.NewService(ctx, opts...)
 	if err != nil {
 		return nil, err
 	}

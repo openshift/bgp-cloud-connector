@@ -1,61 +1,52 @@
 # shellcheck shell=bash
 #
 # What the prow jobs need and a developer running the same scripts does
-# not. Source this, do not run it.
+# not, minus anything that knows which cloud this is. Source a cloud's
+# own ci.sh rather than this file -- hack/aws/ci.sh, hack/azure/ci.sh --
+# because ci_bootstrap is defined there, in terms of what is here plus
+# the credentials that cloud needs.
 #
-# The job is two steps -- the test, and a teardown that runs whatever
-# the test did -- so both entry points need the same bootstrap and it
-# lives here rather than in whichever one was written first.
+# The job is two steps for every cloud, the test and a teardown that
+# runs whatever the test did, so both entry points need the same
+# bootstrap and it lives here rather than in whichever one was written
+# first.
 
-# shellcheck source=hack/aws/lib.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../aws" && pwd)/lib.sh"
+# shellcheck source=hack/lib/common.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 ci_workdir=""
 
-# Put a usable aws CLI on PATH. hack/aws/ensure-cli.sh decides whether
-# that means the one already installed or a download, and is also what
-# `make bin/aws` runs, so there is one implementation of it.
+# In prow the install leaves a kubeconfig behind in SHARED_DIR. Run
+# outside prow and whatever is already in the environment is used
+# instead, which is what makes these testable without waiting forty
+# minutes for a cluster.
 #
-# Installing into the repository's bin rather than a scratch directory
-# is what keeps the sequencer's two children sharing a single download
-# instead of fetching sixty megabytes each.
-ci_ensure_aws_cli() {
-    local dir
-    dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../aws" && pwd)/ensure-cli.sh"
-    dir="$("${dir}")" || die "could not provide an aws CLI"
-    export PATH="${dir}:${PATH}"
+# A SHARED_DIR carrying no kubeconfig is a failure rather than a reason
+# to fall back: it means the install step did not leave one, and
+# carrying on would run against whatever cluster the environment
+# happens to point at, which in a CI job is none and on a desk is
+# whichever one you last used.
+ci_use_shared_kubeconfig() {
+    [[ -n "${SHARED_DIR:-}" ]] || return 0
+    [[ -f "${SHARED_DIR}/kubeconfig" ]] \
+        || die "SHARED_DIR is set but has no kubeconfig" \
+               "Looked in ${SHARED_DIR}"
+    export KUBECONFIG="${SHARED_DIR}/kubeconfig"
 }
 
-# In prow the cluster profile supplies the credentials and the install
-# leaves a kubeconfig behind. Run outside prow and whatever is already
-# in the environment is used instead, which is what makes these testable
-# without waiting forty minutes for a cluster.
+# Scratch space only. Nothing that must outlive the run goes in it, and
+# nothing created in the cloud is tracked there.
 #
-# The caller owns the trap that removes the workdir: these scripts have
-# their own cleanup to order it against, and a trap set here would be
-# replaced by theirs without either of us noticing.
-#
-# The workdir is scratch space only. Nothing that must outlive the run
-# goes in it, and nothing created in the cloud is tracked there.
-ci_bootstrap() {
-    if [[ -n "${CLUSTER_PROFILE_DIR:-}" ]]; then
-        [[ -f "${CLUSTER_PROFILE_DIR}/.awscred" ]] \
-            || die "CLUSTER_PROFILE_DIR is set but has no .awscred" \
-                   "Looked in ${CLUSTER_PROFILE_DIR}"
-        export AWS_SHARED_CREDENTIALS_FILE="${CLUSTER_PROFILE_DIR}/.awscred"
-    fi
-
-    if [[ -n "${SHARED_DIR:-}" ]]; then
-        [[ -f "${SHARED_DIR}/kubeconfig" ]] \
-            || die "SHARED_DIR is set but has no kubeconfig" \
-                   "Looked in ${SHARED_DIR}"
-        export KUBECONFIG="${SHARED_DIR}/kubeconfig"
-    fi
-
+# The caller owns the trap that removes it: these scripts have their own
+# cleanup to order it against, and a trap set here would be replaced by
+# theirs without either of us noticing.
+ci_make_workdir() {
     ci_workdir="$(mktemp -d)"
-    ci_ensure_aws_cli
 }
 
+# Returns 0 even with nothing to do, because every caller runs this from
+# an EXIT trap, where a non-zero status replaces the script's own and
+# turns a clean run into a failure.
 ci_remove_workdir() {
     [[ -n "${ci_workdir}" ]] && rm -rf "${ci_workdir}"
     return 0

@@ -1,25 +1,24 @@
 #!/usr/bin/env bash
 #
-# Entry point for the e2e-aws prow job: run the test, capture what it
+# Entry point for the e2e-gcp prow job: run the test, capture what it
 # said, then tear down whatever is there. Always.
 #
-#   hack/ci-e2e-aws.sh
+#   hack/ci-e2e-gcp.sh
 #
 # The sequencing is ours rather than ci-operator's for two reasons.
 #
 # A test that specifies post steps overrides the workflow's post rather
 # than adding to it -- see mergeWorkflow in ci-tools' registry resolver
-# -- so a teardown expressed that way would replace ipi-aws-post and
-# take the cluster deprovision with it. Leaking a route server is the
-# problem we are solving; leaking the whole cluster would be a worse
-# one.
+# -- so a teardown expressed that way would replace ipi-gcp-post and
+# take the cluster deprovision with it. Leaking an NCC hub is the
+# problem we are solving; leaking the whole cluster would be worse.
 #
-# And the order has to be ours anyway. Route server endpoints sit in the
-# subnets the installer wants to delete, so they have to go before the
-# cluster is deprovisioned, not after.
+# And the order has to be ours anyway. The hub refuses to go while the
+# operator's spoke is attached, so the CRs have to be removed before the
+# estate, and the estate before the cluster is deprovisioned.
 #
-# The two halves know nothing about each other. ci-e2e-aws-run.sh
-# creates and never removes, ci-e2e-aws-teardown.sh removes and never
+# The two halves know nothing about each other. ci-e2e-gcp-run.sh
+# creates and never removes, ci-e2e-gcp-teardown.sh removes and never
 # creates, and this file is the only place that says "always".
 
 set -o nounset
@@ -28,8 +27,8 @@ set -o pipefail
 # the entire job of this file, and errexit would exit before it.
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=hack/aws/ci.sh
-source "${here}/aws/ci.sh"
+# shellcheck source=hack/gcp/ci.sh
+source "${here}/gcp/ci.sh"
 
 teardown_done=false
 
@@ -42,43 +41,42 @@ teardown_done=false
 ci_bootstrap
 trap ci_remove_workdir EXIT
 
-require_cmd aws oc setsid
+require_cmd gcloud oc
 require_cluster
-require_platform AWS
-require_aws
-aws_cluster_facts
+require_platform GCP
+gcp_cluster_facts
 
 # The teardown is idempotent and treats "nothing there" as success, so
-# running it after a test that failed before creating anything costs one
-# API call and reports done. That is what lets this be unconditional
-# rather than conditional on how far the test got.
+# running it after a test that failed before creating anything costs a
+# couple of API calls and reports done. That is what lets this be
+# unconditional rather than conditional on how far the test got.
 run_teardown() {
     if [[ "${teardown_done}" == true ]]; then
         return 0
     fi
     teardown_done=true
     info "--- teardown ---"
-    INFRA="${infra}" AWS_REGION="${region}" "${here}/ci-e2e-aws-teardown.sh"
+    INFRA="${infra}" GCP_PROJECT="${project}" GCP_REGION="${region}" \
+        "${here}/ci-e2e-gcp-teardown.sh"
 }
 
 # Prow signals rather than exits, and bash runs no EXIT trap when an
 # untrapped signal kills the shell. A trap is not a guarantee -- once
 # the grace period is up the next signal is KILL and nothing runs -- but
-# it converts the ordinary cancellation into a clean teardown, and the
-# resources bill by the hour.
+# it converts the ordinary cancellation into a clean teardown, and an
+# NCC hub left behind blocks nothing but bills and confuses the next run.
 test_pid=0
 
 # Invoked from the traps below.
 # shellcheck disable=SC2329
 on_signal() {
     warn "--- caught SIG$1, tearing down before exiting ---"
-    # The whole test group, not just the pid we started. ci-e2e-aws-run.sh
-    # is a sequence of other scripts, and killing only it orphans whichever
-    # one is running rather than stopping it: the teardown then deletes an
-    # estate that a create it cannot see is still adding to. Observed --
-    # six endpoints and seven propagations were created after the teardown
-    # had begun. setsid put the test in its own group so this signal
-    # reaches all of it and none of us.
+    # The whole test group, not just the pid we started.
+    # ci-e2e-gcp-run.sh is a sequence of other scripts, and killing only
+    # it orphans whichever one is running rather than stopping it: the
+    # teardown then deletes an estate that a create it cannot see is
+    # still adding to. The test is started in its own process group so
+    # this signal reaches all of it and none of us.
     if (( test_pid > 0 )); then
         kill -TERM -"${test_pid}" 2>/dev/null || true
         wait "${test_pid}" 2>/dev/null || true
@@ -95,19 +93,27 @@ info "--- test ---"
 test_rc=0
 # Backgrounded, not because anything runs concurrently, but because bash
 # defers a trap until the foreground command finishes. Signalled at this
-# pid alone, which is how a cleanup that knows only the pid it started
-# does it, a foreground test runs to completion first and the whole
+# pid alone, a foreground test runs to completion first and the whole
 # grace period is spent before the teardown begins. Waiting on a
 # background child is interruptible, so the trap fires when the signal
 # arrives and hands the remaining time to the teardown.
 #
-# In its own process group, so on_signal can stop the test and everything
-# it has spawned without stopping this script, which still has the
-# teardown to run. setsid is not a group leader when the shell starts it
-# without job control, so the exec succeeds and the new group id is the
-# pid recorded here.
-setsid "${here}/ci-e2e-aws-run.sh" &
+# In its own process group, so on_signal can stop the test and
+# everything it spawned without stopping this script, which still has
+# the teardown to run.
+#
+# Job control rather than setsid, which hack/ci-e2e-aws.sh still uses.
+# setsid forks when its caller is already a process group leader, and
+# then $! is the pid of a parent that exits at once: wait returns
+# immediately while the test runs on, and kill -TERM -$! answers "no
+# such process group". It takes monitor mode to reach, which neither
+# prow nor a shell prompt turns on for a script, so it is a sharp edge
+# rather than a live bug -- but job control costs nothing and cannot
+# fail that way.
+set -m
+"${here}/ci-e2e-gcp-run.sh" &
 test_pid=$!
+set +m
 wait "${test_pid}" || test_rc=$?
 test_pid=0
 if (( test_rc == 0 )); then

@@ -1,3 +1,12 @@
 # More info: https://docs.docker.com/engine/reference/builder/#dockerignore-file
 # Ignore build and test binaries.
 bin/
+
+# Git metadata is not a build input. The binary is built from a file
+# list rather than a package path, so go stamps no VCS information
+# whatever is here -- `go version -m` reports the build as
+# command-line-arguments. Keeping it out also lets the build run from a
+# git worktree, where .git is a file naming a directory outside the
+# build context: copied in, it points nowhere, and every git call in
+# the build fails with "not a git repository".
+.git

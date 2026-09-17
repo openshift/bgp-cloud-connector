@@ -8,7 +8,6 @@ WORKDIR /workspace
 # when trying to write output.
 RUN ls .
 COPY . /workspace
-RUN git config --global --add safe.directory /workspace
 # Build
 RUN make build-operator
 

@@ -147,6 +147,18 @@ wait_until() {
     done
 }
 
+# One field per line, empties dropped. `aws --output text` and
+# `az -o tsv` both separate with tabs and print a bare newline for an
+# empty result, and the obvious `| grep .` filter reports "no match" as
+# a failure that then has to be swallowed. Word splitting already drops
+# empty fields, so doing it here leaves no status to discard.
+print_fields() {
+    local field
+    for field in $1; do
+        printf '%s\n' "${field}"
+    done
+}
+
 # Retry a command that fails for reasons that are nobody's fault, with
 # a fixed delay between attempts. For transient outside-world failures
 # only: anything whose failure means the input was wrong will just fail
