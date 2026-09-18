@@ -23,6 +23,7 @@ import (
 const (
 	ConditionNetworkCreated             = "NetworkCreated"
 	ConditionRouteAdvertisementsCreated = "RouteAdvertisementsCreated"
+	ConditionVMHostRoutesConfigured     = "VMHostRoutesConfigured"
 )
 
 // NetworkConfig defines a network to be created and advertised via BGP.
@@ -71,8 +72,8 @@ type BGPRoutingStatus struct {
 // +operator-sdk:csv:customresourcedefinitions:displayName="BGP Routing"
 
 // BGPRouting declares a single network to advertise via BGP.
-// Users must pre-create and label namespaces; the operator manages only the
-// ClusterUserDefinedNetwork and RouteAdvertisements.
+// Users must pre-create and label namespaces; the operator manages the
+// ClusterUserDefinedNetwork, RouteAdvertisements, and VM host routes.
 type BGPRouting struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

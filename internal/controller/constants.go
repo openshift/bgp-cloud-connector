@@ -30,6 +30,7 @@ const (
 	// Deployment says otherwise through POD_NAMESPACE.
 	DefaultOperatorNamespace    = "openshift-bgp-cloud-connector"
 	FRRConfigNamePrefix         = "bgp-cc-"
+	VMHostRouteNamePrefix       = "bgp-cc-vm-"
 	ClusterUDNNamePrefix        = "cluster-udn-"
 	RouteAdvertisementName      = "bgp-cc-route-advertisements"
 	FRRProviderName             = "FRR"
@@ -41,13 +42,16 @@ const (
 	// nothing about where the block sits relative to the generated
 	// configuration: frr-k8s appends every raw block after the one it renders
 	// from the type-safe API, whatever the priority.
-	RawFRRConfigPriority = 20
+	RawFRRConfigPriority  = 20
+	DefaultBFDProfileName = "default"
 
-	LabelManagedBy    = "app.kubernetes.io/managed-by"
-	LabelManagedByVal = "bgp-cloud-connector"
-	LabelClusterUDN   = "cluster-udn"
-	LabelAdvertise    = "advertise"
-	LabelPrimaryUDN   = "k8s.ovn.org/primary-user-defined-network"
+	LabelManagedBy             = "app.kubernetes.io/managed-by"
+	LabelManagedByVal          = "bgp-cloud-connector"
+	LabelManagedByVMHostRoutes = "bgp-cloud-connector-vm-host-routes"
+	AnnotationBGPRouting       = "networking.openshift.io/bgprouting"
+	LabelClusterUDN            = "cluster-udn"
+	LabelAdvertise             = "advertise"
+	LabelPrimaryUDN            = "k8s.ovn.org/primary-user-defined-network"
 )
 
 // Condition reason constants
@@ -69,6 +73,7 @@ const (
 	ReasonNamespaceNotReady    = "NamespaceNotReady"
 	ReasonCUDNFailed           = "CUDNFailed"
 	ReasonRAFailed             = "RAFailed"
+	ReasonVMHostRoutesFailed   = "VMHostRoutesFailed"
 
 	// Success / informational reasons
 	ReasonPatched                 = "Patched"
@@ -78,6 +83,7 @@ const (
 	ReasonApplied                 = "Applied"
 	ReasonReconciled              = "Reconciled"
 	ReasonCreated                 = "Created"
+	ReasonWaitingForVMIPs         = "WaitingForVMAddresses"
 	ReasonRoutingCRsExist         = "RoutingCRsExist"
 	ReasonExternalFRRConfigsExist = "ExternalFRRConfigsExist"
 )
@@ -111,5 +117,8 @@ var (
 	}
 	RouteAdvertisementsGVK = schema.GroupVersionKind{
 		Group: "k8s.ovn.org", Version: "v1", Kind: "RouteAdvertisements",
+	}
+	VirtualMachineInstanceGVK = schema.GroupVersionKind{
+		Group: "kubevirt.io", Version: "v1", Kind: "VirtualMachineInstance",
 	}
 )

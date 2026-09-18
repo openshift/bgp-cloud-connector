@@ -23,6 +23,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -50,6 +51,10 @@ func routingTestScheme() *runtime.Scheme {
 	s.AddKnownTypeWithName(ClusterUDNGVK.GroupVersion().WithKind("ClusterUserDefinedNetworkList"), &unstructured.UnstructuredList{})
 	s.AddKnownTypeWithName(RouteAdvertisementsGVK.GroupVersion().WithKind("RouteAdvertisements"), &unstructured.Unstructured{})
 	s.AddKnownTypeWithName(RouteAdvertisementsGVK.GroupVersion().WithKind("RouteAdvertisementsList"), &unstructured.UnstructuredList{})
+	s.AddKnownTypeWithName(FRRConfigurationGVK.GroupVersion().WithKind("FRRConfiguration"), &unstructured.Unstructured{})
+	s.AddKnownTypeWithName(FRRConfigurationGVK.GroupVersion().WithKind("FRRConfigurationList"), &unstructured.UnstructuredList{})
+	s.AddKnownTypeWithName(VirtualMachineInstanceGVK, &unstructured.Unstructured{})
+	s.AddKnownTypeWithName(VirtualMachineInstanceGVK.GroupVersion().WithKind("VirtualMachineInstanceList"), &unstructured.UnstructuredList{})
 	return s
 }
 
@@ -134,8 +139,8 @@ func TestRoutingReconcile_FullReconcile(t *testing.T) {
 	if updated.Status.Phase != networkingapi.PhaseReady {
 		t.Errorf("expected Ready, got %s", updated.Status.Phase)
 	}
-	if len(updated.Status.Conditions) != 2 {
-		t.Errorf("expected 2 conditions, got %d", len(updated.Status.Conditions))
+	if len(updated.Status.Conditions) != 3 {
+		t.Errorf("expected 3 conditions, got %d", len(updated.Status.Conditions))
 	}
 
 	// Verify ClusterUDN created
@@ -150,6 +155,75 @@ func TestRoutingReconcile_FullReconcile(t *testing.T) {
 	ra.SetGroupVersionKind(RouteAdvertisementsGVK)
 	if err := c.Get(context.Background(), types.NamespacedName{Name: RouteAdvertisementName}, ra); err != nil {
 		t.Fatalf("RouteAdvertisements not created: %v", err)
+	}
+	expressions, _, _ := unstructured.NestedSlice(ra.Object, "spec", "frrConfigurationSelector", "matchExpressions")
+	if len(expressions) != 1 {
+		t.Fatalf("FRR selector expressions = %v, want one expression", expressions)
+	}
+	expression, ok := expressions[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("FRR selector expression has type %T, want map", expressions[0])
+	}
+	if expression["key"] != LabelManagedBy || expression["operator"] != "NotIn" {
+		t.Errorf("FRR selector expression = %v, want managed-by NotIn", expression)
+	}
+	values, ok := expression["values"].([]interface{})
+	if !ok || len(values) != 1 || values[0] != LabelManagedByVMHostRoutes {
+		t.Errorf("FRR selector values = %v, want [%s]", expression["values"], LabelManagedByVMHostRoutes)
+	}
+}
+
+func TestRoutingReconcile_WaitsForVMIAddress(t *testing.T) {
+	routing := newTestBGPRouting()
+	routing.Finalizers = []string{RoutingFinalizerName}
+	config := newReadyBGPCloudConfiguration()
+	config.Spec.BGP.PeerGroups[0].NodeSelector = nil
+	node := testRouterNode("worker-a", "a")
+	ns := testVMNamespace()
+	vmi := testVMI("vms", "vm", node.Name)
+
+	s := routingTestScheme()
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(routing, config, node, ns, vmi).
+		WithStatusSubresource(routing, config).
+		Build()
+	r := &BGPRoutingReconciler{Client: c, Scheme: s}
+
+	result, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: routing.Name}})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.RequeueAfter != 5*time.Second {
+		t.Fatalf("requeue = %v, want 5s", result.RequeueAfter)
+	}
+	updated := &networkingapi.BGPRouting{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(routing), updated); err != nil {
+		t.Fatalf("get BGPRouting: %v", err)
+	}
+	if updated.Status.Phase != networkingapi.PhaseConfiguring {
+		t.Fatalf("phase = %s, want Configuring", updated.Status.Phase)
+	}
+	condition := meta.FindStatusCondition(updated.Status.Conditions, networkingapi.ConditionVMHostRoutesConfigured)
+	if condition == nil || condition.Status != metav1.ConditionUnknown || condition.Reason != ReasonWaitingForVMIPs {
+		t.Fatalf("VM host-route condition = %#v, want Unknown/%s", condition, ReasonWaitingForVMIPs)
+	}
+}
+
+func TestMapWorkloadToRoutingSelectsOnlyNamespaceNetwork(t *testing.T) {
+	prod := newTestBGPRouting()
+	staging := newTestBGPRouting()
+	staging.Name = "staging"
+	staging.Spec.Network.Name = "staging"
+	namespace := testVMNamespace()
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "virt-launcher", Namespace: namespace.Name}}
+
+	s := routingTestScheme()
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(prod, staging, namespace).Build()
+	r := &BGPRoutingReconciler{Client: c, Scheme: s}
+
+	requests := r.mapWorkloadToRouting(context.Background(), pod)
+	if len(requests) != 1 || requests[0].Name != prod.Name {
+		t.Fatalf("requests = %v, want only %q", requests, prod.Name)
 	}
 }
 

@@ -33,8 +33,8 @@ spec:
       openAPIV3Schema:
         description: |-
           BGPRouting declares a single network to advertise via BGP.
-          Users must pre-create and label namespaces; the operator manages only the
-          ClusterUserDefinedNetwork and RouteAdvertisements.
+          Users must pre-create and label namespaces; the operator manages the
+          ClusterUserDefinedNetwork, RouteAdvertisements, and VM host routes.
         properties:
           apiVersion:
             description: |-

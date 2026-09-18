@@ -161,7 +161,7 @@ func ensureSingleFRRConfiguration(
 			neighbor["ebgpMultiHop"] = true
 		}
 		if config.Spec.BGP.LivenessDetection == networkingapi.LivenessDetectionBFD {
-			neighbor["bfdProfile"] = "default"
+			neighbor["bfdProfile"] = DefaultBFDProfileName
 		}
 		neighbors = append(neighbors, neighbor)
 	}
@@ -178,7 +178,7 @@ func ensureSingleFRRConfiguration(
 	if config.Spec.BGP.LivenessDetection == networkingapi.LivenessDetectionBFD {
 		bgpSpec["bfdProfiles"] = []interface{}{
 			map[string]interface{}{
-				"name":             "default",
+				"name":             DefaultBFDProfileName,
 				"receiveInterval":  int64(300),
 				"transmitInterval": int64(300),
 				"detectMultiplier": int64(3),
