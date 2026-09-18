@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trusted-ca
+  labels:
+    # Requests the Cluster Network Operator to populate ca-bundle.crt with the
+    # system CAs merged with the cluster-wide proxy's trusted CA bundle.
+    config.openshift.io/inject-trusted-cabundle: "true"

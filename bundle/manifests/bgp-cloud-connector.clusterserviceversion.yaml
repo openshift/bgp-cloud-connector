@@ -46,13 +46,13 @@ metadata:
     capabilities: Basic Install
     categories: Networking
     containerImage: controller:latest
-    createdAt: "2026-09-17T09:00:38Z"
+    createdAt: "2026-09-18T15:28:31Z"
     description: Automates L3 direct routing between CUDN Pod networks and external
       networks via BGP on OpenShift. Cloud platform aware — auto-discovers BGP infrastructure
       on AWS (VPC Route Server) and works on-premise with explicit configuration.
     features.operators.openshift.io/disconnected: "true"
     features.operators.openshift.io/fips-compliant: "false"
-    features.operators.openshift.io/proxy-aware: "false"
+    features.operators.openshift.io/proxy-aware: "true"
     features.operators.openshift.io/tls-profiles: "false"
     features.operators.openshift.io/token-auth-aws: "true"
     features.operators.openshift.io/token-auth-azure: "false"
@@ -282,6 +282,10 @@ spec:
                   readOnly: true
                 - mountPath: /tmp
                   name: tmp
+                - mountPath: /etc/pki/tls/certs/proxy-ca-bundle.crt
+                  name: trusted-ca
+                  readOnly: true
+                  subPath: ca-bundle.crt
                 - mountPath: /var/run/secrets/serving-cert
                   name: metrics-cert
                   readOnly: true
@@ -294,6 +298,9 @@ spec:
               volumes:
               - emptyDir: {}
                 name: tmp
+              - configMap:
+                  name: openshift-bgp-cloud-connector-trusted-ca
+                name: trusted-ca
               - name: bound-sa-token
                 projected:
                   sources:
@@ -337,6 +344,14 @@ spec:
           verbs:
           - create
           - patch
+        - apiGroups:
+          - ""
+          resourceNames:
+          - openshift-bgp-cloud-connector-trusted-ca
+          resources:
+          - configmaps
+          verbs:
+          - get
         - apiGroups:
           - ""
           resourceNames:
