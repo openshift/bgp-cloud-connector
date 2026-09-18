@@ -2,6 +2,7 @@ package gcp
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/openshift/bgp-cloud-connector/internal/platform"
@@ -11,6 +12,7 @@ import (
 type recordingCompute struct {
 	topology       *CloudRouterTopology
 	reconcilePeers int
+	clearPeers     int
 }
 
 func (c *recordingCompute) EnsureCanIPForward(context.Context, RouterNode) (bool, error) {
@@ -31,6 +33,7 @@ func (c *recordingCompute) ReconcilePeers(context.Context, string, string, []Rou
 }
 
 func (c *recordingCompute) ClearPeers(context.Context, string, string) (bool, error) {
+	c.clearPeers++
 	return false, nil
 }
 
@@ -128,5 +131,69 @@ func TestReconcileNodes_ShrunkNodeListStillReconciles(t *testing.T) {
 	}
 	if len(ncc.deleted) != 1 || ncc.deleted[0] != "cluster-bgp-spoke-1" {
 		t.Errorf("deleted spokes %v, want [cluster-bgp-spoke-1]: the second spoke is now surplus", ncc.deleted)
+	}
+}
+
+// TestDiscoverEndpoints_BuildsOneGroupPerRouter pins that every Cloud Router
+// interface becomes a neighbor in a single peer group. Unlike AWS there is no
+// per-zone split, so one group with no node selector covers every router node.
+func TestDiscoverEndpoints_BuildsOneGroupPerRouter(t *testing.T) {
+	top := testTopology()
+	p := testPlatform(&recordingCompute{topology: top}, &recordingNCC{})
+
+	result, err := p.DiscoverEndpoints(context.Background())
+	if err != nil {
+		t.Fatalf("DiscoverEndpoints: %v", err)
+	}
+	if len(result.PeerGroups) != 1 {
+		t.Fatalf("got %d peer groups, want 1", len(result.PeerGroups))
+	}
+	group := result.PeerGroups[0]
+	if len(group.Neighbors) != len(top.InterfaceIPs) {
+		t.Fatalf("got %d neighbors, want %d", len(group.Neighbors), len(top.InterfaceIPs))
+	}
+	for i, n := range group.Neighbors {
+		if n.Address != top.InterfaceIPs[i] {
+			t.Errorf("neighbor %d address = %q, want %q", i, n.Address, top.InterfaceIPs[i])
+		}
+		if n.ASN != top.CloudRouterASN {
+			t.Errorf("neighbor %d ASN = %d, want %d", i, n.ASN, top.CloudRouterASN)
+		}
+	}
+	// The structured neighbor API cannot express disable-connected-check, without
+	// which FRR rejects the Cloud Router interface as unreachable and no session
+	// comes up, so it has to ride along as raw config.
+	if !strings.Contains(group.RawFRRConfig, "disable-connected-check") {
+		t.Errorf("raw FRR config is missing disable-connected-check:\n%s", group.RawFRRConfig)
+	}
+}
+
+// TestCleanup_ClearsPeersAndDeletesEverySpoke pins that Cleanup, which runs on
+// deletion where the intent to release the estate is unambiguous, removes the
+// Cloud Router peers and every spoke the prefix owns.
+func TestCleanup_ClearsPeersAndDeletesEverySpoke(t *testing.T) {
+	compute := &recordingCompute{topology: testTopology()}
+	ncc := &recordingNCC{existing: []string{"cluster-bgp-spoke-0", "cluster-bgp-spoke-1"}}
+
+	if err := testPlatform(compute, ncc).Cleanup(context.Background()); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	if compute.clearPeers != 1 {
+		t.Errorf("ClearPeers called %d times, want 1", compute.clearPeers)
+	}
+	if len(ncc.deleted) != 2 {
+		t.Errorf("deleted spokes %v, want both existing spokes released", ncc.deleted)
+	}
+}
+
+func TestRawFRRConfig_EmitsASNAndDisableConnectedCheck(t *testing.T) {
+	cfg := rawFRRConfig(65001, []string{"169.254.1.1", "169.254.1.5"})
+	if !strings.Contains(cfg, "router bgp 65001") {
+		t.Errorf("config is missing the local ASN line:\n%s", cfg)
+	}
+	for _, ip := range []string{"169.254.1.1", "169.254.1.5"} {
+		if !strings.Contains(cfg, "neighbor "+ip+" disable-connected-check") {
+			t.Errorf("config is missing disable-connected-check for %s:\n%s", ip, cfg)
+		}
 	}
 }
