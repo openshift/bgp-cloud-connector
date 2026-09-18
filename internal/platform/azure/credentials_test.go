@@ -42,6 +42,20 @@ import (
 
 const testNamespace = "openshift-bgp-cloud-connector"
 
+// testOwner stands in for the singleton BGPCloudConfiguration the
+// controller passes in, which is the owner every request this operator
+// makes is expected to carry.
+func testOwner() metav1.OwnerReference {
+	controller := true
+	return metav1.OwnerReference{
+		APIVersion: "networking.openshift.io/v1beta1",
+		Kind:       "BGPCloudConfiguration",
+		Name:       "cluster",
+		UID:        "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
+		Controller: &controller,
+	}
+}
+
 func credentialsTestScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
@@ -167,7 +181,7 @@ func TestResolveCredentials_AmbientWinsWhenThereIsNoSecret(t *testing.T) {
 	withValidation(t, nil)
 	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).Build()
 
-	cred, err := ResolveCredentials(context.Background(), c, testNamespace)
+	cred, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
 	if err != nil {
 		t.Fatalf("ResolveCredentials: %v", err)
 	}
@@ -189,7 +203,7 @@ func TestResolveCredentials_CreatesRequestAndWaits(t *testing.T) {
 	withAmbient(t, nil)
 	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).Build()
 
-	_, err := ResolveCredentials(context.Background(), c, testNamespace)
+	_, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
 	if !errors.Is(err, platform.ErrCredentialsPending) {
 		t.Fatalf("ResolveCredentials: got %v, want %v", err, platform.ErrCredentialsPending)
 	}
@@ -221,7 +235,7 @@ func TestResolveCredentials_CreatesRequestAndWaits(t *testing.T) {
 func TestResolveCredentials_RequestsOnlyThePermissionsItUses(t *testing.T) {
 	withAmbient(t, nil)
 	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).Build()
-	_, err := ResolveCredentials(context.Background(), c, testNamespace)
+	_, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
 	if !errors.Is(err, platform.ErrCredentialsPending) {
 		t.Fatalf("ResolveCredentials: got %v, want %v", err, platform.ErrCredentialsPending)
 	}
@@ -260,7 +274,7 @@ func TestResolveCredentials_MintedSecretNamesAClientSecretCredential(t *testing.
 		WithObjects(mintedSecret()).
 		Build()
 
-	cred, err := ResolveCredentials(context.Background(), c, testNamespace)
+	cred, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
 	if err != nil {
 		t.Fatalf("ResolveCredentials: %v", err)
 	}
@@ -280,7 +294,7 @@ func TestResolveCredentials_FederatedSecretNamesAWorkloadIdentityCredential(t *t
 		WithObjects(federatedSecret(tokenFile(t))).
 		Build()
 
-	cred, err := ResolveCredentials(context.Background(), c, testNamespace)
+	cred, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
 	if err != nil {
 		t.Fatalf("ResolveCredentials: %v", err)
 	}
@@ -300,7 +314,7 @@ func TestResolveCredentials_SecretWinsOverAmbient(t *testing.T) {
 		WithObjects(mintedSecret()).
 		Build()
 
-	cred, err := ResolveCredentials(context.Background(), c, testNamespace)
+	cred, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
 	if err != nil {
 		t.Fatalf("ResolveCredentials: %v", err)
 	}
@@ -321,7 +335,7 @@ func TestResolveCredentials_RotationTakesEffect(t *testing.T) {
 		WithObjects(mintedSecret()).
 		Build()
 
-	first, err := ResolveCredentials(context.Background(), c, testNamespace)
+	first, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
 	if err != nil {
 		t.Fatalf("first resolve: %v", err)
 	}
@@ -336,7 +350,7 @@ func TestResolveCredentials_RotationTakesEffect(t *testing.T) {
 		t.Fatalf("writing the rotated secret: %v", err)
 	}
 
-	second, err := ResolveCredentials(context.Background(), c, testNamespace)
+	second, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
 	if err != nil {
 		t.Fatalf("second resolve: %v", err)
 	}
@@ -356,7 +370,7 @@ func TestResolveCredentials_SecretMissingClientIDIsAnError(t *testing.T) {
 		WithObjects(secret).
 		Build()
 
-	_, err := ResolveCredentials(context.Background(), c, testNamespace)
+	_, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
 	if err == nil {
 		t.Fatal("ResolveCredentials accepted a secret with no azure_client_id")
 	}
@@ -381,7 +395,7 @@ func TestResolveCredentials_SecretWithNoWayToAuthenticate(t *testing.T) {
 		WithObjects(secret).
 		Build()
 
-	_, err := ResolveCredentials(context.Background(), c, testNamespace)
+	_, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
 	if err == nil {
 		t.Fatal("ResolveCredentials accepted a secret carrying no means of authentication")
 	}
@@ -406,7 +420,7 @@ func TestResolveCredentials_RefusedTokenIsACredentialError(t *testing.T) {
 		WithObjects(mintedSecret()).
 		Build()
 
-	_, err := ResolveCredentials(context.Background(), c, testNamespace)
+	_, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
 	var credErr *platform.CredentialError
 	if !errors.As(err, &credErr) {
 		t.Fatalf("ResolveCredentials: got %v, want a *platform.CredentialError", err)
@@ -425,7 +439,7 @@ func TestResolveCredentials_UpdatesADriftedRequest(t *testing.T) {
 		WithScheme(credentialsTestScheme(t)).
 		WithObjects(driftedRequest()).
 		Build()
-	_, err := ResolveCredentials(context.Background(), c, testNamespace)
+	_, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
 	if !errors.Is(err, platform.ErrCredentialsPending) {
 		t.Fatalf("ResolveCredentials: got %v, want %v", err, platform.ErrCredentialsPending)
 	}
@@ -451,7 +465,7 @@ func TestResolveCredentials_UpdatesADriftedRequestWithTheSecretInPlace(t *testin
 		WithObjects(driftedRequest(), mintedSecret()).
 		Build()
 
-	cred, err := ResolveCredentials(context.Background(), c, testNamespace)
+	cred, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
 	if err != nil {
 		t.Fatalf("ResolveCredentials: %v", err)
 	}
@@ -466,5 +480,47 @@ func TestResolveCredentials_UpdatesADriftedRequestWithTheSecretInPlace(t *testin
 	}
 	if len(got) != 6 {
 		t.Errorf("permissions = %v, want the full six restored", got)
+	}
+}
+
+// The request must name the configuration as its owner, so that
+// deleting the configuration takes the request with it and, on a
+// cluster that mints, the identity CCO made for it. Without an owner
+// the object outlives everything that referred to it.
+func TestResolveCredentials_RequestIsOwnedByTheConfiguration(t *testing.T) {
+	withAmbient(t, nil)
+
+	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).Build()
+	if _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner()); !errors.Is(err, platform.ErrCredentialsPending) {
+		t.Fatalf("ResolveCredentials: got %v, want %v", err, platform.ErrCredentialsPending)
+	}
+
+	refs := getCredentialsRequest(t, c).GetOwnerReferences()
+	if len(refs) != 1 {
+		t.Fatalf("ownerReferences = %v, want exactly one", refs)
+	}
+	if got, want := refs[0], testOwner(); got.APIVersion != want.APIVersion ||
+		got.Kind != want.Kind || got.Name != want.Name || got.UID != want.UID {
+		t.Errorf("ownerReference = %+v, want %+v", got, want)
+	}
+}
+
+// A request made by an earlier release has no owner, and there is
+// nothing else in the system that will ever give it one. Reconciling
+// has to adopt it, or the fix only reaches clusters installed after it.
+func TestResolveCredentials_ExistingRequestIsAdopted(t *testing.T) {
+	withAmbient(t, nil)
+
+	unowned := desiredCredentialsRequest(testNamespace, metav1.OwnerReference{})
+	unowned.SetOwnerReferences(nil)
+
+	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).WithObjects(unowned).Build()
+	if _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner()); !errors.Is(err, platform.ErrCredentialsPending) {
+		t.Fatalf("ResolveCredentials: got %v, want %v", err, platform.ErrCredentialsPending)
+	}
+
+	refs := getCredentialsRequest(t, c).GetOwnerReferences()
+	if len(refs) != 1 || refs[0].UID != testOwner().UID {
+		t.Errorf("ownerReferences = %v, want the configuration adopted", refs)
 	}
 }

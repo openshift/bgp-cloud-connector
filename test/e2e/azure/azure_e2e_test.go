@@ -32,6 +32,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	networkingapi "github.com/openshift/bgp-cloud-connector/api/v1beta1"
+	azureplatform "github.com/openshift/bgp-cloud-connector/internal/platform/azure"
+	e2e "github.com/openshift/bgp-cloud-connector/test/e2e"
 )
 
 const (
@@ -355,6 +357,30 @@ var _ = Describe("Azure E2E", Ordered, func() {
 	// ---------------------------------------------------------------
 	Context("E2E-AZURE-05: Deletion cleanup", func() {
 		It("should block config deletion while routing exists, then remove every peering", func(ctx context.Context) {
+			By("reading the config and the CredentialsRequest it should own")
+			current := &networkingapi.BGPCloudConfiguration{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: configCR.Name}, current)).To(Succeed())
+
+			credentialsRequest := &unstructured.Unstructured{}
+			credentialsRequest.SetGroupVersionKind(azureplatform.CredentialsRequestGVK)
+			err := k8sClient.Get(ctx, types.NamespacedName{
+				Name:      azureplatform.CredentialsRequestName,
+				Namespace: azureplatform.CredentialsRequestNamespace,
+			}, credentialsRequest)
+			Expect(client.IgnoreNotFound(err)).To(Succeed())
+			// An operator that found a credential of its own -- an az
+			// login on the desk this is run from -- asks the cluster
+			// for none, so on such a run there is nothing to own and
+			// nothing to collect. Said out loud, because an assertion
+			// that passes for want of an object reads exactly like one
+			// that passed on its merits.
+			askedForCredentials := err == nil
+			if askedForCredentials {
+				Expect(e2e.CheckOwnedByConfig(credentialsRequest, current)).To(Succeed())
+			} else {
+				GinkgoWriter.Println("no CredentialsRequest: this operator resolved a credential without asking the cluster")
+			}
+
 			By("attempting to delete the config CR while the routing CR still exists")
 			Expect(k8sClient.Delete(ctx, configCR)).To(Succeed())
 
@@ -380,6 +406,20 @@ var _ = Describe("Azure E2E", Ordered, func() {
 				g.Expect(client.IgnoreNotFound(err)).To(Succeed())
 				g.Expect(err).To(HaveOccurred(), "config CR should be gone")
 			}).WithTimeout(reconcileTimeout).WithPolling(pollInterval).Should(Succeed())
+
+			if askedForCredentials {
+				By("verifying the CredentialsRequest went with the config")
+				Eventually(func(g Gomega) {
+					cr := &unstructured.Unstructured{}
+					cr.SetGroupVersionKind(azureplatform.CredentialsRequestGVK)
+					err := k8sClient.Get(ctx, types.NamespacedName{
+						Name:      azureplatform.CredentialsRequestName,
+						Namespace: azureplatform.CredentialsRequestNamespace,
+					}, cr)
+					g.Expect(client.IgnoreNotFound(err)).To(Succeed())
+					g.Expect(err).To(HaveOccurred(), "the CredentialsRequest should have been collected with the config")
+				}).WithTimeout(reconcileTimeout).WithPolling(pollInterval).Should(Succeed())
+			}
 
 			By("verifying every peering this cluster owned has gone from the Route Server")
 			Eventually(func(g Gomega) {

@@ -459,7 +459,7 @@ func buildAWSPlatform(ctx context.Context, c client.Client, config *networkingap
 
 	// May report platform.ErrCredentialsPending, which Reconcile waits
 	// out rather than treating as a fault.
-	creds, err := awsplatform.ResolveCredentials(ctx, c, OperatorNamespace(), awsSpec.Region)
+	creds, err := awsplatform.ResolveCredentials(ctx, c, OperatorNamespace(), awsSpec.Region, configOwnerReference(config))
 	if err != nil {
 		return nil, err
 	}
@@ -494,7 +494,7 @@ func buildAzurePlatform(ctx context.Context, c client.Client, config *networking
 	// nothing in its chain can produce a token, so without this the
 	// failure arrives from DiscoverEndpoints and reads as a discovery
 	// problem rather than a credentials one.
-	cred, err := azureplatform.ResolveCredentials(ctx, c, OperatorNamespace())
+	cred, err := azureplatform.ResolveCredentials(ctx, c, OperatorNamespace(), configOwnerReference(config))
 	if err != nil {
 		return nil, err
 	}
@@ -540,6 +540,27 @@ func capitalise(s string) string {
 		return s
 	}
 	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+// configOwnerReference names the singleton as the owner of an object
+// this controller creates on its behalf, so that deleting the
+// configuration takes the object with it. The configuration is cluster
+// scoped, which is what lets it own a namespaced object in a namespace
+// that is not its own -- the ban on crossing namespaces applies to
+// namespaced owners.
+//
+// blockOwnerDeletion is left unset deliberately: OpenShift enforces
+// ownerReferencesPermissionEnforcement, which would then require this
+// operator to hold delete on bgpcloudconfigurations/finalizers.
+func configOwnerReference(config *networkingapi.BGPCloudConfiguration) metav1.OwnerReference {
+	controller := true
+	return metav1.OwnerReference{
+		APIVersion: networkingapi.GroupVersion.String(),
+		Kind:       "BGPCloudConfiguration",
+		Name:       config.Name,
+		UID:        config.UID,
+		Controller: &controller,
+	}
 }
 
 // OperatorNamespace is where the operator is running, which is where the

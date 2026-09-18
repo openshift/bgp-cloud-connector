@@ -25,7 +25,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
@@ -267,14 +266,7 @@ func setFRRConfigurationOwnerReference(obj *unstructured.Unstructured, config *n
 	if config.UID == "" {
 		return
 	}
-	controller := true
-	ref := metav1.OwnerReference{
-		APIVersion: networkingapi.GroupVersion.String(),
-		Kind:       "BGPCloudConfiguration",
-		Name:       config.Name,
-		UID:        config.UID,
-		Controller: &controller,
-	}
+	ref := configOwnerReference(config)
 	refs := obj.GetOwnerReferences()
 	for i := range refs {
 		if refs[i].Kind == "BGPCloudConfiguration" && refs[i].Name == config.Name {

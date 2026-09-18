@@ -26,6 +26,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -148,7 +149,7 @@ var ambientCredential = func() (azcore.TokenCredential, error) {
 // unreachable from a pod, and spec.azure.networkInterfaceClientID means
 // two identities can be in play at once, which one process-wide chain
 // cannot express.
-func ResolveCredentials(ctx context.Context, c client.Client, namespace string) (azcore.TokenCredential, error) {
+func ResolveCredentials(ctx context.Context, c client.Client, namespace string, owner metav1.OwnerReference) (azcore.TokenCredential, error) {
 	logger := log.FromContext(ctx)
 
 	secret := &corev1.Secret{}
@@ -176,7 +177,7 @@ func ResolveCredentials(ctx context.Context, c client.Client, namespace string) 
 		// as on AWS -- the reconcile is requeued and tries again, and
 		// an operator that cannot write its own request is worth
 		// seeing.
-		if err := reconcileCredentialsRequest(ctx, c, namespace); err != nil {
+		if err := reconcileCredentialsRequest(ctx, c, namespace, owner); err != nil {
 			return nil, err
 		}
 		return cred, nil
@@ -191,7 +192,7 @@ func ResolveCredentials(ctx context.Context, c client.Client, namespace string) 
 		}
 	}
 
-	if err := reconcileCredentialsRequest(ctx, c, namespace); err != nil {
+	if err := reconcileCredentialsRequest(ctx, c, namespace, owner); err != nil {
 		return nil, err
 	}
 	return nil, fmt.Errorf("%w: secret %s/%s has not been written yet",
@@ -249,9 +250,11 @@ func credentialFromSecret(secret *corev1.Secret) (azcore.TokenCredential, error)
 // reconcileCredentialsRequest brings the request to what we want it to
 // be, rather than creating it once. An administrator narrowing the
 // permissions, or this operator widening them in a later release, would
-// otherwise leave the cluster serving a request nobody wrote.
-func reconcileCredentialsRequest(ctx context.Context, c client.Client, namespace string) error {
-	desired := desiredCredentialsRequest(namespace)
+// otherwise leave the cluster serving a request nobody wrote. It also
+// adopts a request that has no owner, which is what a release made
+// before this one left behind.
+func reconcileCredentialsRequest(ctx context.Context, c client.Client, namespace string, owner metav1.OwnerReference) error {
+	desired := desiredCredentialsRequest(namespace, owner)
 
 	existing := &unstructured.Unstructured{}
 	existing.SetGroupVersionKind(CredentialsRequestGVK)
@@ -274,7 +277,8 @@ func reconcileCredentialsRequest(ctx context.Context, c client.Client, namespace
 		return fmt.Errorf("reading CredentialsRequest %s: %w", CredentialsRequestName, err)
 	}
 
-	if reflect.DeepEqual(existing.Object["spec"], desired.Object["spec"]) {
+	adopted := ensureOwnerReference(existing, owner)
+	if reflect.DeepEqual(existing.Object["spec"], desired.Object["spec"]) && !adopted {
 		return nil
 	}
 
@@ -287,7 +291,7 @@ func reconcileCredentialsRequest(ctx context.Context, c client.Client, namespace
 	return nil
 }
 
-func desiredCredentialsRequest(namespace string) *unstructured.Unstructured {
+func desiredCredentialsRequest(namespace string, owner metav1.OwnerReference) *unstructured.Unstructured {
 	perms := make([]interface{}, 0, len(permissions))
 	for _, p := range permissions {
 		perms = append(perms, p)
@@ -317,5 +321,28 @@ func desiredCredentialsRequest(namespace string) *unstructured.Unstructured {
 	cr.SetGroupVersionKind(CredentialsRequestGVK)
 	cr.SetName(CredentialsRequestName)
 	cr.SetNamespace(CredentialsRequestNamespace)
+	cr.SetOwnerReferences([]metav1.OwnerReference{owner})
 	return cr
+}
+
+// ensureOwnerReference names the configuration among the object's
+// owners and reports whether that changed anything. A request made
+// before this operator set an owner has none, and a configuration that
+// was deleted and recreated leaves one whose UID no longer resolves; in
+// both cases the object would outlive the configuration it belongs to.
+func ensureOwnerReference(obj *unstructured.Unstructured, owner metav1.OwnerReference) bool {
+	refs := obj.GetOwnerReferences()
+	for i := range refs {
+		if refs[i].Kind != owner.Kind || refs[i].Name != owner.Name {
+			continue
+		}
+		if refs[i].UID == owner.UID {
+			return false
+		}
+		refs[i] = owner
+		obj.SetOwnerReferences(refs)
+		return true
+	}
+	obj.SetOwnerReferences(append(refs, owner))
+	return true
 }

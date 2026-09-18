@@ -28,6 +28,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -148,7 +149,7 @@ var ambientCredentials = func(ctx context.Context, region string) (awssdk.Creden
 // apart here. That is the whole reason one path serves both kinds of
 // cluster: a minting cluster puts a key pair in it, an STS cluster puts
 // a role and a token path, and the SDK already knows both.
-func ResolveCredentials(ctx context.Context, c client.Client, namespace, region string) (CredentialOptions, error) {
+func ResolveCredentials(ctx context.Context, c client.Client, namespace, region string, owner metav1.OwnerReference) (CredentialOptions, error) {
 	logger := log.FromContext(ctx)
 
 	if provider, err := ambientCredentials(ctx, region); err == nil {
@@ -156,7 +157,7 @@ func ResolveCredentials(ctx context.Context, c client.Client, namespace, region 
 		return CredentialOptions{config.WithCredentialsProvider(provider)}, nil
 	}
 
-	if err := reconcileCredentialsRequest(ctx, c, namespace); err != nil {
+	if err := reconcileCredentialsRequest(ctx, c, namespace, owner); err != nil {
 		return nil, err
 	}
 
@@ -256,10 +257,11 @@ func writeCredentialsFile(ini []byte) (_ string, err error) {
 // role ARN arrives by editing the Subscription, which happens after the
 // operator has already made its request, and a request created without
 // one would leave the operator waiting on a secret CCO has no reason to
-// write. Only the spec is written, and only when it differs, so CCO's
-// status and an administrator's other edits survive.
-func reconcileCredentialsRequest(ctx context.Context, c client.Client, namespace string) error {
-	desired := desiredCredentialsRequest(namespace)
+// write. Only the spec and this operator's ownership are written, and
+// only when they differ, so CCO's status and an administrator's other
+// edits survive.
+func reconcileCredentialsRequest(ctx context.Context, c client.Client, namespace string, owner metav1.OwnerReference) error {
+	desired := desiredCredentialsRequest(namespace, owner)
 
 	existing := &unstructured.Unstructured{}
 	existing.SetGroupVersionKind(CredentialsRequestGVK)
@@ -282,7 +284,8 @@ func reconcileCredentialsRequest(ctx context.Context, c client.Client, namespace
 		return fmt.Errorf("reading CredentialsRequest %s: %w", CredentialsRequestName, err)
 	}
 
-	if reflect.DeepEqual(existing.Object["spec"], desired.Object["spec"]) {
+	adopted := ensureOwnerReference(existing, owner)
+	if reflect.DeepEqual(existing.Object["spec"], desired.Object["spec"]) && !adopted {
 		return nil
 	}
 
@@ -295,7 +298,7 @@ func reconcileCredentialsRequest(ctx context.Context, c client.Client, namespace
 	return nil
 }
 
-func desiredCredentialsRequest(namespace string) *unstructured.Unstructured {
+func desiredCredentialsRequest(namespace string, owner metav1.OwnerReference) *unstructured.Unstructured {
 	actions := make([]interface{}, 0, len(policyActions))
 	for _, action := range policyActions {
 		actions = append(actions, action)
@@ -334,5 +337,28 @@ func desiredCredentialsRequest(namespace string) *unstructured.Unstructured {
 	cr.SetGroupVersionKind(CredentialsRequestGVK)
 	cr.SetName(CredentialsRequestName)
 	cr.SetNamespace(CredentialsRequestNamespace)
+	cr.SetOwnerReferences([]metav1.OwnerReference{owner})
 	return cr
+}
+
+// ensureOwnerReference names the configuration among the object's
+// owners and reports whether that changed anything. A request made
+// before this operator set an owner has none, and a configuration that
+// was deleted and recreated leaves one whose UID no longer resolves; in
+// both cases the object would outlive the configuration it belongs to.
+func ensureOwnerReference(obj *unstructured.Unstructured, owner metav1.OwnerReference) bool {
+	refs := obj.GetOwnerReferences()
+	for i := range refs {
+		if refs[i].Kind != owner.Kind || refs[i].Name != owner.Name {
+			continue
+		}
+		if refs[i].UID == owner.UID {
+			return false
+		}
+		refs[i] = owner
+		obj.SetOwnerReferences(refs)
+		return true
+	}
+	obj.SetOwnerReferences(append(refs, owner))
+	return true
 }

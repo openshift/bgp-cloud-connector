@@ -345,9 +345,31 @@ var _ = Describe("AWS E2E", Ordered, func() {
 	// ---------------------------------------------------------------
 	Context("E2E-AWS-05: Full cleanup lifecycle", func() {
 		It("should block config deletion while routing CR exists, then clean up everything", func(ctx context.Context) {
-			By("attempting to delete config CR (should be blocked by routing CR)")
+			By("reading the config and the CredentialsRequest it should own")
 			configCR := &networkingapi.BGPCloudConfiguration{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: bgpConfig.Name}, configCR)).To(Succeed())
+
+			credentialsRequest := &unstructured.Unstructured{}
+			credentialsRequest.SetGroupVersionKind(awsplatform.CredentialsRequestGVK)
+			err := k8sClient.Get(ctx, types.NamespacedName{
+				Name:      awsplatform.CredentialsRequestName,
+				Namespace: awsplatform.CredentialsRequestNamespace,
+			}, credentialsRequest)
+			Expect(client.IgnoreNotFound(err)).To(Succeed())
+			// A pod that already holds credentials -- the identity
+			// webhook's, or the profile on the desk this is run from --
+			// asks the cluster for none, so on such a run there is
+			// nothing to own and nothing to collect. Said out loud,
+			// because an assertion that passes for want of an object
+			// reads exactly like one that passed on its merits.
+			askedForCredentials := err == nil
+			if askedForCredentials {
+				Expect(e2e.CheckOwnedByConfig(credentialsRequest, configCR)).To(Succeed())
+			} else {
+				GinkgoWriter.Println("no CredentialsRequest: this operator resolved credentials without asking the cluster")
+			}
+
+			By("attempting to delete config CR (should be blocked by routing CR)")
 			Expect(k8sClient.Delete(ctx, configCR)).To(Succeed())
 
 			By("verifying config CR still exists (finalizer blocks deletion)")
@@ -384,6 +406,20 @@ var _ = Describe("AWS E2E", Ordered, func() {
 				g.Expect(client.IgnoreNotFound(err)).To(Succeed())
 				g.Expect(err).To(HaveOccurred(), "config CR should be gone")
 			}).WithTimeout(reconcileTimeout).WithPolling(pollInterval).Should(Succeed())
+
+			if askedForCredentials {
+				By("verifying the CredentialsRequest went with the config")
+				Eventually(func(g Gomega) {
+					cr := &unstructured.Unstructured{}
+					cr.SetGroupVersionKind(awsplatform.CredentialsRequestGVK)
+					err := k8sClient.Get(ctx, types.NamespacedName{
+						Name:      awsplatform.CredentialsRequestName,
+						Namespace: awsplatform.CredentialsRequestNamespace,
+					}, cr)
+					g.Expect(client.IgnoreNotFound(err)).To(Succeed())
+					g.Expect(err).To(HaveOccurred(), "the CredentialsRequest should have been collected with the config")
+				}).WithTimeout(reconcileTimeout).WithPolling(pollInterval).Should(Succeed())
+			}
 
 			By("verifying external Network/cluster state was not reverted on config delete")
 			Expect(e2e.CheckExternalNetworkStatePreserved(ctx, k8sClient)).To(Succeed())

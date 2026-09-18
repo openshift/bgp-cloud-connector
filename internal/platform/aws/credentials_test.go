@@ -57,6 +57,20 @@ role_arn = arn:aws:iam::123456789012:role/bgp-cloud-connector
 web_identity_token_file = /var/run/secrets/openshift/serviceaccount/token`
 )
 
+// testOwner stands in for the singleton BGPCloudConfiguration the
+// controller passes in, which is the owner every request this operator
+// makes is expected to carry.
+func testOwner() metav1.OwnerReference {
+	controller := true
+	return metav1.OwnerReference{
+		APIVersion: "networking.openshift.io/v1beta1",
+		Kind:       "BGPCloudConfiguration",
+		Name:       "cluster",
+		UID:        "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
+		Controller: &controller,
+	}
+}
+
 func credentialsTestScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
@@ -87,7 +101,7 @@ func nestedString(t *testing.T, obj map[string]interface{}, fields ...string) (s
 // passing on a run that failed for some entirely different reason.
 func resolvePending(t *testing.T, c client.Client) {
 	t.Helper()
-	if _, err := ResolveCredentials(context.Background(), c, testNamespace, "us-east-2"); !errors.Is(err, platform.ErrCredentialsPending) {
+	if _, err := ResolveCredentials(context.Background(), c, testNamespace, "us-east-2", testOwner()); !errors.Is(err, platform.ErrCredentialsPending) {
 		t.Fatalf("ResolveCredentials: got %v, want %v", err, platform.ErrCredentialsPending)
 	}
 }
@@ -142,7 +156,7 @@ func TestResolveCredentials_AmbientChainWins(t *testing.T) {
 
 	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).Build()
 
-	opts, err := ResolveCredentials(context.Background(), c, testNamespace, "us-east-2")
+	opts, err := ResolveCredentials(context.Background(), c, testNamespace, "us-east-2", testOwner())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -168,7 +182,7 @@ func TestResolveCredentials_CreatesRequestAndWaits(t *testing.T) {
 
 	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).Build()
 
-	if _, err := ResolveCredentials(context.Background(), c, testNamespace, "us-east-2"); !errors.Is(err, platform.ErrCredentialsPending) {
+	if _, err := ResolveCredentials(context.Background(), c, testNamespace, "us-east-2", testOwner()); !errors.Is(err, platform.ErrCredentialsPending) {
 		t.Fatalf("expected platform.ErrCredentialsPending, got %v", err)
 	}
 
@@ -280,7 +294,7 @@ func TestResolveCredentials_MintedSecret(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).
 		WithObjects(secretWithCredentials(mintedINI)).Build()
 
-	opts, err := ResolveCredentials(context.Background(), c, testNamespace, "us-east-2")
+	opts, err := ResolveCredentials(context.Background(), c, testNamespace, "us-east-2", testOwner())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -300,7 +314,7 @@ func TestResolveCredentials_STSSecret(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).
 		WithObjects(secretWithCredentials(stsINI)).Build()
 
-	if _, err := ResolveCredentials(context.Background(), c, testNamespace, "us-east-2"); err != nil {
+	if _, err := ResolveCredentials(context.Background(), c, testNamespace, "us-east-2", testOwner()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -338,7 +352,7 @@ func TestResolveCredentials_SecretWithoutCredentialsKey(t *testing.T) {
 	}
 	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).WithObjects(secret).Build()
 
-	_, err := ResolveCredentials(context.Background(), c, testNamespace, "us-east-2")
+	_, err := ResolveCredentials(context.Background(), c, testNamespace, "us-east-2", testOwner())
 	if err == nil {
 		t.Fatal("expected an error for a secret with no credentials key")
 	}
@@ -372,7 +386,7 @@ func TestResolveCredentials_PendingWithoutRoleARNNamesIt(t *testing.T) {
 
 	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).Build()
 
-	_, err := ResolveCredentials(context.Background(), c, testNamespace, "us-east-2")
+	_, err := ResolveCredentials(context.Background(), c, testNamespace, "us-east-2", testOwner())
 	if !errors.Is(err, platform.ErrCredentialsPending) {
 		t.Fatalf("expected platform.ErrCredentialsPending, got %v", err)
 	}
@@ -390,7 +404,7 @@ func TestResolveCredentials_PendingWithRoleARNIsAnOrdinaryWait(t *testing.T) {
 
 	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).Build()
 
-	_, err := ResolveCredentials(context.Background(), c, testNamespace, "us-east-2")
+	_, err := ResolveCredentials(context.Background(), c, testNamespace, "us-east-2", testOwner())
 	if !errors.Is(err, platform.ErrCredentialsPending) {
 		t.Fatalf("expected platform.ErrCredentialsPending, got %v", err)
 	}
@@ -439,5 +453,45 @@ func TestWriteCredentialsFile_FailureLeavesNothingBehind(t *testing.T) {
 			names = append(names, e.Name())
 		}
 		t.Errorf("left %d entries behind, want %d: %v", len(after), len(before), names)
+	}
+}
+
+// The request must name the configuration as its owner, so that
+// deleting the configuration takes the request with it and, on a
+// cluster that mints, the IAM user CCO made for it. Without an owner
+// the object outlives everything that referred to it.
+func TestResolveCredentials_RequestIsOwnedByTheConfiguration(t *testing.T) {
+	isolateTempDir(t)
+	withAmbient(t, nil)
+
+	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).Build()
+	resolvePending(t, c)
+
+	refs := getCredentialsRequest(t, c).GetOwnerReferences()
+	if len(refs) != 1 {
+		t.Fatalf("ownerReferences = %v, want exactly one", refs)
+	}
+	if got, want := refs[0], testOwner(); got.APIVersion != want.APIVersion ||
+		got.Kind != want.Kind || got.Name != want.Name || got.UID != want.UID {
+		t.Errorf("ownerReference = %+v, want %+v", got, want)
+	}
+}
+
+// A request made by an earlier release has no owner, and there is
+// nothing else in the system that will ever give it one. Reconciling
+// has to adopt it, or the fix only reaches clusters installed after it.
+func TestResolveCredentials_ExistingRequestIsAdopted(t *testing.T) {
+	isolateTempDir(t)
+	withAmbient(t, nil)
+
+	unowned := desiredCredentialsRequest(testNamespace, metav1.OwnerReference{})
+	unowned.SetOwnerReferences(nil)
+
+	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).WithObjects(unowned).Build()
+	resolvePending(t, c)
+
+	refs := getCredentialsRequest(t, c).GetOwnerReferences()
+	if len(refs) != 1 || refs[0].UID != testOwner().UID {
+		t.Errorf("ownerReferences = %v, want the configuration adopted", refs)
 	}
 }
