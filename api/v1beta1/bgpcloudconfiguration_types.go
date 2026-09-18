@@ -18,6 +18,7 @@ package v1beta1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // LivenessDetectionType specifies how BGP peer health is monitored.
@@ -364,5 +365,9 @@ type BGPCloudConfigurationList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&BGPCloudConfiguration{}, &BGPCloudConfigurationList{})
+	SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(GroupVersion, &BGPCloudConfiguration{}, &BGPCloudConfigurationList{})
+		metav1.AddToGroupVersion(s, GroupVersion)
+		return nil
+	})
 }
