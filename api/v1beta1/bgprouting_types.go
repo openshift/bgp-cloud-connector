@@ -60,6 +60,14 @@ type BGPRoutingStatus struct {
 	// ObservedGeneration is the most recent generation observed by the controller.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// Namespaces are the namespaces currently selected into this network by
+	// their labels, and therefore the namespaces whose pods are advertised via
+	// BGP. It is reported so an administrator can confirm the network covers
+	// what they intended without re-running the label query. Empty while the
+	// network is not Ready.
+	// +optional
+	// +listType=atomic
+	Namespaces []string `json:"namespaces,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -67,7 +75,10 @@ type BGPRoutingStatus struct {
 // +kubebuilder:resource:scope=Cluster,shortName=bgpr,categories=networking
 // +kubebuilder:printcolumn:name="Network",type="string",JSONPath=".spec.network.name"
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase"
+// +kubebuilder:printcolumn:name="Available",type="string",JSONPath=".status.conditions[?(@.type=='Available')].status"
+// +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.conditions[?(@.type=='Available')].reason"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:printcolumn:name="Message",type="string",priority=1,JSONPath=".status.conditions[?(@.type=='Available')].message"
 // +operator-sdk:csv:customresourcedefinitions:displayName="BGP Routing"
 
 // BGPRouting declares a single network to advertise via BGP.

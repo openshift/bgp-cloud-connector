@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -41,21 +42,29 @@ func (e *CUDNValidationError) Error() string {
 
 func (e *CUDNValidationError) Unwrap() error { return e.Cause }
 
-// ValidateNamespaceLabels checks that at least one namespace exists with the required
-// labels for the given network name. Users must create and label namespaces themselves.
-func ValidateNamespaceLabels(ctx context.Context, c client.Client, networkName string) error {
+// MatchedNamespaces returns the sorted names of the namespaces selected into the
+// given network by their labels. Users must create and label namespaces
+// themselves, so an empty match is an error the caller reports as degraded; the
+// returned names are reported in status so an administrator can see exactly
+// which namespaces the network advertises without re-deriving the label query.
+func MatchedNamespaces(ctx context.Context, c client.Client, networkName string) ([]string, error) {
 	nsList := &corev1.NamespaceList{}
 	if err := c.List(ctx, nsList, client.MatchingLabels{
 		LabelPrimaryUDN: "",
 		LabelClusterUDN: networkName,
 	}); err != nil {
-		return err
+		return nil, err
 	}
 	if len(nsList.Items) == 0 {
-		return fmt.Errorf("no namespace found with labels %s=\"\" and %s=%q; create and label a namespace before applying BGPRouting",
+		return nil, fmt.Errorf("no namespace found with labels %s=\"\" and %s=%q; create and label a namespace before applying BGPRouting",
 			LabelPrimaryUDN, LabelClusterUDN, networkName)
 	}
-	return nil
+	names := make([]string, 0, len(nsList.Items))
+	for i := range nsList.Items {
+		names = append(names, nsList.Items[i].Name)
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 func EnsureClusterUDN(ctx context.Context, c client.Client, routing *networkingapi.BGPRouting) error {

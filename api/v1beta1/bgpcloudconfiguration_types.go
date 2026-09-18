@@ -342,7 +342,10 @@ type BGPCloudConfigurationStatus struct {
 // +kubebuilder:printcolumn:name="Platform",type="string",JSONPath=".spec.platform"
 // +kubebuilder:printcolumn:name="LocalASN",type="integer",JSONPath=".spec.bgp.localASN"
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase"
+// +kubebuilder:printcolumn:name="Available",type="string",JSONPath=".status.conditions[?(@.type=='Available')].status"
+// +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.conditions[?(@.type=='Available')].reason"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:printcolumn:name="Message",type="string",priority=1,JSONPath=".status.conditions[?(@.type=='Available')].message"
 // +operator-sdk:csv:customresourcedefinitions:displayName="BGP Cloud Configuration"
 
 // BGPCloudConfiguration is the singleton cluster-scoped BGP infrastructure configuration.
