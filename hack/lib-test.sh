@@ -584,6 +584,114 @@ stub_aws_rc=0
 
 unset -f oc aws
 
+######################################################################
+echo "--- gcp/lib.sh ---"
+#
+# Same rule as the AWS reads: a failed query is not an answer. gcloud
+# writes deprecation notices and property chatter to stderr on calls it
+# answers with 0, so folding stderr in would leave that text inside a
+# router name, which then goes back to GCP as --router.
+
+# shellcheck source=hack/gcp/lib.sh
+source "${here}/gcp/lib.sh"
+
+# shellcheck disable=SC2329
+gcloud() {
+    echo "WARNING: the following filter keys were not present" >&2
+    printf '%s' "${stub_gcloud_out}"
+}
+stub_gcloud_out="amcdermo-cudn-cr"
+check "gcp_query keeps stderr out of the value" \
+    "$(gcp_query "list routers" gcloud compute routers list 2>/dev/null)" "amcdermo-cudn-cr"
+
+# shellcheck disable=SC2329
+gcloud() { echo "ERROR: (gcloud.compute.routers.list) reauth" >&2; return 1; }
+(gcp_query "list routers" gcloud compute routers list) >/dev/null 2>&1
+check "gcp_query fails rather than reporting nothing" "$?" "1"
+check "gcp_query says why" \
+    "$( (gcp_query "list routers" gcloud compute routers list) 2>&1 >/dev/null | grep -c 'cannot list routers')" "1"
+
+# The cluster reads, which must not fold stderr into the value either.
+# shellcheck disable=SC2329
+oc() {
+    echo "Warning: apps.openshift.io/v1 DeploymentConfig is deprecated" >&2
+    case "$*" in
+        *infrastructureName*) printf 'amcdermo-x' ;;
+        *gcp.projectID*)      printf 'openshift-qe' ;;
+        *gcp.region*)         printf 'us-east1' ;;
+    esac
+}
+check "gcp_cluster_facts keeps stderr out of the infrastructure name" \
+    "$( (gcp_cluster_facts 2>/dev/null; printf '%s' "${infra}") )" "amcdermo-x"
+check "gcp_cluster_facts keeps stderr out of the project" \
+    "$( (gcp_cluster_facts 2>/dev/null; printf '%s' "${project}") )" "openshift-qe"
+check "gcp_cluster_facts keeps stderr out of the region" \
+    "$( (gcp_cluster_facts 2>/dev/null; printf '%s' "${region}") )" "us-east1"
+
+# What this credential can actually do, asked of GCP rather than worked
+# out from which call failed first. In CI the estate died on a single
+# PERMISSION_DENIED for networkconnectivity.hubs.create and said nothing
+# about the rest of the role, so the whole list is asked at once.
+# shellcheck disable=SC2329
+gcloud() { printf 'ya29.a0-fake-token'; }
+# shellcheck disable=SC2329
+curl() { printf '{"permissions":["compute.routers.list","networkconnectivity.hubs.list"]}'; }
+check "held permissions come back one per line" \
+    "$(gcp_permissions_held proj compute.routers.list networkconnectivity.hubs.list | tr '\n' ' ')" \
+    "compute.routers.list networkconnectivity.hubs.list "
+check "a permission the answer omits is not reported as held" \
+    "$(gcp_permissions_held proj compute.routers.list networkconnectivity.hubs.create | tr '\n' ' ')" \
+    "compute.routers.list "
+
+# Holding none of them is an answer. Not being able to ask is not, and
+# the two must not arrive looking the same -- the rule the whole of
+# gcp/lib.sh is built around.
+# shellcheck disable=SC2329
+curl() { printf '{}'; }
+gcp_permissions_held proj compute.routers.get >/dev/null 2>&1
+check "holding nothing is still an answer" "$?" "0"
+# shellcheck disable=SC2329
+curl() { echo "curl: (22) The requested URL returned error: 403" >&2; return 22; }
+gcp_permissions_held proj compute.routers.get >/dev/null 2>&1
+check "a question that could not be asked fails" "$?" "1"
+# shellcheck disable=SC2329
+curl() { printf '{"permissions":[]}'; }
+# shellcheck disable=SC2329
+gcloud() { echo "ERROR: reauth" >&2; return 1; }
+gcp_permissions_held proj compute.routers.get >/dev/null 2>&1
+check "no token means no answer" "$?" "1"
+
+# Every denial is named, not just the one that would have failed first.
+# Learning a role one PERMISSION_DENIED per CI run is the cost this
+# exists to remove.
+# shellcheck disable=SC2329
+gcloud() { printf 'ya29.a0-fake-token'; }
+# shellcheck disable=SC2329
+curl() { printf '{"permissions":["compute.routers.list"]}'; }
+perm_report="$( (gcp_require_permissions proj \
+    compute.routers.list compute.routers.create networkconnectivity.hubs.create) 2>&1 )" || true
+check "the report names every denied permission" \
+    "$(printf '%s' "${perm_report}" | grep -c 'DENIED')" "2"
+check "the report names the granted ones too" \
+    "$(printf '%s' "${perm_report}" | grep -c 'granted')" "1"
+(gcp_require_permissions proj compute.routers.list compute.routers.create) >/dev/null 2>&1
+check "a credential missing a permission does not get to build" "$?" "1"
+# shellcheck disable=SC2329
+curl() { printf '{"permissions":["compute.routers.list","compute.routers.create"]}'; }
+(gcp_require_permissions proj compute.routers.list compute.routers.create) >/dev/null 2>&1
+check "a credential holding all of them proceeds" "$?" "0"
+
+# The estate asks for what its own calls need, so a permission dropped
+# from the list here is a call left unguarded.
+check "the estate list covers creating the hub" \
+    "$(printf '%s\n' "${gcp_estate_permissions[@]}" | grep -Fxc 'networkconnectivity.hubs.create')" "1"
+check "the estate list covers deleting the hub" \
+    "$(printf '%s\n' "${gcp_estate_permissions[@]}" | grep -Fxc 'networkconnectivity.hubs.delete')" "1"
+
+unset -f curl
+
+unset -f gcloud oc
+
 echo "---"
 echo "passed=${passed} failed=${failed}"
 [[ "${failed}" -eq 0 ]]
