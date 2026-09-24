@@ -32,6 +32,8 @@ type NetworkConfig struct {
 	// Name identifies the network. The operator creates a ClusterUserDefinedNetwork
 	// named cluster-udn-<name> that selects namespaces with label cluster-udn: <name>.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Name string `json:"name"`
 	// Subnets is the list of CIDRs for the network (1 for single-stack, 2 for dual-stack).
 	// +kubebuilder:validation:MinItems=1

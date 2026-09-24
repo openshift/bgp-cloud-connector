@@ -75,7 +75,9 @@ spec:
                       RouteServerIDs is the list of VPC Route Server IDs used for auto-discovery
                       of BGP endpoints, neighbor IPs, availability zones, and remote ASN.
                     items:
+                      maxLength: 128
                       type: string
+                    maxItems: 16
                     minItems: 1
                     type: array
                     x-kubernetes-list-type: atomic
@@ -83,6 +85,10 @@ spec:
                 - region
                 - routeServerIDs
                 type: object
+                x-kubernetes-validations:
+                - message: duplicate route server IDs are not allowed
+                  rule: self.routeServerIDs.all(id, self.routeServerIDs.filter(x,
+                    x == id).size() == 1)
               azure:
                 description: |-
                   AzureConfig names the Route Server. Its addresses and ASN are read from it
@@ -217,6 +223,11 @@ spec:
                       - neighbors
                       - nodeSelector
                       type: object
+                      x-kubernetes-validations:
+                      - message: duplicate neighbor addresses within a peer group
+                          are not allowed
+                        rule: self.neighbors.all(n, self.neighbors.filter(x, ip(x.address)
+                          == ip(n.address)).size() == 1)
                     maxItems: 16
                     type: array
                     x-kubernetes-list-type: atomic
@@ -318,6 +329,10 @@ spec:
             - message: spec.bgp.peerGroups may only be set when spec.platform is Manual
               rule: self.platform == 'Manual' || !has(self.bgp.peerGroups) || size(self.bgp.peerGroups)
                 == 0
+            - message: routerNodeSelector must not be empty
+              rule: size(self.routerNodeSelector) > 0
+            - message: spec.platform cannot be changed after creation
+              rule: self.platform == oldSelf.platform
           status:
             description: BGPCloudConfigurationStatus defines the observed state of
               BGPCloudConfiguration.

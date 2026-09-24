@@ -65,7 +65,9 @@ spec:
                     description: |-
                       Name identifies the network. The operator creates a ClusterUserDefinedNetwork
                       named cluster-udn-<name> that selects namespaces with label cluster-udn: <name>.
+                    maxLength: 63
                     minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
                   subnets:
                     description: Subnets is the list of CIDRs for the network (1 for

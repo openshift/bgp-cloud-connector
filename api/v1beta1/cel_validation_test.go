@@ -73,6 +73,11 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+func objName(t *testing.T) string {
+	t.Helper()
+	return strings.ToLower(strings.NewReplacer("_", "-", "/", "-").Replace(t.Name()))
+}
+
 // validManualConfig returns a minimal valid BGPCloudConfiguration with platform Manual.
 func validManualConfig(name string) *networkingapi.BGPCloudConfiguration {
 	return &networkingapi.BGPCloudConfiguration{
@@ -97,7 +102,7 @@ func validManualConfig(name string) *networkingapi.BGPCloudConfiguration {
 // --- BGPCloudConfiguration spec-level CEL validation tests ---
 
 func TestCEL_ManualValid(t *testing.T) {
-	obj := validManualConfig("cel-manual-valid")
+	obj := validManualConfig(objName(t))
 	if err := testClient.Create(ctx, obj); err != nil {
 		t.Fatalf("valid Manual config should be accepted: %v", err)
 	}
@@ -105,7 +110,7 @@ func TestCEL_ManualValid(t *testing.T) {
 }
 
 func TestCEL_ManualRequiresPeerGroups(t *testing.T) {
-	obj := validManualConfig("cel-manual-no-pg")
+	obj := validManualConfig(objName(t))
 	obj.Spec.BGP.PeerGroups = nil
 
 	err := testClient.Create(ctx, obj)
@@ -117,7 +122,7 @@ func TestCEL_ManualRequiresPeerGroups(t *testing.T) {
 }
 
 func TestCEL_ManualEmptyPeerGroups(t *testing.T) {
-	obj := validManualConfig("cel-manual-empty-pg")
+	obj := validManualConfig(objName(t))
 	obj.Spec.BGP.PeerGroups = []networkingapi.PeerGroup{}
 
 	err := testClient.Create(ctx, obj)
@@ -129,7 +134,7 @@ func TestCEL_ManualEmptyPeerGroups(t *testing.T) {
 }
 
 func TestCEL_AWSRequiresAWSBlock(t *testing.T) {
-	obj := validManualConfig("cel-aws-no-block")
+	obj := validManualConfig(objName(t))
 	obj.Spec.Platform = networkingapi.PlatformAWS
 	obj.Spec.BGP.PeerGroups = nil
 
@@ -142,7 +147,7 @@ func TestCEL_AWSRequiresAWSBlock(t *testing.T) {
 }
 
 func TestCEL_AWSBlockOnNonAWS(t *testing.T) {
-	obj := validManualConfig("cel-manual-with-aws")
+	obj := validManualConfig(objName(t))
 	obj.Spec.AWS = &networkingapi.AWSConfig{
 		Region:         "us-east-1",
 		RouteServerIDs: []string{"rs-123"},
@@ -158,7 +163,7 @@ func TestCEL_AWSBlockOnNonAWS(t *testing.T) {
 
 func TestCEL_AWSValid(t *testing.T) {
 	obj := &networkingapi.BGPCloudConfiguration{
-		ObjectMeta: metav1.ObjectMeta{Name: "cel-aws-valid"},
+		ObjectMeta: metav1.ObjectMeta{Name: objName(t)},
 		Spec: networkingapi.BGPCloudConfigurationSpec{
 			Platform: networkingapi.PlatformAWS,
 			BGP:      networkingapi.BGPConfig{LocalASN: 65001},
@@ -177,7 +182,7 @@ func TestCEL_AWSValid(t *testing.T) {
 }
 
 func TestCEL_AzureRequiresAzureBlock(t *testing.T) {
-	obj := validManualConfig("cel-azure-no-block")
+	obj := validManualConfig(objName(t))
 	obj.Spec.Platform = networkingapi.PlatformAzure
 	obj.Spec.BGP.PeerGroups = nil
 
@@ -191,7 +196,7 @@ func TestCEL_AzureRequiresAzureBlock(t *testing.T) {
 
 func TestCEL_AzureValid(t *testing.T) {
 	obj := &networkingapi.BGPCloudConfiguration{
-		ObjectMeta: metav1.ObjectMeta{Name: "cel-azure-valid"},
+		ObjectMeta: metav1.ObjectMeta{Name: objName(t)},
 		Spec: networkingapi.BGPCloudConfigurationSpec{
 			Platform: networkingapi.PlatformAzure,
 			BGP:      networkingapi.BGPConfig{LocalASN: 65001},
@@ -211,7 +216,7 @@ func TestCEL_AzureValid(t *testing.T) {
 }
 
 func TestCEL_GCPRequiresGCPBlock(t *testing.T) {
-	obj := validManualConfig("cel-gcp-no-block")
+	obj := validManualConfig(objName(t))
 	obj.Spec.Platform = networkingapi.PlatformGCP
 	obj.Spec.BGP.PeerGroups = nil
 
@@ -226,7 +231,7 @@ func TestCEL_GCPRequiresGCPBlock(t *testing.T) {
 func TestCEL_GCPValid(t *testing.T) {
 	nested := true
 	obj := &networkingapi.BGPCloudConfiguration{
-		ObjectMeta: metav1.ObjectMeta{Name: "cel-gcp-valid"},
+		ObjectMeta: metav1.ObjectMeta{Name: objName(t)},
 		Spec: networkingapi.BGPCloudConfigurationSpec{
 			Platform: networkingapi.PlatformGCP,
 			BGP:      networkingapi.BGPConfig{LocalASN: 65001},
@@ -252,7 +257,7 @@ func TestCEL_GCPValid(t *testing.T) {
 
 func TestCEL_NonManualRejectsPeerGroups(t *testing.T) {
 	obj := &networkingapi.BGPCloudConfiguration{
-		ObjectMeta: metav1.ObjectMeta{Name: "cel-aws-with-pg"},
+		ObjectMeta: metav1.ObjectMeta{Name: objName(t)},
 		Spec: networkingapi.BGPCloudConfigurationSpec{
 			Platform: networkingapi.PlatformAWS,
 			BGP: networkingapi.BGPConfig{
@@ -279,7 +284,7 @@ func TestCEL_NonManualRejectsPeerGroups(t *testing.T) {
 }
 
 func TestCEL_GCPBlockOnNonGCP(t *testing.T) {
-	obj := validManualConfig("cel-manual-with-gcp")
+	obj := validManualConfig(objName(t))
 	nested := true
 	obj.Spec.GCP = &networkingapi.GCPConfig{
 		Project: "p", Region: "r", CloudRouterName: "cr",
@@ -296,7 +301,7 @@ func TestCEL_GCPBlockOnNonGCP(t *testing.T) {
 }
 
 func TestCEL_AzureBlockOnNonAzure(t *testing.T) {
-	obj := validManualConfig("cel-manual-with-azure")
+	obj := validManualConfig(objName(t))
 	obj.Spec.Azure = &networkingapi.AzureConfig{
 		SubscriptionID: "sub", ResourceGroup: "rg", RouteServerName: "rs",
 	}
@@ -309,10 +314,116 @@ func TestCEL_AzureBlockOnNonAzure(t *testing.T) {
 	assertErrorContains(t, err, "spec.azure must be set when spec.platform is Azure")
 }
 
+func TestCEL_EmptyRouterNodeSelector(t *testing.T) {
+	obj := validManualConfig(objName(t))
+	obj.Spec.RouterNodeSelector = map[string]string{}
+
+	err := testClient.Create(ctx, obj)
+	if err == nil {
+		t.Cleanup(func() { _ = testClient.Delete(ctx, obj) })
+		t.Fatal("empty routerNodeSelector should be rejected")
+	}
+	assertErrorContains(t, err, "routerNodeSelector must not be empty")
+}
+
+func TestCEL_DuplicateNeighborAddresses(t *testing.T) {
+	obj := validManualConfig(objName(t))
+	obj.Spec.BGP.PeerGroups[0].Neighbors = []networkingapi.BGPNeighbor{
+		{Address: "10.0.0.1", RemoteASN: 64512},
+		{Address: "10.0.0.1", RemoteASN: 64513},
+	}
+
+	err := testClient.Create(ctx, obj)
+	if err == nil {
+		t.Cleanup(func() { _ = testClient.Delete(ctx, obj) })
+		t.Fatal("duplicate neighbor addresses should be rejected")
+	}
+	assertErrorContains(t, err, "duplicate neighbor addresses within a peer group are not allowed")
+}
+
+func TestCEL_DuplicateNeighborEquivalentIPv6(t *testing.T) {
+	obj := validManualConfig(objName(t))
+	obj.Spec.BGP.PeerGroups[0].Neighbors = []networkingapi.BGPNeighbor{
+		{Address: "2001:db8::1", RemoteASN: 64512},
+		{Address: "2001:0db8:0000:0000:0000:0000:0000:0001", RemoteASN: 64513},
+	}
+
+	err := testClient.Create(ctx, obj)
+	if err == nil {
+		t.Cleanup(func() { _ = testClient.Delete(ctx, obj) })
+		t.Fatal("equivalent IPv6 neighbor addresses should be rejected")
+	}
+	assertErrorContains(t, err, "duplicate neighbor addresses within a peer group are not allowed")
+}
+
+func TestCEL_DuplicateRouteServerIDs(t *testing.T) {
+	obj := &networkingapi.BGPCloudConfiguration{
+		ObjectMeta: metav1.ObjectMeta{Name: objName(t)},
+		Spec: networkingapi.BGPCloudConfigurationSpec{
+			Platform: networkingapi.PlatformAWS,
+			BGP:      networkingapi.BGPConfig{LocalASN: 65001},
+			AWS: &networkingapi.AWSConfig{
+				Region:         "us-east-1",
+				RouteServerIDs: []string{"rs-123", "rs-123"},
+			},
+			RouterNodeSelector: map[string]string{"role": "router"},
+		},
+	}
+
+	err := testClient.Create(ctx, obj)
+	if err == nil {
+		t.Cleanup(func() { _ = testClient.Delete(ctx, obj) })
+		t.Fatal("duplicate route server IDs should be rejected")
+	}
+	assertErrorContains(t, err, "duplicate route server IDs are not allowed")
+}
+
+func TestCEL_PlatformImmutable(t *testing.T) {
+	obj := validManualConfig(objName(t))
+	if err := testClient.Create(ctx, obj); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { _ = testClient.Delete(ctx, obj) })
+
+	fetched := &networkingapi.BGPCloudConfiguration{}
+	if err := testClient.Get(ctx, client.ObjectKey{Name: objName(t)}, fetched); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	fetched.Spec.Platform = networkingapi.PlatformAWS
+	fetched.Spec.BGP.PeerGroups = nil
+	fetched.Spec.AWS = &networkingapi.AWSConfig{
+		Region:         "us-east-1",
+		RouteServerIDs: []string{"rs-123"},
+	}
+
+	err := testClient.Update(ctx, fetched)
+	if err == nil {
+		t.Fatal("changing spec.platform after creation should be rejected")
+	}
+	assertErrorContains(t, err, "spec.platform cannot be changed after creation")
+}
+
+func TestCEL_PlatformUpdateSamePlatformAllowed(t *testing.T) {
+	obj := validManualConfig(objName(t))
+	if err := testClient.Create(ctx, obj); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { _ = testClient.Delete(ctx, obj) })
+
+	fetched := &networkingapi.BGPCloudConfiguration{}
+	if err := testClient.Get(ctx, client.ObjectKey{Name: objName(t)}, fetched); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	fetched.Spec.BGP.LocalASN = 65002
+	if err := testClient.Update(ctx, fetched); err != nil {
+		t.Fatalf("same-platform update should be accepted: %v", err)
+	}
+}
+
 // --- Field-level CEL: isIP and isCIDR ---
 
 func TestCEL_InvalidNeighborIP(t *testing.T) {
-	obj := validManualConfig("cel-bad-ip")
+	obj := validManualConfig(objName(t))
 	obj.Spec.BGP.PeerGroups[0].Neighbors[0].Address = "not-an-ip"
 
 	err := testClient.Create(ctx, obj)
@@ -324,7 +435,7 @@ func TestCEL_InvalidNeighborIP(t *testing.T) {
 }
 
 func TestCEL_ValidIPv6Neighbor(t *testing.T) {
-	obj := validManualConfig("cel-ipv6")
+	obj := validManualConfig(objName(t))
 	obj.Spec.BGP.PeerGroups[0].Neighbors[0].Address = "2001:db8::1"
 
 	if err := testClient.Create(ctx, obj); err != nil {
@@ -387,6 +498,28 @@ func TestCEL_RoutingBareIP(t *testing.T) {
 		t.Fatal("bare IP (not CIDR) should be rejected")
 	}
 	assertErrorContains(t, err, "each subnet must be a valid CIDR")
+}
+
+func TestCEL_RoutingInvalidNetworkName(t *testing.T) {
+	obj := validRouting("cel-routing-bad-name")
+	obj.Spec.Network.Name = "Prod_Net"
+
+	err := testClient.Create(ctx, obj)
+	if err == nil {
+		t.Cleanup(func() { _ = testClient.Delete(ctx, obj) })
+		t.Fatal("non DNS-1123 network name should be rejected")
+	}
+}
+
+func TestCEL_RoutingNetworkNameTooLong(t *testing.T) {
+	obj := validRouting("cel-routing-long-name")
+	obj.Spec.Network.Name = strings.Repeat("a", 64)
+
+	err := testClient.Create(ctx, obj)
+	if err == nil {
+		t.Cleanup(func() { _ = testClient.Delete(ctx, obj) })
+		t.Fatal("network name longer than 63 characters should be rejected")
+	}
 }
 
 // --- helpers ---
