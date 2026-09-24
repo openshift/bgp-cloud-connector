@@ -118,9 +118,20 @@ spec:
         # every resolve.
         - name: tmp
           mountPath: /tmp
+        # The cluster-wide proxy's CA, added alongside the image's system
+        # bundle so egress to the cloud through a TLS-intercepting proxy is
+        # trusted. Mounted as an extra file in a directory Go's cert loader
+        # scans, so the image's root CAs are preserved (both are read).
+        - name: trusted-ca
+          mountPath: /etc/pki/tls/certs/proxy-ca-bundle.crt
+          subPath: ca-bundle.crt
+          readOnly: true
       volumes:
       - name: tmp
         emptyDir: {}
+      - name: trusted-ca
+        configMap:
+          name: trusted-ca
       - name: bound-sa-token
         projected:
           sources:
