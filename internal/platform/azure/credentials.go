@@ -92,6 +92,16 @@ const (
 // openshift-cloud-network-config-controller-azure is the obvious list to
 // copy and it does ask for Microsoft.Compute/virtualMachines/read, which
 // would over-grant here.
+//
+// Writing a router node's interface is also a request to join the two
+// things it is attached to: its subnet and its load balancer's backend
+// pool. ARM checks both as linked scopes and refuses the write without
+// join/action on each, naming only the first one missing, so a list
+// short of either looks like a list short of one.
+//
+// The modes that pass a credential through never read this list, which
+// is why the omission stayed invisible: only a mode that mints a role
+// from it, as ccoctl does, hands out what is written here.
 var permissions = []string{
 	"Microsoft.Network/virtualHubs/read",
 	"Microsoft.Network/virtualHubs/bgpConnections/read",
@@ -99,6 +109,8 @@ var permissions = []string{
 	"Microsoft.Network/virtualHubs/bgpConnections/delete",
 	"Microsoft.Network/networkInterfaces/read",
 	"Microsoft.Network/networkInterfaces/write",
+	"Microsoft.Network/virtualNetworks/subnets/join/action",
+	"Microsoft.Network/loadBalancers/backendAddressPools/join/action",
 }
 
 // validateCredential asks for a token, which is the only way to know

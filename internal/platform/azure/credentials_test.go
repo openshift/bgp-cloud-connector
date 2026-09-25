@@ -252,6 +252,8 @@ func TestResolveCredentials_RequestsOnlyThePermissionsItUses(t *testing.T) {
 		"Microsoft.Network/virtualHubs/bgpConnections/delete",
 		"Microsoft.Network/networkInterfaces/read",
 		"Microsoft.Network/networkInterfaces/write",
+		"Microsoft.Network/virtualNetworks/subnets/join/action",
+		"Microsoft.Network/loadBalancers/backendAddressPools/join/action",
 	}
 	slices.Sort(got)
 	slices.Sort(want)
@@ -446,8 +448,8 @@ func TestResolveCredentials_UpdatesADriftedRequest(t *testing.T) {
 
 	cr := getCredentialsRequest(t, c)
 	got, _, _ := unstructured.NestedStringSlice(cr.Object, "spec", "providerSpec", "permissions")
-	if len(got) != 6 {
-		t.Errorf("permissions = %v, want the full six restored", got)
+	if len(got) != len(permissions) {
+		t.Errorf("permissions = %v, want all %d restored", got, len(permissions))
 	}
 }
 
@@ -478,8 +480,8 @@ func TestResolveCredentials_UpdatesADriftedRequestWithTheSecretInPlace(t *testin
 	if err != nil {
 		t.Fatalf("reading permissions: %v", err)
 	}
-	if len(got) != 6 {
-		t.Errorf("permissions = %v, want the full six restored", got)
+	if len(got) != len(permissions) {
+		t.Errorf("permissions = %v, want all %d restored", got, len(permissions))
 	}
 }
 
