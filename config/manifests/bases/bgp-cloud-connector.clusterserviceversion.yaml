@@ -46,7 +46,7 @@ metadata:
     features.operators.openshift.io/proxy-aware: "false"
     features.operators.openshift.io/tls-profiles: "true"
     features.operators.openshift.io/token-auth-aws: "true"
-    features.operators.openshift.io/token-auth-azure: "false"
+    features.operators.openshift.io/token-auth-azure: "true"
     features.operators.openshift.io/token-auth-gcp: "false"
     operatorframework.io/suggested-namespace: openshift-bgp-cloud-connector
     operators.openshift.io/valid-subscription: '["OpenShift Kubernetes Engine", "OpenShift

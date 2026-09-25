@@ -176,3 +176,29 @@ func TestEnableIPForwarding_NoPropertiesRefuses(t *testing.T) {
 		t.Fatal("expected a refusal when the interface has no properties")
 	}
 }
+
+// TestNewNICClient_SecondIdentityNeedsNoEnvironment pins that naming a
+// second identity for the interface calls works in a pod whose
+// environment carries no AZURE_TENANT_ID or AZURE_FEDERATED_TOKEN_FILE,
+// which is every pod this operator runs in: nothing on OpenShift injects
+// them into it.
+func TestNewNICClient_SecondIdentityNeedsNoEnvironment(t *testing.T) {
+	t.Setenv("AZURE_TENANT_ID", "")
+	t.Setenv("AZURE_FEDERATED_TOKEN_FILE", "")
+
+	if _, err := NewNICClient("subscription", "client-id", "tenant-id", nil); err != nil {
+		t.Fatalf("NewNICClient: %v", err)
+	}
+}
+
+// TestNewNICClient_SecondIdentityWithoutTenantRefuses pins that a second
+// identity with no tenant to find it in is refused when the client is
+// built, rather than at the first interface call.
+func TestNewNICClient_SecondIdentityWithoutTenantRefuses(t *testing.T) {
+	t.Setenv("AZURE_TENANT_ID", "")
+	t.Setenv("AZURE_FEDERATED_TOKEN_FILE", "")
+
+	if _, err := NewNICClient("subscription", "client-id", "", nil); err == nil {
+		t.Fatal("NewNICClient: got nil error, want one naming the missing tenant")
+	}
+}

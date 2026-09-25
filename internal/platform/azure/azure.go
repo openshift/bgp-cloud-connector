@@ -31,6 +31,10 @@ type Config struct {
 	// NICClientID is the managed identity to use for network interface calls.
 	// Empty means the same identity as everything else.
 	NICClientID string
+	// TenantID is the tenant NICClientID lives in: the operator's own,
+	// read from its credential secret. Empty where the credential did not
+	// come from one.
+	TenantID string
 	// Credential authenticates every Azure call this platform makes,
 	// except the network interface calls when NICClientID names a
 	// different identity for those.
@@ -60,7 +64,7 @@ func New(cfg Config) (*Platform, error) {
 	if err != nil {
 		return nil, &platform.CredentialError{Msg: fmt.Sprintf("Azure virtual hub client: %v", err)}
 	}
-	nics, err := NewNICClient(cfg.SubscriptionID, cfg.NICClientID, cfg.Credential)
+	nics, err := NewNICClient(cfg.SubscriptionID, cfg.NICClientID, cfg.TenantID, cfg.Credential)
 	if err != nil {
 		return nil, &platform.CredentialError{Msg: fmt.Sprintf("Azure network interface client: %v", err)}
 	}

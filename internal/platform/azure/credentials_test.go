@@ -181,7 +181,7 @@ func TestResolveCredentials_AmbientWinsWhenThereIsNoSecret(t *testing.T) {
 	withValidation(t, nil)
 	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).Build()
 
-	cred, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
+	cred, _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
 	if err != nil {
 		t.Fatalf("ResolveCredentials: %v", err)
 	}
@@ -203,7 +203,7 @@ func TestResolveCredentials_CreatesRequestAndWaits(t *testing.T) {
 	withAmbient(t, nil)
 	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).Build()
 
-	_, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
+	_, _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
 	if !errors.Is(err, platform.ErrCredentialsPending) {
 		t.Fatalf("ResolveCredentials: got %v, want %v", err, platform.ErrCredentialsPending)
 	}
@@ -235,7 +235,7 @@ func TestResolveCredentials_CreatesRequestAndWaits(t *testing.T) {
 func TestResolveCredentials_RequestsOnlyThePermissionsItUses(t *testing.T) {
 	withAmbient(t, nil)
 	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).Build()
-	_, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
+	_, _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
 	if !errors.Is(err, platform.ErrCredentialsPending) {
 		t.Fatalf("ResolveCredentials: got %v, want %v", err, platform.ErrCredentialsPending)
 	}
@@ -274,7 +274,7 @@ func TestResolveCredentials_MintedSecretNamesAClientSecretCredential(t *testing.
 		WithObjects(mintedSecret()).
 		Build()
 
-	cred, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
+	cred, _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
 	if err != nil {
 		t.Fatalf("ResolveCredentials: %v", err)
 	}
@@ -294,12 +294,17 @@ func TestResolveCredentials_FederatedSecretNamesAWorkloadIdentityCredential(t *t
 		WithObjects(federatedSecret(tokenFile(t))).
 		Build()
 
-	cred, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
+	cred, tenantID, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
 	if err != nil {
 		t.Fatalf("ResolveCredentials: %v", err)
 	}
 	if _, ok := cred.(*azidentity.WorkloadIdentityCredential); !ok {
 		t.Errorf("got %T, want *azidentity.WorkloadIdentityCredential", cred)
+	}
+	// The second identity for interface calls lives in this tenant, and
+	// nothing else in the pod names it.
+	if tenantID != "tenant-id" {
+		t.Errorf("tenant: got %q, want %q", tenantID, "tenant-id")
 	}
 }
 
@@ -314,7 +319,7 @@ func TestResolveCredentials_SecretWinsOverAmbient(t *testing.T) {
 		WithObjects(mintedSecret()).
 		Build()
 
-	cred, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
+	cred, _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
 	if err != nil {
 		t.Fatalf("ResolveCredentials: %v", err)
 	}
@@ -335,7 +340,7 @@ func TestResolveCredentials_RotationTakesEffect(t *testing.T) {
 		WithObjects(mintedSecret()).
 		Build()
 
-	first, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
+	first, _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
 	if err != nil {
 		t.Fatalf("first resolve: %v", err)
 	}
@@ -350,7 +355,7 @@ func TestResolveCredentials_RotationTakesEffect(t *testing.T) {
 		t.Fatalf("writing the rotated secret: %v", err)
 	}
 
-	second, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
+	second, _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
 	if err != nil {
 		t.Fatalf("second resolve: %v", err)
 	}
@@ -370,7 +375,7 @@ func TestResolveCredentials_SecretMissingClientIDIsAnError(t *testing.T) {
 		WithObjects(secret).
 		Build()
 
-	_, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
+	_, _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
 	if err == nil {
 		t.Fatal("ResolveCredentials accepted a secret with no azure_client_id")
 	}
@@ -395,7 +400,7 @@ func TestResolveCredentials_SecretWithNoWayToAuthenticate(t *testing.T) {
 		WithObjects(secret).
 		Build()
 
-	_, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
+	_, _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
 	if err == nil {
 		t.Fatal("ResolveCredentials accepted a secret carrying no means of authentication")
 	}
@@ -420,7 +425,7 @@ func TestResolveCredentials_RefusedTokenIsACredentialError(t *testing.T) {
 		WithObjects(mintedSecret()).
 		Build()
 
-	_, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
+	_, _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
 	var credErr *platform.CredentialError
 	if !errors.As(err, &credErr) {
 		t.Fatalf("ResolveCredentials: got %v, want a *platform.CredentialError", err)
@@ -439,7 +444,7 @@ func TestResolveCredentials_UpdatesADriftedRequest(t *testing.T) {
 		WithScheme(credentialsTestScheme(t)).
 		WithObjects(driftedRequest()).
 		Build()
-	_, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
+	_, _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
 	if !errors.Is(err, platform.ErrCredentialsPending) {
 		t.Fatalf("ResolveCredentials: got %v, want %v", err, platform.ErrCredentialsPending)
 	}
@@ -465,7 +470,7 @@ func TestResolveCredentials_UpdatesADriftedRequestWithTheSecretInPlace(t *testin
 		WithObjects(driftedRequest(), mintedSecret()).
 		Build()
 
-	cred, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
+	cred, _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
 	if err != nil {
 		t.Fatalf("ResolveCredentials: %v", err)
 	}
@@ -491,7 +496,7 @@ func TestResolveCredentials_RequestIsOwnedByTheConfiguration(t *testing.T) {
 	withAmbient(t, nil)
 
 	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).Build()
-	if _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner()); !errors.Is(err, platform.ErrCredentialsPending) {
+	if _, _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner()); !errors.Is(err, platform.ErrCredentialsPending) {
 		t.Fatalf("ResolveCredentials: got %v, want %v", err, platform.ErrCredentialsPending)
 	}
 
@@ -511,16 +516,141 @@ func TestResolveCredentials_RequestIsOwnedByTheConfiguration(t *testing.T) {
 func TestResolveCredentials_ExistingRequestIsAdopted(t *testing.T) {
 	withAmbient(t, nil)
 
-	unowned := desiredCredentialsRequest(testNamespace, metav1.OwnerReference{})
+	unowned := desiredCredentialsRequest(testNamespace, metav1.OwnerReference{}, nil)
 	unowned.SetOwnerReferences(nil)
 
 	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).WithObjects(unowned).Build()
-	if _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner()); !errors.Is(err, platform.ErrCredentialsPending) {
+	if _, _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner()); !errors.Is(err, platform.ErrCredentialsPending) {
 		t.Fatalf("ResolveCredentials: got %v, want %v", err, platform.ErrCredentialsPending)
 	}
 
 	refs := getCredentialsRequest(t, c).GetOwnerReferences()
 	if len(refs) != 1 || refs[0].UID != testOwner().UID {
 		t.Errorf("ownerReferences = %v, want the configuration adopted", refs)
+	}
+}
+
+// withTokenAuth sets the environment OLM gives the operator when the
+// console's token auth flow is used: the three values the console asks
+// for, and REGION where somebody added it to the Subscription by hand.
+func withTokenAuth(t *testing.T, clientID, tenantID, subscriptionID, region string) {
+	t.Helper()
+	t.Setenv(clientIDEnvVar, clientID)
+	t.Setenv(tenantIDEnvVar, tenantID)
+	t.Setenv(subscriptionIDEnvVar, subscriptionID)
+	t.Setenv(regionEnvVar, region)
+}
+
+func routerNode(region string) *corev1.Node {
+	return &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+		Name:   "worker-0",
+		Labels: map[string]string{"topology.kubernetes.io/region": region},
+	}}
+}
+
+// On a cluster that federates, CCO writes the secret only when the
+// request names the identity to federate with, all four fields of it.
+func TestResolveCredentials_TokenAuthNamesTheIdentity(t *testing.T) {
+	withAmbient(t, nil)
+	withTokenAuth(t, "client-id", "tenant-id", "subscription-id", "uksouth")
+	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).Build()
+
+	if _, _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner()); !errors.Is(err, platform.ErrCredentialsPending) {
+		t.Fatalf("ResolveCredentials: got %v, want %v", err, platform.ErrCredentialsPending)
+	}
+
+	cr := getCredentialsRequest(t, c)
+	for field, want := range map[string]string{
+		"azureClientID":       "client-id",
+		"azureTenantID":       "tenant-id",
+		"azureSubscriptionID": "subscription-id",
+		"azureRegion":         "uksouth",
+	} {
+		if got, _, _ := unstructured.NestedString(cr.Object, "spec", "providerSpec", field); got != want {
+			t.Errorf("providerSpec.%s = %q, want %q", field, got, want)
+		}
+	}
+}
+
+// The console asks for no region, and CCO refuses a request without
+// one, so it comes from the cluster when the Subscription carries none.
+func TestResolveCredentials_TokenAuthRegionFromNodes(t *testing.T) {
+	withAmbient(t, nil)
+	withTokenAuth(t, "client-id", "tenant-id", "subscription-id", "")
+	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).WithObjects(routerNode("centralus")).Build()
+
+	if _, _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner()); !errors.Is(err, platform.ErrCredentialsPending) {
+		t.Fatalf("ResolveCredentials: got %v, want %v", err, platform.ErrCredentialsPending)
+	}
+
+	cr := getCredentialsRequest(t, c)
+	if got, _, _ := unstructured.NestedString(cr.Object, "spec", "providerSpec", "azureRegion"); got != "centralus" {
+		t.Errorf("providerSpec.azureRegion = %q, want %q", got, "centralus")
+	}
+}
+
+// Some of the identity is worse than none: CCO fails a request that
+// names part of it. So the fields go in together or not at all.
+func TestResolveCredentials_PartialTokenAuthNamesNothing(t *testing.T) {
+	withAmbient(t, nil)
+	withTokenAuth(t, "client-id", "", "", "")
+	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).Build()
+
+	_, _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
+	if !errors.Is(err, platform.ErrCredentialsPending) {
+		t.Fatalf("ResolveCredentials: got %v, want %v", err, platform.ErrCredentialsPending)
+	}
+
+	cr := getCredentialsRequest(t, c)
+	for _, field := range []string{"azureClientID", "azureTenantID", "azureSubscriptionID", "azureRegion"} {
+		if got, found, _ := unstructured.NestedString(cr.Object, "spec", "providerSpec", field); found {
+			t.Errorf("providerSpec.%s = %q, want it absent", field, got)
+		}
+	}
+	if !strings.Contains(err.Error(), tenantIDEnvVar) {
+		t.Errorf("the wait does not name what is missing: %v", err)
+	}
+}
+
+// Without the identity, the wait on a cluster that federates never ends,
+// and the condition is the only place that says why.
+func TestResolveCredentials_PendingNamesTheSubscriptionVariables(t *testing.T) {
+	withAmbient(t, nil)
+	withTokenAuth(t, "", "", "", "")
+	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).Build()
+
+	_, _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
+	if !errors.Is(err, platform.ErrCredentialsPending) {
+		t.Fatalf("ResolveCredentials: got %v, want %v", err, platform.ErrCredentialsPending)
+	}
+	for _, name := range []string{clientIDEnvVar, tenantIDEnvVar, subscriptionIDEnvVar} {
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("the wait does not name %s: %v", name, err)
+		}
+	}
+}
+
+// Once the request names a region, that is the region: nothing about
+// the cluster's location changes between reconciles, and asking the
+// nodes again on every one adds a way for a good credential to fail.
+func TestResolveCredentials_TokenAuthKeepsTheRequestsRegion(t *testing.T) {
+	withAmbient(t, nil)
+	withTokenAuth(t, "client-id", "tenant-id", "subscription-id", "")
+	existing := desiredCredentialsRequest(testNamespace, testOwner(), map[string]interface{}{
+		"azureClientID":       "client-id",
+		"azureTenantID":       "tenant-id",
+		"azureSubscriptionID": "subscription-id",
+		"azureRegion":         "uksouth",
+	})
+	// No nodes at all, so the region can only have come from the request.
+	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).WithObjects(existing).Build()
+
+	if _, _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner()); !errors.Is(err, platform.ErrCredentialsPending) {
+		t.Fatalf("ResolveCredentials: got %v, want %v", err, platform.ErrCredentialsPending)
+	}
+
+	cr := getCredentialsRequest(t, c)
+	if got, _, _ := unstructured.NestedString(cr.Object, "spec", "providerSpec", "azureRegion"); got != "uksouth" {
+		t.Errorf("providerSpec.azureRegion = %q, want %q", got, "uksouth")
 	}
 }

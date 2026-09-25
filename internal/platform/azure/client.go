@@ -119,17 +119,29 @@ type nicClient struct {
 // one the Route Server clients use. With one it exchanges the operator's
 // projected service account token for that managed identity instead, which
 // is how interfaces in a resource group the operator's own identity cannot
-// write to are reached. The token file and tenant come from the environment
-// the workload identity webhook already populates.
+// write to are reached: on ARO the deny assignment on the managed resource
+// group lets only the cluster's own identities through.
+//
+// The tenant and the token file are named here rather than left to
+// AZURE_TENANT_ID and AZURE_FEDERATED_TOKEN_FILE, because nothing puts
+// those in this operator's environment. The token is the one the
+// deployment projects with audience openshift, so the managed identity's
+// federated credential has to name that audience and this operator's
+// service account.
 //
 // This is why the credential is passed in rather than each client building
 // its own from the SDK's chain: two identities can be in play at once, and
 // which one a client uses is a property of that client.
-func NewNICClient(subscriptionID, clientID string, cred azcore.TokenCredential) (NICClient, error) {
+func NewNICClient(subscriptionID, clientID, tenantID string, cred azcore.TokenCredential) (NICClient, error) {
 	if clientID != "" {
+		if tenantID == "" {
+			return nil, fmt.Errorf("azure credential: networkInterfaceClientID is set but the tenant is unknown; it comes from the operator's own credential secret")
+		}
 		var err error
 		cred, err = azidentity.NewWorkloadIdentityCredential(&azidentity.WorkloadIdentityCredentialOptions{
-			ClientID: clientID,
+			ClientID:      clientID,
+			TenantID:      tenantID,
+			TokenFilePath: cloudTokenPath,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("azure credential: %w", err)

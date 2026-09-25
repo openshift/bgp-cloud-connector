@@ -19,7 +19,10 @@ package azure
 import (
 	"context"
 	"fmt"
+	"os"
 	"reflect"
+	"slices"
+	"strings"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
@@ -66,6 +69,19 @@ const (
 	// azure_federated_token_file; CCO ignores it in the modes that do not
 	// federate.
 	cloudTokenPath = "/var/run/secrets/openshift/serviceaccount/token"
+
+	// clientIDEnvVar, tenantIDEnvVar and subscriptionIDEnvVar name the
+	// managed identity the operator should federate with on a cluster
+	// that does. OLM sets them from the Subscription, which is what the
+	// console writes when the CSV declares token-auth-azure.
+	clientIDEnvVar       = "CLIENTID"
+	tenantIDEnvVar       = "TENANTID"
+	subscriptionIDEnvVar = "SUBSCRIPTIONID"
+
+	// regionEnvVar is the fourth field CCO insists on. The console never
+	// asks for it, so it is optional here and read off the nodes when
+	// absent.
+	regionEnvVar = "REGION"
 
 	// managementScope is what a token has to be good for. Every call this
 	// operator makes is an ARM call.
@@ -149,7 +165,11 @@ var ambientCredential = func() (azcore.TokenCredential, error) {
 // unreachable from a pod, and spec.azure.networkInterfaceClientID means
 // two identities can be in play at once, which one process-wide chain
 // cannot express.
-func ResolveCredentials(ctx context.Context, c client.Client, namespace string, owner metav1.OwnerReference) (azcore.TokenCredential, error) {
+//
+// The tenant is returned beside the credential because the second
+// identity lives in it and nothing else in the pod names it. It is the
+// secret's; a credential found by the SDK's chain comes with none.
+func ResolveCredentials(ctx context.Context, c client.Client, namespace string, owner metav1.OwnerReference) (azcore.TokenCredential, string, error) {
 	logger := log.FromContext(ctx)
 
 	secret := &corev1.Secret{}
@@ -158,10 +178,10 @@ func ResolveCredentials(ctx context.Context, c client.Client, namespace string, 
 	case err == nil:
 		cred, err := credentialFromSecret(secret)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		if err := validateCredential(ctx, cred); err != nil {
-			return nil, &platform.CredentialError{
+			return nil, "", &platform.CredentialError{
 				Msg: fmt.Sprintf("the credential in secret %s/%s was refused: %v",
 					namespace, CredentialsSecretName, err),
 			}
@@ -178,25 +198,99 @@ func ResolveCredentials(ctx context.Context, c client.Client, namespace string, 
 		// an operator that cannot write its own request is worth
 		// seeing.
 		if err := reconcileCredentialsRequest(ctx, c, namespace, owner); err != nil {
-			return nil, err
+			return nil, "", err
 		}
-		return cred, nil
+		return cred, string(secret.Data[secretTenantID]), nil
 	case !apierrors.IsNotFound(err):
-		return nil, fmt.Errorf("reading secret %s/%s: %w", namespace, CredentialsSecretName, err)
+		return nil, "", fmt.Errorf("reading secret %s/%s: %w", namespace, CredentialsSecretName, err)
 	}
 
 	if cred, err := ambientCredential(); err == nil {
 		if err := validateCredential(ctx, cred); err == nil {
 			logger.V(1).Info("using the credential already available to this process")
-			return cred, nil
+			return cred, "", nil
 		}
 	}
 
 	if err := reconcileCredentialsRequest(ctx, c, namespace, owner); err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return nil, fmt.Errorf("%w: secret %s/%s has not been written yet",
-		platform.ErrCredentialsPending, namespace, CredentialsSecretName)
+	return nil, "", pendingError(namespace)
+}
+
+// federatedIdentity is the managed identity the Subscription names for
+// the operator to federate with.
+type federatedIdentity struct {
+	clientID, tenantID, subscriptionID string
+}
+
+// identityFromEnvironment returns the identity when all three of its
+// values are set, and otherwise the names of those that are not. Part
+// of an identity is no use: CCO fails a request that carries some of
+// the fields and not the rest.
+func identityFromEnvironment() (*federatedIdentity, []string) {
+	id := &federatedIdentity{
+		clientID:       os.Getenv(clientIDEnvVar),
+		tenantID:       os.Getenv(tenantIDEnvVar),
+		subscriptionID: os.Getenv(subscriptionIDEnvVar),
+	}
+	var missing []string
+	for name, value := range map[string]string{
+		clientIDEnvVar:       id.clientID,
+		tenantIDEnvVar:       id.tenantID,
+		subscriptionIDEnvVar: id.subscriptionID,
+	} {
+		if value == "" {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		slices.Sort(missing)
+		return nil, missing
+	}
+	return id, nil
+}
+
+// pendingError says, on a cluster that federates, why the wait will not
+// end on its own. CCO writes nothing for a request that names no
+// identity, so without this the condition reports a wait and never its
+// cause.
+func pendingError(namespace string) error {
+	id, missing := identityFromEnvironment()
+	if id != nil {
+		return fmt.Errorf("%w: secret %s/%s has not been written yet, for managed identity %s",
+			platform.ErrCredentialsPending, namespace, CredentialsSecretName, id.clientID)
+	}
+	return fmt.Errorf("%w: secret %s/%s has not been written. On a cluster with credentialsMode Manual the cloud credential operator will not write it until the Subscription names the managed identity to use; set %s",
+		platform.ErrCredentialsPending, namespace, CredentialsSecretName, strings.Join(missing, ", "))
+}
+
+// regionLabel is where the cloud provider records each node's region.
+const regionLabel = "topology.kubernetes.io/region"
+
+// identityRegion is REGION when the Subscription sets it, then the
+// region the request already names, and only then the region the nodes
+// are in. CCO refuses a request without one, and the console never asks
+// for it. A cluster does not move, so once the request has a region the
+// nodes are not asked again, and a failure to list them cannot turn a
+// good credential away.
+func identityRegion(ctx context.Context, c client.Client, current string) (string, error) {
+	if region := os.Getenv(regionEnvVar); region != "" {
+		return region, nil
+	}
+	if current != "" {
+		return current, nil
+	}
+	nodes := &corev1.NodeList{}
+	if err := c.List(ctx, nodes); err != nil {
+		return "", fmt.Errorf("listing nodes for the region: %w", err)
+	}
+	for _, node := range nodes.Items {
+		if region := node.Labels[regionLabel]; region != "" {
+			return region, nil
+		}
+	}
+	return "", fmt.Errorf("no node carries %s; set %s in the Subscription", regionLabel, regionEnvVar)
 }
 
 // credentialFromSecret names the credential the secret describes, which
@@ -254,16 +348,37 @@ func credentialFromSecret(secret *corev1.Secret) (azcore.TokenCredential, error)
 // adopts a request that has no owner, which is what a release made
 // before this one left behind.
 func reconcileCredentialsRequest(ctx context.Context, c client.Client, namespace string, owner metav1.OwnerReference) error {
-	desired := desiredCredentialsRequest(namespace, owner)
-
 	existing := &unstructured.Unstructured{}
 	existing.SetGroupVersionKind(CredentialsRequestGVK)
 	err := c.Get(ctx, types.NamespacedName{
 		Name:      CredentialsRequestName,
 		Namespace: CredentialsRequestNamespace,
 	}, existing)
-	switch {
-	case apierrors.IsNotFound(err):
+	found := err == nil
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("reading CredentialsRequest %s: %w", CredentialsRequestName, err)
+	}
+
+	var identity map[string]interface{}
+	if id, _ := identityFromEnvironment(); id != nil {
+		var current string
+		if found {
+			current, _, _ = unstructured.NestedString(existing.Object, "spec", "providerSpec", "azureRegion")
+		}
+		region, err := identityRegion(ctx, c, current)
+		if err != nil {
+			return err
+		}
+		identity = map[string]interface{}{
+			"azureClientID":       id.clientID,
+			"azureTenantID":       id.tenantID,
+			"azureSubscriptionID": id.subscriptionID,
+			"azureRegion":         region,
+		}
+	}
+	desired := desiredCredentialsRequest(namespace, owner, identity)
+
+	if !found {
 		if err := c.Create(ctx, desired); err != nil {
 			if apierrors.IsAlreadyExists(err) {
 				return nil
@@ -273,8 +388,6 @@ func reconcileCredentialsRequest(ctx context.Context, c client.Client, namespace
 		log.FromContext(ctx).Info("asked the cloud credential operator for Azure credentials",
 			"credentialsRequest", CredentialsRequestName, "secret", CredentialsSecretName)
 		return nil
-	case err != nil:
-		return fmt.Errorf("reading CredentialsRequest %s: %w", CredentialsRequestName, err)
 	}
 
 	adopted := ensureOwnerReference(existing, owner)
@@ -291,10 +404,21 @@ func reconcileCredentialsRequest(ctx context.Context, c client.Client, namespace
 	return nil
 }
 
-func desiredCredentialsRequest(namespace string, owner metav1.OwnerReference) *unstructured.Unstructured {
+// desiredCredentialsRequest is the request this release makes. identity
+// is nil, or all four fields CCO needs to federate with a managed
+// identity.
+func desiredCredentialsRequest(namespace string, owner metav1.OwnerReference, identity map[string]interface{}) *unstructured.Unstructured {
 	perms := make([]interface{}, 0, len(permissions))
 	for _, p := range permissions {
 		perms = append(perms, p)
+	}
+	providerSpec := map[string]interface{}{
+		"apiVersion":  "cloudcredential.openshift.io/v1",
+		"kind":        "AzureProviderSpec",
+		"permissions": perms,
+	}
+	for k, v := range identity {
+		providerSpec[k] = v
 	}
 
 	cr := &unstructured.Unstructured{Object: map[string]interface{}{
@@ -311,11 +435,7 @@ func desiredCredentialsRequest(namespace string, owner metav1.OwnerReference) *u
 			// administrator feeds to ccoctl is already right, rather than
 			// depending on which cluster the operator first ran on.
 			"cloudTokenPath": cloudTokenPath,
-			"providerSpec": map[string]interface{}{
-				"apiVersion":  "cloudcredential.openshift.io/v1",
-				"kind":        "AzureProviderSpec",
-				"permissions": perms,
-			},
+			"providerSpec":   providerSpec,
 		},
 	}}
 	cr.SetGroupVersionKind(CredentialsRequestGVK)

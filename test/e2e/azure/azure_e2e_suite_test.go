@@ -29,11 +29,14 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v6"
 	ginkgotypes "github.com/onsi/ginkgo/v2/types"
+	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -165,16 +168,12 @@ var _ = BeforeSuite(func() {
 	// Deliberately not used for the Route Server clients above. On a
 	// self-managed install the cluster's principal holds a role built for
 	// what the installer does, which does not include virtual hubs.
-	credSecret, err := clientset.CoreV1().Secrets("kube-system").
-		Get(context.Background(), "azure-credentials", metav1.GetOptions{})
-	Expect(err).NotTo(HaveOccurred(), "reading kube-system/azure-credentials")
-	clusterCred, err := azidentity.NewClientSecretCredential(
-		string(credSecret.Data["azure_tenant_id"]),
-		string(credSecret.Data["azure_client_id"]),
-		string(credSecret.Data["azure_client_secret"]),
-		nil,
-	)
-	Expect(err).NotTo(HaveOccurred())
+	//
+	// A cluster whose operators federate has no such secret. There the
+	// operator reaches interfaces as spec.azure.networkInterfaceClientID,
+	// a platform identity the deny assignment lets through, and so does
+	// this suite: see interfaceCredential.
+	clusterCred := interfaceCredential(context.Background())
 	nodeFactory, err := armnetwork.NewClientFactory(bgpConfig.Spec.Azure.SubscriptionID, clusterCred, nil)
 	Expect(err).NotTo(HaveOccurred())
 	nicClient = nodeFactory.NewInterfacesClient()
@@ -212,6 +211,63 @@ var _ = BeforeSuite(func() {
 	By("removing anything a previous run left behind")
 	cleanupE2EObjects(context.Background())
 })
+
+// interfaceCredential is the credential the operator itself writes node
+// interfaces with, so that a change made behind its back is made with
+// its rights and no more.
+//
+// Where CCO passes through, that is the root credential in
+// kube-system/azure-credentials. Where the cluster federates there is
+// none; the operator writes interfaces as the identity in
+// spec.azure.networkInterfaceClientID, exchanging its service
+// account's token for it, and the suite does the same with a token it
+// asks the cluster for. The identity's federated credential names the
+// operator's service account and audience openshift, which is what the
+// installer set up for the operator, so nothing extra is trusted for
+// the test.
+func interfaceCredential(ctx context.Context) azcore.TokenCredential {
+	secret, err := clientset.CoreV1().Secrets("kube-system").Get(ctx, "azure-credentials", metav1.GetOptions{})
+	if err == nil {
+		cred, err := azidentity.NewClientSecretCredential(
+			string(secret.Data["azure_tenant_id"]),
+			string(secret.Data["azure_client_id"]),
+			string(secret.Data["azure_client_secret"]),
+			nil,
+		)
+		Expect(err).NotTo(HaveOccurred())
+		return cred
+	}
+	Expect(apierrors.IsNotFound(err)).To(BeTrue(), "reading kube-system/azure-credentials: %v", err)
+
+	clientID := bgpConfig.Spec.Azure.NetworkInterfaceClientID
+	Expect(clientID).NotTo(BeEmpty(),
+		"there is no kube-system/azure-credentials, so this cluster federates, and the profile must name "+
+			"spec.azure.networkInterfaceClientID: the identity the operator writes interfaces as")
+
+	// Every cluster that federates has this, and it holds only the tenant.
+	ccoSecret, err := clientset.CoreV1().Secrets("openshift-cloud-credential-operator").
+		Get(ctx, "azure-credentials", metav1.GetOptions{})
+	Expect(err).NotTo(HaveOccurred(), "reading the tenant from openshift-cloud-credential-operator/azure-credentials")
+	tenantID := string(ccoSecret.Data["azure_tenant_id"])
+	Expect(tenantID).NotTo(BeEmpty())
+
+	expiry := int64(600)
+	cred, err := azidentity.NewClientAssertionCredential(tenantID, clientID, func(ctx context.Context) (string, error) {
+		resp, err := clientset.CoreV1().ServiceAccounts(operatorNamespace).CreateToken(ctx,
+			azureplatform.ServiceAccountName, &authenticationv1.TokenRequest{
+				Spec: authenticationv1.TokenRequestSpec{
+					Audiences:         []string{"openshift"},
+					ExpirationSeconds: &expiry,
+				},
+			}, metav1.CreateOptions{})
+		if err != nil {
+			return "", err
+		}
+		return resp.Status.Token, nil
+	}, nil)
+	Expect(err).NotTo(HaveOccurred())
+	return cred
+}
 
 // cleanupE2EObjects removes everything the suite creates and treats
 // "not there" as success, so it is safe to call on a clean cluster and
