@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
@@ -27,6 +28,8 @@ import (
 
 	networkingapi "github.com/openshift/bgp-cloud-connector/api/v1beta1"
 )
+
+var errNoMatchingNamespaces = errors.New("no matching namespaces")
 
 // CUDNValidationError is returned when the Kubernetes API server rejects a CUDN
 // object as structurally invalid (e.g. bad CIDR in spec.network.layer2.subnets).
@@ -52,8 +55,8 @@ func ValidateNamespaceLabels(ctx context.Context, c client.Client, networkName s
 		return err
 	}
 	if len(nsList.Items) == 0 {
-		return fmt.Errorf("no namespace found with labels %s=\"\" and %s=%q; create and label a namespace before applying BGPRouting",
-			LabelPrimaryUDN, LabelClusterUDN, networkName)
+		return fmt.Errorf("%w: no namespace found with labels %s=\"\" and %s=%q; create and label a namespace before applying BGPRouting",
+			errNoMatchingNamespaces, LabelPrimaryUDN, LabelClusterUDN, networkName)
 	}
 	return nil
 }

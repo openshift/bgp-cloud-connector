@@ -996,6 +996,40 @@ func TestForeignFRRConfigurations_ForgedManagedByLabel(t *testing.T) {
 	}
 }
 
+// The per-node VM host-route objects are written by this operator but owned by
+// a BGPRouting, so ownedFRRConfiguration does not recognise them. They must not
+// be counted as another consumer of the FRR provider, or the operator blocks
+// its own deletion naming objects it wrote itself.
+func TestForeignFRRConfigurations_IgnoresVMHostRoutes(t *testing.T) {
+	config := testBGPCloudConfigurationUID()
+	vmRoute := newForeignFRRConfig(FRRNamespace, VMHostRouteNamePrefix+"0123456789abcdef",
+		map[string]interface{}{LabelManagedBy: LabelManagedByVMHostRoutes})
+	c := fake.NewClientBuilder().WithScheme(configTestScheme()).WithObjects(vmRoute).Build()
+	got, err := foreignFRRConfigurations(context.Background(), c, config)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %v, want none: our own VM host routes must never block deletion", got)
+	}
+}
+
+// A copied VM host-route label is not enough either: the name is not one we
+// generate, so this object still blocks the revert.
+func TestForeignFRRConfigurations_ForgedVMHostRouteLabel(t *testing.T) {
+	config := testBGPCloudConfigurationUID()
+	forged := newForeignFRRConfig(FRRNamespace, "forged-vm-frr",
+		map[string]interface{}{LabelManagedBy: LabelManagedByVMHostRoutes})
+	c := fake.NewClientBuilder().WithScheme(configTestScheme()).WithObjects(forged).Build()
+	got, err := foreignFRRConfigurations(context.Background(), c, config)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 || got[0] != FRRNamespace+"/forged-vm-frr" {
+		t.Errorf("got %v, want the forged object reported as another consumer", got)
+	}
+}
+
 // legacyManagedFRRConfiguration decides what upgrade adopts, prunes and deletes,
 // so every term of it is worth pinning down.
 func TestLegacyManagedFRRConfiguration(t *testing.T) {

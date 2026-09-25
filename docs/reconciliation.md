@@ -99,10 +99,17 @@ Phase 2: Ensure Route Advertisements
   └── Condition: RouteAdvertisementsCreated
           │
           ▼
+Phase 3: Ensure VM host routes
+  ├── List running VirtualMachineInstances in selected primary-UDN namespaces
+  ├── Write one FRRConfiguration per hosting router node with guest /32 or /128 prefixes
+  ├── Remove stale per-node FRRConfigurations after a VM stops or moves
+  └── Condition: VMHostRoutesConfigured
+          │
+          ▼
      phase: Ready
 ```
 
-**On deletion:** delete the owned ClusterUserDefinedNetwork. The shared RouteAdvertisements is deleted only when the last BGPRouting CR is removed.
+**On deletion:** delete the owned per-node VM host-route FRRConfigurations and ClusterUserDefinedNetwork. The shared RouteAdvertisements is deleted only when the last BGPRouting CR is removed.
 
 ## Status phases and error handling
 
@@ -117,7 +124,7 @@ Both CRs use the same phase enum. `BGPRouting` follows `Pending` → `Configurin
 
 **BGPCloudConfiguration conditions:**
 
-| Condition | Degraded Reason | Cause |
+| Condition | Reason | Cause |
 |:---|:---|:---|
 | `NetworkOperatorPatched` | `PatchFailed` | Failed to patch `Network.operator.openshift.io/cluster` |
 | `FRRNamespaceReady` | `CheckFailed` | Error checking FRR readiness (distinct from simply waiting) |
@@ -134,12 +141,16 @@ See [aws-authentication.md](aws-authentication.md#troubleshooting) for the crede
 
 **BGPRouting conditions:**
 
-| Condition | Degraded Reason | Cause |
+| Condition | Reason | Cause |
 |:---|:---|:---|
 | `NetworkCreated` | `DuplicateNetwork` | `spec.network.name` already claimed by another BGPRouting CR |
 | `NetworkCreated` | `NamespaceNotReady` | No namespace found with required labels (`k8s.ovn.org/primary-user-defined-network: ""` and `cluster-udn: <name>`) |
 | `NetworkCreated` | `CUDNFailed` | Failed to create/update the ClusterUserDefinedNetwork |
 | `RouteAdvertisementsCreated` | `RAFailed` | Failed to ensure the shared RouteAdvertisements |
+| `VMHostRoutesConfigured` | `VMHostRoutesFailed` | Failed to discover VMIs or write/prune host-route FRRConfigurations |
+| `VMHostRoutesConfigured` | `VMIAPIUnavailable` | KubeVirt's VMI API disappeared while host routes still exist. Existing routes are preserved; restore KubeVirt or remove confirmed stale host-route FRRConfigurations. The routing CR remains `Ready` because the network is configured. |
+| `VMHostRoutesConfigured` | `VMHostRoutesIncomplete` | A VM is on a node without a matching BGP peer, or its address family has no matching peer. The routing CR remains `Ready`. |
+| `VMHostRoutesConfigured` | `WaitingForVMAddresses` | A VMI has no usable address yet. The routing CR remains `Ready` and retries every 5 seconds. |
 
 Non-terminal `Degraded` states are retried automatically every 30 seconds. Terminal reasons do **not** retry: `DuplicateNetwork` here (and `CloudCredentialsInvalid` / `RouteServerNotFound` on `BGPCloudConfiguration`) stay `Degraded` until the underlying problem is corrected and reconciliation is triggered again externally.
 
@@ -149,8 +160,10 @@ Non-terminal `Degraded` states are retried automatically every 30 seconds. Termi
 |:---|:---|:---|
 | BGPCloudConfiguration | `Node` (label/address/providerID changes) | `cluster` singleton |
 | BGPRouting | `ClusterUserDefinedNetwork` (label-filtered) | owning `BGPRouting` CR |
+| BGPRouting | `Node` label changes; `BGPCloudConfiguration` BGP changes; `BGPRouting` network-name changes | all routing CRs |
+| BGPRouting | `VirtualMachineInstance` when KubeVirt exists at startup; otherwise `kubevirt.io=virt-launcher` Pods | routing CR for the workload's primary-UDN namespace |
 
-The `app.kubernetes.io/managed-by: bgp-cloud-connector` label filter applies only to the generated-resource watch: the `ClusterUserDefinedNetwork` watch ignores objects that do not carry it. The `Node` watch is **not** label-filtered — any BGP-relevant Node change (labels, addresses, or `providerID`) triggers reconciliation of the `cluster` singleton regardless of labels. In addition, both controllers re-reconcile every 5 minutes in the `Ready` state as a safety-net backstop.
+The `app.kubernetes.io/managed-by: bgp-cloud-connector` label filter applies to generated ClusterUserDefinedNetworks. The BGPCloudConfiguration controller watches BGP-relevant Node labels, addresses, and provider IDs; the BGPRouting controller watches Node label changes. When KubeVirt is absent at startup, the fallback Pod informer has a server-side `kubevirt.io=virt-launcher` selector. Pods read for FRR readiness bypass the cache. Both controllers also reconcile every 5 minutes in the `Ready` state.
 
 `FRRConfiguration` and `RouteAdvertisements` are deliberately not watched. Neither CRD exists until the operator patches the Network operator, so watching them would mean the manager could only start on a cluster where its own work had already been done: it would fail to sync those caches and exit. Drift on the `FRRConfigurations` and the shared `RouteAdvertisements` the operator writes is corrected at the next resync instead, so it is noticed within `--resync-interval` rather than immediately.
 
