@@ -19,6 +19,7 @@
 #
 #   enable FRR                     hack/enable-frr.sh
 #   stand up the estate            hack/aws/create-route-servers.sh
+#   a client outside the cluster   hack/aws/create-client-instance.sh
 #   label the router nodes         hack/label-router-nodes.sh
 #   describe what was built        hack/aws/write-e2e-profile.sh
 #   run the suite                  make test-e2e-aws
@@ -80,7 +81,15 @@ require_route_server_api
 # is not eBGP. write-e2e-profile.sh checks that rather than assuming it.
 "${here}/aws/create-route-servers.sh"
 
-"${here}/label-router-nodes.sh"
+"${here}/aws/create-client-instance.sh"
+
+# One worker is left out of the router set, so E2E-AWS-06 has a pod on a
+# node that is not a BGP speaker as well as pods on nodes that are.
+# Without one the suite cannot see the reply path
+# openshift/bgp-cloud-connector#121 describes, which AWS shares with
+# Azure. The other specs check whatever router set this leaves, so a
+# smaller one costs them nothing.
+NON_ROUTER_WORKERS="${NON_ROUTER_WORKERS:-1}" "${here}/label-router-nodes.sh"
 
 # Into the scratch directory, so the suite reads a profile describing
 # the estate that is actually up and the repository is left exactly as

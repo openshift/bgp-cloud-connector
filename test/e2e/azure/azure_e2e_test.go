@@ -77,7 +77,7 @@ var _ = Describe("Azure E2E", Ordered, func() {
 		By("applying BGPCloudConfiguration CR")
 		configCR = bgpConfig.DeepCopy()
 		configCR.ResourceVersion = ""
-		Expect(k8sClient.Create(ctx, configCR)).To(Succeed())
+		Expect(e2e.CreateOrReuse(ctx, k8sClient, configCR, e2e.ReuseCRs)).To(Succeed())
 
 		By("waiting for config phase=Ready")
 		Eventually(func(g Gomega) {
@@ -96,12 +96,12 @@ var _ = Describe("Azure E2E", Ordered, func() {
 				},
 			},
 		}
-		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
+		Expect(e2e.CreateOrReuse(ctx, k8sClient, ns, e2e.ReuseCRs)).To(Succeed())
 
 		By("applying BGPRouting CR")
 		routingCR = bgpRouting.DeepCopy()
 		routingCR.ResourceVersion = ""
-		Expect(k8sClient.Create(ctx, routingCR)).To(Succeed())
+		Expect(e2e.CreateOrReuse(ctx, k8sClient, routingCR, e2e.ReuseCRs)).To(Succeed())
 
 		By("waiting for routing phase=Ready")
 		Eventually(func(g Gomega) {
@@ -349,6 +349,66 @@ var _ = Describe("Azure E2E", Ordered, func() {
 
 			By("waiting for every router node to be Established again")
 			assertBGPEstablished(ctx)
+		})
+	})
+
+	// ---------------------------------------------------------------
+	// E2E-AZURE-06: traffic from outside the cluster
+	//
+	// Before E2E-AZURE-05, which removes everything this needs. The
+	// container is Ordered, so position is what decides.
+	// ---------------------------------------------------------------
+	Context("E2E-AZURE-06: Traffic from outside the cluster", func() {
+		It("should reach a pod on every worker whose interface forwards, "+
+			"from the client VM's own address, and no other", func(ctx context.Context) {
+			namespace := bgpRouting.Spec.Network.Name
+
+			By("reading the client VM's address")
+			vmAddress, err := clientVMAddress(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("running a netexec pod on every worker")
+			Expect(e2e.EnsureNetexec(ctx, k8sClient, namespace)).To(Succeed())
+
+			// Each node's expected result comes from its interface as
+			// Azure reports it, not from its labels. A pod's reply leaves
+			// through its own node's interface with the advertised
+			// network's address as its source, and Azure drops that unless
+			// forwarding is enabled on that interface. A node that left
+			// the router set keeps whatever forwarding it was given, so
+			// labels alone cannot say which nodes answer.
+			// openshift/bgp-cloud-connector#121 describes the case where
+			// the answer is no.
+			var dests []e2e.Destination
+			Eventually(func(g Gomega) {
+				found, findErr := destinations(ctx, namespace)
+				g.Expect(findErr).NotTo(HaveOccurred())
+				dests = found
+			}).WithTimeout(5 * time.Minute).WithPolling(pollInterval).Should(Succeed())
+
+			routers, err := routerNodes(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			isRouter := map[string]bool{}
+			for _, n := range routers {
+				isRouter[n.Name] = true
+			}
+			addresses := make([]string, 0, len(dests))
+			for _, d := range dests {
+				GinkgoWriter.Printf("worker %s: pod %s, router=%v, forwarding=%v\n",
+					d.Node, d.PodAddress, isRouter[d.Node], d.Forwarding)
+				addresses = append(addresses, d.PodAddress)
+			}
+
+			By(fmt.Sprintf("requesting /clientip from every pod via the client VM at %s", vmAddress))
+			Eventually(func(g Gomega) {
+				answers, probeErr := probe(ctx, addresses)
+				g.Expect(probeErr).NotTo(HaveOccurred())
+				g.Expect(e2e.CheckAnswers(dests, answers, vmAddress)).To(Succeed())
+			}).WithTimeout(5 * time.Minute).WithPolling(30 * time.Second).Should(Succeed())
+
+			// After the probe, so that a run which trips this has already
+			// shown whether every pod it could reach answered.
+			Expect(e2e.CheckCoverage(dests)).To(Succeed())
 		})
 	})
 

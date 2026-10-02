@@ -113,8 +113,13 @@ fi
 # transient API failure must not be the end of it. The delete is
 # idempotent and re-derives what is left on each run, so a retry costs
 # a call and nothing else.
+#
+# The client instance goes first and separately: it shares nothing with
+# the route servers but the VPC, and either script can be run on its own
+# at a desk.
 for attempt in $(seq 1 "${attempts}"); do
-    if INFRA="${infra}" AWS_REGION="${region}" "${here}/aws/delete-route-servers.sh"; then
+    if INFRA="${infra}" AWS_REGION="${region}" "${here}/aws/delete-client-instance.sh" &&
+       INFRA="${infra}" AWS_REGION="${region}" "${here}/aws/delete-route-servers.sh"; then
         if [[ "${cluster_side_failed}" == true ]]; then
             die "the cloud resources are gone, but cluster-side cleanup failed" \
                 "Nothing is billing. The next run against this cluster may trip" \
@@ -131,4 +136,5 @@ done
 
 die "teardown failed after ${attempts} attempts: cloud resources are still up" \
     "Tear them down with:" \
+    "INFRA=${infra} AWS_REGION=${region} hack/aws/delete-client-instance.sh" \
     "INFRA=${infra} AWS_REGION=${region} hack/aws/delete-route-servers.sh"

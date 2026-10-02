@@ -208,6 +208,10 @@ var _ = BeforeSuite(func() {
 	// spec removed everything, which is the behaviour it asserts; a
 	// failing run leaves it dirty on purpose; and the next run starts
 	// clean either way.
+	if e2e.ReuseCRs {
+		GinkgoWriter.Println("E2E_REUSE_CRS=1: keeping whatever a previous run left on the cluster")
+		return
+	}
 	By("removing anything a previous run left behind")
 	cleanupE2EObjects(context.Background())
 })

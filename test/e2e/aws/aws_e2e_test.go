@@ -63,7 +63,7 @@ var _ = Describe("AWS E2E", Ordered, func() {
 			By("applying BGPCloudConfiguration CR")
 			configCR := bgpConfig.DeepCopy()
 			configCR.ResourceVersion = ""
-			Expect(k8sClient.Create(ctx, configCR)).To(Succeed())
+			Expect(e2e.CreateOrReuse(ctx, k8sClient, configCR, e2e.ReuseCRs)).To(Succeed())
 
 			By("waiting for config phase=Ready")
 			Eventually(func(g Gomega) {
@@ -139,12 +139,12 @@ var _ = Describe("AWS E2E", Ordered, func() {
 					},
 				},
 			}
-			Expect(k8sClient.Create(ctx, ns)).To(Succeed())
+			Expect(e2e.CreateOrReuse(ctx, k8sClient, ns, e2e.ReuseCRs)).To(Succeed())
 
 			By("applying BGPRouting CR")
 			routingCR := bgpRouting.DeepCopy()
 			routingCR.ResourceVersion = ""
-			Expect(k8sClient.Create(ctx, routingCR)).To(Succeed())
+			Expect(e2e.CreateOrReuse(ctx, k8sClient, routingCR, e2e.ReuseCRs)).To(Succeed())
 
 			By("waiting for routing phase=Ready")
 			Eventually(func(g Gomega) {
@@ -337,6 +337,68 @@ var _ = Describe("AWS E2E", Ordered, func() {
 				g.Expect(aws.ToBool(eni.SourceDestCheck)).To(BeFalse(),
 					"SourceDestCheck should be disabled on %s", node.Name)
 			}).WithTimeout(reconcileTimeout).WithPolling(pollInterval).Should(Succeed())
+		})
+	})
+
+	// ---------------------------------------------------------------
+	// E2E-AWS-06: traffic from outside the cluster
+	//
+	// Before E2E-AWS-05, which removes everything this needs. The
+	// container is Ordered, so position is what decides.
+	// ---------------------------------------------------------------
+	Context("E2E-AWS-06: Traffic from outside the cluster", func() {
+		It("should reach a pod on every worker whose interface forwards, "+
+			"from the client instance's own address, and no other", func(ctx context.Context) {
+			namespace := bgpRouting.Spec.Network.Name
+
+			By("finding the client instance")
+			instanceID, clientAddress, err := clientInstance(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("running a netexec pod on every worker")
+			Expect(e2e.EnsureNetexec(ctx, k8sClient, namespace)).To(Succeed())
+
+			// Each node's expected result comes from its interface as EC2
+			// reports it, not from its labels. A pod's reply leaves
+			// through its own node's interface with the advertised
+			// network's address as its source, and EC2 drops that unless
+			// source/destination checking is off on that interface. A node
+			// that left the router set keeps whatever setting it was
+			// given, so labels alone cannot say which nodes answer.
+			var dests []e2e.Destination
+			Eventually(func(g Gomega) {
+				found, findErr := destinations(ctx, namespace)
+				g.Expect(findErr).NotTo(HaveOccurred())
+				dests = found
+			}).WithTimeout(5 * time.Minute).WithPolling(pollInterval).Should(Succeed())
+
+			routers, err := routerNodes(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			isRouter := map[string]bool{}
+			for _, n := range routers {
+				isRouter[n.Name] = true
+			}
+			addresses := make([]string, 0, len(dests))
+			for _, d := range dests {
+				GinkgoWriter.Printf("worker %s: pod %s, router=%v, forwarding=%v\n",
+					d.Node, d.PodAddress, isRouter[d.Node], d.Forwarding)
+				addresses = append(addresses, d.PodAddress)
+			}
+
+			// Longer than on Azure: AWS reported the peers up and
+			// programmed the learned route about six minutes after the
+			// CRs were applied, measured once. The specs before this one
+			// normally cover that, but the probe should not depend on it.
+			By(fmt.Sprintf("requesting /clientip from every pod via the client instance at %s", clientAddress))
+			Eventually(func(g Gomega) {
+				answers, probeErr := probe(ctx, instanceID, addresses)
+				g.Expect(probeErr).NotTo(HaveOccurred())
+				g.Expect(e2e.CheckAnswers(dests, answers, clientAddress)).To(Succeed())
+			}).WithTimeout(10 * time.Minute).WithPolling(30 * time.Second).Should(Succeed())
+
+			// After the probe, so that a run which trips this has already
+			// shown whether every pod it could reach answered.
+			Expect(e2e.CheckCoverage(dests)).To(Succeed())
 		})
 	})
 

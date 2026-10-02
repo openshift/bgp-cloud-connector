@@ -13,6 +13,7 @@
 #
 #   enable FRR                     hack/enable-frr.sh
 #   stand up the estate            hack/azure/create-route-server.sh
+#   a client outside the cluster   hack/azure/create-client-vm.sh
 #   label the router nodes         hack/label-router-nodes.sh
 #   describe what was built        hack/azure/write-e2e-profile.sh
 #
@@ -65,7 +66,14 @@ info "az: $(az version --query '"azure-cli"' -o tsv 2>/dev/null || echo unknown)
 
 "${here}/azure/create-route-server.sh"
 
-"${here}/label-router-nodes.sh"
+"${here}/azure/create-client-vm.sh"
+
+# One worker is left out of the router set, so E2E-AZURE-06 has a pod on
+# a node that is not a BGP speaker as well as pods on nodes that are.
+# Without one the suite cannot see the reply path
+# openshift/bgp-cloud-connector#121 describes. E2E-AZURE-04 needs two
+# routers, which three workers still leave.
+NON_ROUTER_WORKERS="${NON_ROUTER_WORKERS:-1}" "${here}/label-router-nodes.sh"
 
 # Into the scratch directory, so a suite reads a profile describing the
 # estate that is actually up and the repository is left exactly as it
