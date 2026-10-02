@@ -18,10 +18,20 @@ package controller
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// ClientOptions keeps secrets out of the manager's cache.
+// CacheOptions limits the Pod informer to KubeVirt launcher Pods at the API
+// server, including its initial LIST.
+func CacheOptions() cache.Options {
+	return cache.Options{ByObject: map[client.Object]cache.ByObject{
+		&corev1.Pod{}: {Label: labels.SelectorFromSet(labels.Set{"kubevirt.io": "virt-launcher"})},
+	}}
+}
+
+// ClientOptions keeps secrets and Pods out of the manager's cache.
 //
 // The operator reads exactly one secret -- the credentials the cloud
 // credential operator writes for it -- and is granted get on exactly
@@ -36,14 +46,15 @@ import (
 // reconcile that already makes a live sts:GetCallerIdentity call, and it
 // buys a Role that names the single secret the operator is entitled to.
 //
-// Nothing else is taken out of the cache. Nodes, pods, namespaces and
-// the downstream custom resources are read on every reconcile and are
-// granted cluster-wide; serving those live would turn each reconcile
-// into a burst of API calls.
+// Pods are also read directly. The operator only lists the small set of
+// frr-k8s Pods during cloud-configuration reconciliation; caching that list
+// would otherwise retain every Pod in the cluster. VM lifecycle events use
+// either the VirtualMachineInstance informer or the separately filtered
+// virt-launcher Pod informer.
 func ClientOptions() client.Options {
 	return client.Options{
 		Cache: &client.CacheOptions{
-			DisableFor: []client.Object{&corev1.Secret{}},
+			DisableFor: []client.Object{&corev1.Secret{}, &corev1.Pod{}},
 		},
 	}
 }

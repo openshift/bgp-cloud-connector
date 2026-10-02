@@ -36,8 +36,16 @@ func EnsureRouteAdvertisements(ctx context.Context, c client.Client) error {
 				},
 			},
 			"spec": map[string]interface{}{
-				"nodeSelector":             map[string]interface{}{},
-				"frrConfigurationSelector": map[string]interface{}{},
+				"nodeSelector": map[string]interface{}{},
+				"frrConfigurationSelector": map[string]interface{}{
+					"matchExpressions": []interface{}{
+						map[string]interface{}{
+							"key":      LabelManagedBy,
+							"operator": "NotIn",
+							"values":   []interface{}{LabelManagedByVMHostRoutes},
+						},
+					},
+				},
 				"networkSelectors": []interface{}{
 					map[string]interface{}{
 						"networkSelectionType": "ClusterUserDefinedNetworks",

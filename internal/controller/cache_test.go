@@ -17,9 +17,11 @@ limitations under the License.
 package controller
 
 import (
+	"reflect"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 )
 
 // The operator reads exactly one secret and is granted get on exactly
@@ -40,12 +42,36 @@ func TestClientOptions_DoesNotCacheSecrets(t *testing.T) {
 	t.Errorf("secrets are still cached: DisableFor is %v", cacheOpts.DisableFor)
 }
 
-// Nothing else should be taken out of the cache by accident. Nodes, pods
-// and the downstream custom resources are read on every reconcile and
-// are granted cluster-wide; serving those from the API server instead
-// would turn each reconcile into a burst of live reads.
+// The operator only needs a small labelled set of FRR Pods. Reading it live
+// avoids retaining every Pod in the cluster just to serve that list.
+func TestClientOptions_DoesNotCachePods(t *testing.T) {
+	cacheOpts := ClientOptions().Cache
+	for _, obj := range cacheOpts.DisableFor {
+		if _, ok := obj.(*corev1.Pod); ok {
+			return
+		}
+	}
+	t.Errorf("pods are still cached: DisableFor is %v", cacheOpts.DisableFor)
+}
+
 func TestClientOptions_CachesEverythingElse(t *testing.T) {
-	if got := len(ClientOptions().Cache.DisableFor); got != 1 {
-		t.Errorf("%d types bypass the cache, want only secrets", got)
+	disabled := ClientOptions().Cache.DisableFor
+	if len(disabled) != 2 || reflect.TypeOf(disabled[0]) != reflect.TypeOf(&corev1.Secret{}) ||
+		reflect.TypeOf(disabled[1]) != reflect.TypeOf(&corev1.Pod{}) {
+		t.Fatalf("DisableFor = %v, want only Secret and Pod", disabled)
+	}
+}
+
+func TestCacheOptions_OnlyWatchesVirtLauncherPods(t *testing.T) {
+	byObject := CacheOptions().ByObject
+	if len(byObject) != 1 {
+		t.Fatalf("ByObject has %d entries, want only Pod", len(byObject))
+	}
+	for object, options := range byObject {
+		if _, ok := object.(*corev1.Pod); !ok || options.Label == nil ||
+			!options.Label.Matches(labels.Set{"kubevirt.io": "virt-launcher"}) ||
+			options.Label.Matches(labels.Set{"app": "unrelated"}) {
+			t.Fatalf("Pod cache selector = %v for %T", options.Label, object)
+		}
 	}
 }

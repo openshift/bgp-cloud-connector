@@ -212,6 +212,8 @@ spec:
 | `spec.network.name` | Yes | Identifies the CUDN network. The operator creates a ClusterUserDefinedNetwork named `cluster-udn-<name>` that selects namespaces with label `cluster-udn: <name>`. Users must pre-create and label namespaces. |
 | `spec.network.subnets[]` | Yes | CIDRs for the CUDN pod network (1 or 2 entries for single-stack or dual-stack). The operator hardcodes `topology: Layer2`, `role: Primary`, and `ipam.lifecycle: Persistent` on the generated CUDN. |
 
+`BGPRouting` advertises a running VM's guest address as a `/32` or `/128` from its hosting worker when that worker matches the router node and peer-group selectors. It creates one host-route `FRRConfiguration` per hosting node in `openshift-frr-k8s`, owned by the `BGPRouting`. Routes move after the VMI's reported `status.nodeName` changes at migration cutover. A VM without an address or matching peer is reported through `VMHostRoutesConfigured`; it does not prevent the network from reaching `Ready`.
+
 ## Operator-generated resources
 
 ### Network operator patch (from BGPCloudConfiguration)
