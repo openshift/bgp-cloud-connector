@@ -47,6 +47,7 @@ import (
 	networkingapi "github.com/openshift/bgp-cloud-connector/api/v1beta1"
 	"github.com/openshift/bgp-cloud-connector/internal/controller"
 	bgptls "github.com/openshift/bgp-cloud-connector/internal/tls"
+	"github.com/openshift/bgp-cloud-connector/internal/trustedca"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -97,6 +98,9 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
+	// A cancellable context so the trusted CA watcher can stop the manager and
+	// let the kubelet restart the container when the proxy CA bundle rotates, so
+	// the new process rebuilds its certificate pool from the refreshed mount.
 	ctx, cancel := context.WithCancel(ctrl.SetupSignalHandler())
 	defer cancel()
 
@@ -282,6 +286,12 @@ func main() {
 
 	if err := tlsProfile.SetupProfileWatch(logr.NewContext(ctx, setupLog), mgr, cancel); err != nil {
 		setupLog.Error(err, "unable to set up TLS profile watch")
+		os.Exit(1)
+	}
+
+	trustedCAWatcher := trustedca.New(logr.NewContext(ctx, setupLog), cancel)
+	if err := trustedCAWatcher.SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to set up trusted CA watcher")
 		os.Exit(1)
 	}
 
