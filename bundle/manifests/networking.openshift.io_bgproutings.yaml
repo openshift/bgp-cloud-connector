@@ -25,9 +25,19 @@ spec:
     - jsonPath: .status.phase
       name: Phase
       type: string
+    - jsonPath: .status.conditions[?(@.type=='Available')].status
+      name: Available
+      type: string
+    - jsonPath: .status.conditions[?(@.type=='Available')].reason
+      name: Reason
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
+    - jsonPath: .status.conditions[?(@.type=='Available')].message
+      name: Message
+      priority: 1
+      type: string
     name: v1beta1
     schema:
       openAPIV3Schema:
@@ -150,6 +160,17 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              namespaces:
+                description: |-
+                  Namespaces are the namespaces currently selected into this network by
+                  their labels, and therefore the namespaces whose pods are advertised via
+                  BGP. It is reported so an administrator can confirm the network covers
+                  what they intended without re-running the label query. Empty while the
+                  network is not Ready.
+                items:
+                  type: string
+                type: array
+                x-kubernetes-list-type: atomic
               observedGeneration:
                 description: ObservedGeneration is the most recent generation observed
                   by the controller.
