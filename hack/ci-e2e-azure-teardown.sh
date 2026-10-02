@@ -134,8 +134,15 @@ fi
 # transient API failure must not be the end of it. The delete is
 # idempotent and re-derives what is left on each run, so a retry costs
 # a call and nothing else.
+#
+# The client VM goes first and separately: it shares nothing with the
+# Route Server but the vnet, each script removes only the address prefix
+# it recorded adding, and either can be run on its own at a desk.
 for attempt in $(seq 1 "${attempts}"); do
     if INFRA="${infra}" AZURE_RESOURCE_GROUP="${rg}" \
+       AZURE_NETWORK_RESOURCE_GROUP="${net_rg}" \
+       "${here}/azure/delete-client-vm.sh" &&
+       INFRA="${infra}" AZURE_RESOURCE_GROUP="${rg}" \
        AZURE_NETWORK_RESOURCE_GROUP="${net_rg}" \
        "${here}/azure/delete-route-server.sh"; then
         if [[ "${cluster_side_failed}" == true ]]; then
@@ -154,5 +161,7 @@ done
 
 die "teardown failed after ${attempts} attempts: cloud resources are still up" \
     "Tear them down with:" \
+    "INFRA=${infra} AZURE_RESOURCE_GROUP=${rg} \\" \
+    "  AZURE_NETWORK_RESOURCE_GROUP=${net_rg} hack/azure/delete-client-vm.sh" \
     "INFRA=${infra} AZURE_RESOURCE_GROUP=${rg} \\" \
     "  AZURE_NETWORK_RESOURCE_GROUP=${net_rg} hack/azure/delete-route-server.sh"

@@ -19,6 +19,7 @@ package azure_e2e
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -208,6 +209,10 @@ var _ = BeforeSuite(func() {
 	// spec removed everything, which is the behaviour it asserts; a
 	// failing run leaves it dirty on purpose; and the next run starts
 	// clean either way.
+	if reuseCRs {
+		GinkgoWriter.Println("E2E_REUSE_CRS=1: keeping whatever a previous run left on the cluster")
+		return
+	}
 	By("removing anything a previous run left behind")
 	cleanupE2EObjects(context.Background())
 })
@@ -267,6 +272,44 @@ func interfaceCredential(ctx context.Context) azcore.TokenCredential {
 	}, nil)
 	Expect(err).NotTo(HaveOccurred())
 	return cred
+}
+
+// reuseCRs keeps a previous run's custom resources instead of starting
+// from nothing, for iterating on one spec at a desk:
+//
+//	E2E_REUSE_CRS=1 E2E_MANIFEST_DIR=<profile> \
+//	    go test ./test/e2e/azure/ -v -count=1 -timeout 90m -args -ginkgo.focus=AZURE-06
+//
+// Starting clean costs the operator's whole teardown and rebuild of the
+// Route Server peerings, several minutes each. Focus away from
+// E2E-AZURE-05 when using it: that spec deletes the resources this
+// exists to keep.
+var reuseCRs = os.Getenv("E2E_REUSE_CRS") == "1"
+
+// createOrReuse creates obj, or under E2E_REUSE_CRS adopts the one a
+// previous run left, reading it back into obj. Without E2E_REUSE_CRS an
+// object that already exists is an error, as it always was: the run
+// began by removing everything, so finding one means something else put
+// it there.
+//
+// An adopted object must be the one the manifest describes. One left by
+// a run against a different profile would have the operator working to
+// a different spec from the one the specs assert against, and the
+// result would mislead rather than fail.
+func createOrReuse(ctx context.Context, obj client.Object) error {
+	desired := obj.DeepCopyObject()
+	err := k8sClient.Create(ctx, obj)
+	if !reuseCRs || !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(obj), obj); err != nil {
+		return err
+	}
+	if err := e2e.CheckAdopted(desired, obj); err != nil {
+		return fmt.Errorf("E2E_REUSE_CRS: cannot reuse %T %s: %w", obj, obj.GetName(), err)
+	}
+	GinkgoWriter.Printf("reusing %T %s\n", obj, obj.GetName())
+	return nil
 }
 
 // cleanupE2EObjects removes everything the suite creates and treats

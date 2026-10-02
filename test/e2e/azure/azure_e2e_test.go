@@ -77,7 +77,7 @@ var _ = Describe("Azure E2E", Ordered, func() {
 		By("applying BGPCloudConfiguration CR")
 		configCR = bgpConfig.DeepCopy()
 		configCR.ResourceVersion = ""
-		Expect(k8sClient.Create(ctx, configCR)).To(Succeed())
+		Expect(createOrReuse(ctx, configCR)).To(Succeed())
 
 		By("waiting for config phase=Ready")
 		Eventually(func(g Gomega) {
@@ -96,12 +96,12 @@ var _ = Describe("Azure E2E", Ordered, func() {
 				},
 			},
 		}
-		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
+		Expect(createOrReuse(ctx, ns)).To(Succeed())
 
 		By("applying BGPRouting CR")
 		routingCR = bgpRouting.DeepCopy()
 		routingCR.ResourceVersion = ""
-		Expect(k8sClient.Create(ctx, routingCR)).To(Succeed())
+		Expect(createOrReuse(ctx, routingCR)).To(Succeed())
 
 		By("waiting for routing phase=Ready")
 		Eventually(func(g Gomega) {
@@ -349,6 +349,99 @@ var _ = Describe("Azure E2E", Ordered, func() {
 
 			By("waiting for every router node to be Established again")
 			assertBGPEstablished(ctx)
+		})
+	})
+
+	// ---------------------------------------------------------------
+	// E2E-AZURE-06: traffic from outside the cluster
+	//
+	// Before E2E-AZURE-05, which removes everything this needs. The
+	// container is Ordered, so position is what decides.
+	// ---------------------------------------------------------------
+	Context("E2E-AZURE-06: Traffic from outside the cluster", func() {
+		It("should reach a pod on every worker whose interface forwards, "+
+			"from the client VM's own address, and no other", func(ctx context.Context) {
+			namespace := bgpRouting.Spec.Network.Name
+
+			By("reading the client VM's address")
+			vmAddress, err := clientVMAddress(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("running a netexec pod on every worker")
+			ensureNetexec(ctx, namespace)
+
+			// Each node's expected result comes from its interface as
+			// Azure reports it, not from its labels. A pod's reply leaves
+			// through its own node's interface with the advertised
+			// network's address as its source, and Azure drops that unless
+			// forwarding is enabled on that interface. A node that left
+			// the router set keeps whatever forwarding it was given, so
+			// labels alone cannot say which nodes answer.
+			// openshift/bgp-cloud-connector#121 describes the case where
+			// the answer is no.
+			var dests []destination
+			Eventually(func(g Gomega) {
+				found, findErr := destinations(ctx, namespace)
+				g.Expect(findErr).NotTo(HaveOccurred())
+				dests = found
+			}).WithTimeout(5 * time.Minute).WithPolling(pollInterval).Should(Succeed())
+
+			routers, err := routerNodes(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			isRouter := map[string]bool{}
+			for _, n := range routers {
+				isRouter[n.Name] = true
+			}
+			forwarding := 0
+			addresses := make([]string, 0, len(dests))
+			for _, d := range dests {
+				GinkgoWriter.Printf("worker %s: pod %s, router=%v, forwarding=%v\n",
+					d.Node, d.PodAddress, isRouter[d.Node], d.Forwarding)
+				addresses = append(addresses, d.PodAddress)
+				if d.Forwarding {
+					forwarding++
+				}
+			}
+			Expect(forwarding).To(BeNumerically(">", 0),
+				"no worker's interface forwards, so nothing can be reachable; E2E-AZURE-01 should have caught this")
+
+			By(fmt.Sprintf("requesting /clientip from every pod via the client VM at %s", vmAddress))
+			Eventually(func(g Gomega) {
+				answers, probeErr := probe(ctx, addresses)
+				g.Expect(probeErr).NotTo(HaveOccurred())
+				for _, d := range dests {
+					answer := answers[d.PodAddress]
+					if d.Forwarding {
+						// The source the pod saw. The VM's own address
+						// means the request arrived without SNAT and the
+						// reply made it back.
+						g.Expect(answer).NotTo(BeEmpty(),
+							"pod %s on %s did not answer, though its interface forwards", d.PodAddress, d.Node)
+						g.Expect(sourceHost(answer)).To(Equal(vmAddress),
+							"pod %s on %s saw the request come from %s rather than the client VM", d.PodAddress, d.Node, answer)
+					} else {
+						g.Expect(answer).To(BeEmpty(),
+							"pod %s on %s answered although its interface does not forward; "+
+								"the reply path #121 describes has changed", d.PodAddress, d.Node)
+					}
+				}
+			}).WithTimeout(5 * time.Minute).WithPolling(30 * time.Second).Should(Succeed())
+
+			// After the probe, so that a run which trips this has already
+			// shown whether every pod it could reach answered.
+			//
+			// The job leaves one worker out of the router set so that a
+			// node without forwarding is always tested. Without one, the
+			// "must not answer" half above checks nothing and the spec
+			// passes regardless. That happens either because the job no
+			// longer leaves a worker out, or because #121 has been fixed
+			// and the operator now enables forwarding on non-router nodes.
+			// The second is meant to fail here: whoever fixes it should
+			// change this spec to assert that the non-router pod answers.
+			Expect(len(dests)-forwarding).To(BeNumerically(">", 0),
+				"no worker without forwarding, so the openshift/bgp-cloud-connector#121 case was not exercised: "+
+					"either the job no longer leaves a non-router node, or #121 has been fixed; "+
+					"if fixed, change this spec to assert that the non-router pod answers")
 		})
 	})
 

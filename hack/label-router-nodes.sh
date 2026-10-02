@@ -14,6 +14,13 @@
 #
 # Workers only. The router nodes are where pod traffic lands, and
 # peering from a master would put BGP on a node that carries none.
+#
+# NON_ROUTER_WORKERS=<n> leaves the last n workers, in name order,
+# unlabelled, and takes the label off them if a previous run put it
+# there. That is the shape the Azure data-plane spec needs: a worker
+# that hosts pods but is not a BGP speaker, whose pods are reachable
+# only if its own interface forwards. Unset, every worker is a router,
+# as before.
 
 set -o nounset
 set -o errexit
@@ -25,6 +32,7 @@ source "${repo_root}/hack/lib/common.sh"
 
 key="${ROUTER_LABEL_KEY:-bgp_router}"
 value="${ROUTER_LABEL_VALUE:-true}"
+non_routers="${NON_ROUTER_WORKERS:-0}"
 remove=false
 
 for arg in "$@"; do
@@ -42,8 +50,19 @@ nodes="$(oc get nodes -l node-role.kubernetes.io/worker -o name)" \
 [[ -n "${nodes}" ]] || die "no nodes with the worker role" \
     "The operator peers from workers; a cluster with none has nothing to label."
 
-for node in ${nodes}; do
-    if [[ "${remove}" == true ]]; then
+[[ "${non_routers}" =~ ^[0-9]+$ ]] \
+    || die "NON_ROUTER_WORKERS is '${non_routers}', which is not a number"
+
+# Sorted, so which workers are left out is the same on every run.
+mapfile -t workers < <(print_fields "${nodes}" | sort)
+routers=$(( ${#workers[@]} - non_routers ))
+if [[ "${remove}" != true ]] && (( routers < 1 )); then
+    die "NON_ROUTER_WORKERS=${non_routers} leaves none of the ${#workers[@]} workers as a router"
+fi
+
+for i in "${!workers[@]}"; do
+    node="${workers[$i]}"
+    if [[ "${remove}" == true ]] || (( i >= routers )); then
         oc label "${node}" "${key}-" --overwrite >/dev/null
         ok "unlabelled ${node#node/}"
     else
