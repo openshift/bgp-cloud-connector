@@ -48,29 +48,47 @@ func testScheme() *runtime.Scheme {
 	return s
 }
 
-func TestValidateNamespaceLabels_Found(t *testing.T) {
-	existing := &corev1.Namespace{
+func TestMatchedNamespaces_Found(t *testing.T) {
+	// Two members, deliberately out of order, to pin the sorted result.
+	nsB := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "app1",
-			Labels: map[string]string{
-				LabelPrimaryUDN: "",
-				LabelClusterUDN: "prod",
-			},
+			Name:   "app2",
+			Labels: map[string]string{LabelPrimaryUDN: "", LabelClusterUDN: "prod"},
 		},
 	}
-	c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(existing).Build()
+	nsA := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "app1",
+			Labels: map[string]string{LabelPrimaryUDN: "", LabelClusterUDN: "prod"},
+		},
+	}
+	// A namespace in a different network must not be matched.
+	other := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "app3",
+			Labels: map[string]string{LabelPrimaryUDN: "", LabelClusterUDN: "staging"},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(nsB, nsA, other).Build()
 
-	if err := ValidateNamespaceLabels(context.Background(), c, "prod"); err != nil {
+	got, err := MatchedNamespaces(context.Background(), c, "prod")
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 2 || got[0] != "app1" || got[1] != "app2" {
+		t.Errorf("expected sorted [app1 app2], got %v", got)
 	}
 }
 
-func TestValidateNamespaceLabels_NotFound(t *testing.T) {
+func TestMatchedNamespaces_NotFound(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme()).Build()
 
-	err := ValidateNamespaceLabels(context.Background(), c, "prod")
+	got, err := MatchedNamespaces(context.Background(), c, "prod")
 	if err == nil {
 		t.Fatal("expected error when no namespace has required labels")
+	}
+	if got != nil {
+		t.Errorf("expected nil names on error, got %v", got)
 	}
 }
 

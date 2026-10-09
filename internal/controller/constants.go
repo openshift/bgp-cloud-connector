@@ -24,6 +24,15 @@ const (
 
 	ConditionDeletionBlocked = "DeletionBlocked"
 
+	// Aggregate summary conditions roll the granular per-step conditions up
+	// into a single machine-readable health signal, mirroring the OpenShift
+	// ClusterOperator convention. Available is the one surfaced in a
+	// printcolumn, so `kubectl get` and `kubectl wait --for=condition=Available`
+	// both work without parsing the free-form Phase.
+	ConditionAvailable   = "Available"
+	ConditionProgressing = "Progressing"
+	ConditionDegraded    = "Degraded"
+
 	SingletonName = "cluster"
 	FRRNamespace  = "openshift-frr-k8s"
 	// DefaultOperatorNamespace is where the operator runs unless the
@@ -71,15 +80,23 @@ const (
 	ReasonRAFailed             = "RAFailed"
 
 	// Success / informational reasons
+	ReasonAsExpected              = "AsExpected"
 	ReasonPatched                 = "Patched"
 	ReasonWaitingForFRR           = "WaitingForFRR"
 	ReasonFRRReady                = "Ready"
 	ReasonDiscovered              = "Discovered"
 	ReasonApplied                 = "Applied"
 	ReasonReconciled              = "Reconciled"
+	ReasonNodesComplete           = "Complete"
 	ReasonCreated                 = "Created"
 	ReasonRoutingCRsExist         = "RoutingCRsExist"
 	ReasonExternalFRRConfigsExist = "ExternalFRRConfigsExist"
+
+	// Transient wait reasons — not faults, so reported like a step in progress
+	// rather than through setDegraded.
+	ReasonNodesIncomplete            = "NodesIncomplete"
+	ReasonWaitingForCloudCredentials = "WaitingForCloudCredentials"
+	ReasonWaitingForConfig           = "WaitingForConfig"
 )
 
 // TerminalDegradedReasons returns condition reasons that must not schedule RequeueAfter.
