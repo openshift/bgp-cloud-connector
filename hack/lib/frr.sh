@@ -61,6 +61,29 @@ network_settled() {
     [[ "$(oc get co network -o jsonpath='{.status.conditions[?(@.type=="Progressing")].status}')" == "False" ]]
 }
 
+# CNO renders route advertisements into ovnkube-node's start script, and
+# the changed script is what rolls ovnkube-node. Until it says true, a
+# fully rolled-out ovnkube-node is still the one from before the patch.
+ovnkube_route_advertisements_rendered() {
+    local script
+    script="$(oc get configmap -n openshift-ovn-kubernetes ovnkube-script-lib \
+        -o jsonpath='{.data.ovnkube-lib\.sh}' 2>/dev/null)" || return 1
+    grep -B1 -F 'route_advertisements_enable_flag="--enable-route-advertisements"' <<<"${script}" \
+        | grep -qF '"true" == "true"'
+}
+
+# Every ovnkube-node pod is from the daemonset's current generation and
+# available, and the daemonset controller has seen that generation.
+ovnkube_node_rolled_out() {
+    local fields gen observed desired updated available
+    fields="$(oc get ds -n openshift-ovn-kubernetes ovnkube-node \
+        -o jsonpath='{.metadata.generation} {.status.observedGeneration} {.status.desiredNumberScheduled} {.status.updatedNumberScheduled} {.status.numberAvailable}' 2>/dev/null)" \
+        || return 1
+    read -r gen observed desired updated available <<<"${fields}"
+    [[ -n "${desired}" && "${desired}" != "0" && "${gen}" == "${observed}" \
+        && "${updated}" == "${desired}" && "${available}" == "${desired}" ]]
+}
+
 # One field of the frr-k8s daemonset. Prints nothing and succeeds when
 # the daemonset does not exist yet, which is the ordinary state during
 # an enable; returns non-zero when the read itself failed, which is not
@@ -144,8 +167,8 @@ frr_wait_guard() {
     return 0
 }
 
-# Done when the daemonset this patch creates is fully ready and CNO has
-# settled. The daemonset is the signal because it is something the patch
+# Done when the daemonset this patch creates is fully ready, ovnkube-node
+# has rolled out with route advertisements on, and CNO has settled. The daemonset is the signal because it is something the patch
 # actually changes and the starting state cannot already satisfy in the
 # direction that matters -- unlike CRD presence, which a disable only
 # partly removes (measured: bgpsessionstates and frrnodestates go,
@@ -159,13 +182,23 @@ frr_enabled_done() {
     desired="$(frr_daemonset desiredNumberScheduled)" || return 1
     ready="$(frr_daemonset numberReady)" || return 1
 
-    if [[ -n "${desired}" && "${desired}" != "0" && "${ready}" == "${desired}" ]] \
-        && network_settled; then
-        return 0
+    if [[ -z "${desired}" || "${desired}" == "0" || "${ready}" != "${desired}" ]]; then
+        info "  frr-k8s ${ready:-0}/${desired:-?} ready"
+        return 1
     fi
-
-    info "  frr-k8s ${ready:-0}/${desired:-?} ready"
-    return 1
+    if ! ovnkube_route_advertisements_rendered; then
+        info "  ovnkube-node not yet rendered with route advertisements"
+        return 1
+    fi
+    if ! ovnkube_node_rolled_out; then
+        info "  ovnkube-node still rolling out"
+        return 1
+    fi
+    if ! network_settled; then
+        info "  co/network still Progressing"
+        return 1
+    fi
+    return 0
 }
 
 # Done when CNO has removed the namespace and settled.

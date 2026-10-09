@@ -143,6 +143,9 @@ echo "--- lib/frr.sh ---"
 # The whole cluster, as far as these functions can tell.
 stub_caps=""; stub_ra=""; stub_degraded="False"
 stub_progressing="False"; stub_ns="absent"; stub_desired=""; stub_ready=""
+# ovnkube-node: whether CNO has rendered route advertisements into its
+# script, and "generation observedGeneration desired updated available".
+stub_ovnk_ra="false"; stub_ovnk_ds=""
 
 oc() {
     case "$*" in
@@ -156,6 +159,10 @@ oc() {
                 absent)  echo 'Error from server (NotFound): namespaces "openshift-frr-k8s" not found' >&2; return 1 ;;
                 *)       echo "The connection to the server was refused" >&2; return 1 ;;
             esac ;;
+        *ovnkube-script-lib*)
+            printf 'if [[ "%s" == "true" ]]; then\n    route_advertisements_enable_flag="--enable-route-advertisements"\n  fi\n' \
+                "${stub_ovnk_ra}" ;;
+        *"ds -n openshift-ovn-kubernetes ovnkube-node"*) printf '%s' "${stub_ovnk_ds}" ;;
         *desiredNumberScheduled*)        printf '%s' "${stub_desired}" ;;
         *numberReady*)                   printf '%s' "${stub_ready}" ;;
         *) echo "unstubbed oc call: $*" >&2; return 1 ;;
@@ -166,6 +173,7 @@ enabled_cluster() {
     stub_caps='{"providers":["FRR"]}'; stub_ra="Enabled"
     stub_ns="present"; stub_desired="6"; stub_ready="6"
     stub_progressing="False"; stub_degraded="False"
+    stub_ovnk_ra="true"; stub_ovnk_ds="3 3 6 6 6"
 }
 disabled_cluster() {
     stub_caps=""; stub_ra="Disabled"
@@ -190,6 +198,20 @@ check "frr_enabled_done waits while the daemonset is partial" \
     "$(frr_enabled_done >/dev/null; echo $?)" "1"
 enabled_cluster; stub_progressing="True"
 check "frr_enabled_done waits while co/network is Progressing" \
+    "$(frr_enabled_done >/dev/null; echo $?)" "1"
+
+# Regression, measured on 4.22.16: frr-k8s 6/6 and co/network not
+# Progressing while ovnkube-node had 5 of 6 pods updated, so
+# enable-frr.sh reported "frr enabled" before ovnkube-node was running
+# with route advertisements on every node.
+enabled_cluster; stub_ovnk_ra="false"; stub_ovnk_ds="2 2 6 6 6"
+check "frr_enabled_done waits until ovnkube-node is rendered with route advertisements" \
+    "$(frr_enabled_done >/dev/null; echo $?)" "1"
+enabled_cluster; stub_ovnk_ds="3 3 6 5 5"
+check "frr_enabled_done waits while ovnkube-node is rolling out" \
+    "$(frr_enabled_done >/dev/null; echo $?)" "1"
+enabled_cluster; stub_ovnk_ds="3 2 6 6 6"
+check "frr_enabled_done waits until the new ovnkube-node generation is observed" \
     "$(frr_enabled_done >/dev/null; echo $?)" "1"
 
 # Regression, measured on 4.22.9: patch to disable and the daemonset is

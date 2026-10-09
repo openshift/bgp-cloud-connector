@@ -17,13 +17,56 @@ limitations under the License.
 package e2e
 
 import (
+	"context"
 	"fmt"
+	"os"
 	"reflect"
 	"sort"
 	"strings"
 
+	"github.com/onsi/ginkgo/v2"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+// ReuseCRs keeps a previous run's custom resources instead of starting
+// from nothing, for iterating on one spec at a desk:
+//
+//	E2E_REUSE_CRS=1 E2E_MANIFEST_DIR=<profile> \
+//	    go test ./test/e2e/<cloud>/ -v -count=1 -timeout 90m -args -ginkgo.focus=<spec>
+//
+// Starting clean costs the operator's whole teardown and rebuild of the
+// Route Server peerings, several minutes each. Focus away from each
+// suite's cleanup spec, E2E-AZURE-05 or E2E-AWS-05, when using it: that
+// spec deletes the resources this exists to keep.
+var ReuseCRs = os.Getenv("E2E_REUSE_CRS") == "1"
+
+// CreateOrReuse creates obj, or when reuse is set adopts the one a
+// previous run left, reading it back into obj. Without reuse an object
+// that already exists is an error, as it always was: finding one means
+// something other than this run put it there.
+//
+// An adopted object must be the one the manifest describes. One left by
+// a run against a different profile would have the operator working to
+// a different spec from the one the specs assert against, and the
+// result would mislead rather than fail.
+func CreateOrReuse(ctx context.Context, c client.Client, obj client.Object, reuse bool) error {
+	desired := obj.DeepCopyObject()
+	err := c.Create(ctx, obj)
+	if !reuse || !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(obj), obj); err != nil {
+		return err
+	}
+	if err := CheckAdopted(desired, obj); err != nil {
+		return fmt.Errorf("E2E_REUSE_CRS: cannot reuse %T %s: %w", obj, obj.GetName(), err)
+	}
+	ginkgo.GinkgoWriter.Printf("reusing %T %s\n", obj, obj.GetName())
+	return nil
+}
 
 // adoptable is anything a suite creates from a manifest and may adopt
 // from a previous run instead.

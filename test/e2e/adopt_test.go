@@ -17,11 +17,15 @@ limitations under the License.
 package e2e
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	networkingapi "github.com/openshift/bgp-cloud-connector/api/v1beta1"
 )
@@ -111,5 +115,63 @@ func TestCheckAdoptedIgnoresFieldsOnlyTheClusterSet(t *testing.T) {
 
 	if err := CheckAdopted(desired, stored); err != nil {
 		t.Fatalf("a field only the cluster set should not count as a mismatch: %v", err)
+	}
+}
+
+func TestCreateOrReuse(t *testing.T) {
+	namespace := func(cudn string) *corev1.Namespace {
+		return &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+			Name:   "prod",
+			Labels: map[string]string{"cluster-udn": cudn},
+		}}
+	}
+
+	for _, tc := range []struct {
+		name     string
+		existing *corev1.Namespace
+		reuse    bool
+		check    func(t *testing.T, err error)
+	}{
+		{"absent", nil, false, func(t *testing.T, err error) {
+			if err != nil {
+				t.Errorf("creating an absent object: %v", err)
+			}
+		}},
+		{"absent, reusing", nil, true, func(t *testing.T, err error) {
+			if err != nil {
+				t.Errorf("creating an absent object: %v", err)
+			}
+		}},
+		{"present, not reusing", namespace("prod"), false, func(t *testing.T, err error) {
+			if !apierrors.IsAlreadyExists(err) {
+				t.Errorf("want AlreadyExists when not reusing, got %v", err)
+			}
+		}},
+		{"present and matching, reusing", namespace("prod"), true, func(t *testing.T, err error) {
+			if err != nil {
+				t.Errorf("adopting a matching object: %v", err)
+			}
+		}},
+		{"present and different, reusing", namespace("other"), true, func(t *testing.T, err error) {
+			if err == nil || !strings.Contains(err.Error(), "E2E_REUSE_CRS") ||
+				!strings.Contains(err.Error(), "cluster-udn") {
+				t.Errorf("want an E2E_REUSE_CRS error naming the label that differs, got %v", err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := fake.NewClientBuilder().WithScheme(clientgoscheme.Scheme)
+			if tc.existing != nil {
+				b = b.WithObjects(tc.existing)
+			}
+			c := b.Build()
+
+			obj := namespace("prod")
+			err := CreateOrReuse(context.Background(), c, obj, tc.reuse)
+			tc.check(t, err)
+			if err == nil && obj.ResourceVersion == "" {
+				t.Errorf("obj was not read back from the cluster")
+			}
+		})
 	}
 }
