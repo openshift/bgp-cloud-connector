@@ -118,9 +118,19 @@ spec:
         # every resolve.
         - name: tmp
           mountPath: /tmp
+        # Replace the image's trust store with the cluster's trusted CA bundle
+        # so egress to the cloud through a TLS-intercepting proxy is trusted.
+        # Mounted as a directory (not a subPath) so the kubelet refreshes it in
+        # place when the bundle rotates.
+        - name: trusted-ca
+          mountPath: /etc/pki/tls/certs
+          readOnly: true
       volumes:
       - name: tmp
         emptyDir: {}
+      - name: trusted-ca
+        configMap:
+          name: trusted-ca
       - name: bound-sa-token
         projected:
           sources:

@@ -52,7 +52,7 @@ metadata:
       on AWS (VPC Route Server) and works on-premise with explicit configuration.
     features.operators.openshift.io/disconnected: "true"
     features.operators.openshift.io/fips-compliant: "true"
-    features.operators.openshift.io/proxy-aware: "false"
+    features.operators.openshift.io/proxy-aware: "true"
     features.operators.openshift.io/tls-profiles: "true"
     features.operators.openshift.io/token-auth-aws: "true"
     features.operators.openshift.io/token-auth-azure: "true"
@@ -286,6 +286,9 @@ spec:
                   readOnly: true
                 - mountPath: /tmp
                   name: tmp
+                - mountPath: /etc/pki/tls/certs
+                  name: trusted-ca
+                  readOnly: true
                 - mountPath: /var/run/secrets/serving-cert
                   name: metrics-cert
                   readOnly: true
@@ -298,6 +301,9 @@ spec:
               volumes:
               - emptyDir: {}
                 name: tmp
+              - configMap:
+                  name: openshift-bgp-cloud-connector-trusted-ca
+                name: trusted-ca
               - name: bound-sa-token
                 projected:
                   sources:
