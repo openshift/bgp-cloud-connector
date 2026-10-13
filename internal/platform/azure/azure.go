@@ -112,8 +112,13 @@ func (p *Platform) ReconcileNodes(ctx context.Context, nodes []platform.RouterNo
 		return err
 	}
 
-	desired := make([]Peer, 0, len(nodes))
-	for _, n := range nodes {
+	peers := platform.Speakers(nodes)
+	if len(peers) == 0 {
+		return nil
+	}
+
+	desired := make([]Peer, 0, len(peers))
+	for _, n := range peers {
 		desired = append(desired, Peer{
 			Name:    peeringName(p.cfg.ClusterID, n.PrivateIP),
 			PeerIP:  n.PrivateIP,
@@ -125,14 +130,14 @@ func (p *Platform) ReconcileNodes(ctx context.Context, nodes []platform.RouterNo
 	if err != nil {
 		return fmt.Errorf("reconciling Route Server peerings: %w", err)
 	}
-	managed, err := p.countManagedPeers(ctx, nodes)
+	managed, err := p.countManagedPeers(ctx, peers)
 	if err != nil {
 		return err
 	}
 	platform.SetCloudPeersManaged(platform.PlatformAzure, float64(managed))
 	if changed {
 		logger.Info("Route Server peerings updated",
-			"routeServer", p.cfg.RouteServerName, "nodes", len(nodes))
+			"routeServer", p.cfg.RouteServerName, "nodes", len(peers))
 	}
 	return nil
 }
