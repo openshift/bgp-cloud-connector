@@ -405,6 +405,80 @@ var _ = Describe("AWS E2E", Ordered, func() {
 	})
 
 	// ---------------------------------------------------------------
+	// E2E-AWS-07: forwardingNodeSelector
+	//
+	// After E2E-AWS-06 and before E2E-AWS-05. This spec turns
+	// SourceDestCheck off on every worker, and the operator does not
+	// turn it back on, so 06 has to run first while a worker still
+	// drops replies. The container is Ordered, so position decides.
+	// ---------------------------------------------------------------
+	Context("E2E-AWS-07: forwardingNodeSelector", func() {
+		It("should answer from every worker once the selector matches them, without adding peers", func(ctx context.Context) {
+			namespace := bgpRouting.Spec.Network.Name
+
+			By("finding the client instance")
+			instanceID, clientAddress, err := clientInstance(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("making sure a netexec pod is running on every worker")
+			Expect(e2e.EnsureNetexec(ctx, k8sClient, namespace)).To(Succeed())
+
+			before, err := allManagedPeers(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			beforeIPs := peerAddresses(before)
+
+			By("setting forwardingNodeSelector to every worker")
+			cfg := &networkingapi.BGPCloudConfiguration{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: bgpConfig.Name}, cfg)).To(Succeed())
+			patch := client.MergeFrom(cfg.DeepCopy())
+			cfg.Spec.ForwardingNodeSelector = map[string]string{e2e.WorkerRoleLabel: ""}
+			Expect(k8sClient.Patch(ctx, cfg, patch)).To(Succeed())
+
+			By("waiting until every worker interface forwards")
+			var dests []e2e.Destination
+			Eventually(func(g Gomega) {
+				fresh := &networkingapi.BGPCloudConfiguration{}
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: bgpConfig.Name}, fresh)).To(Succeed())
+				g.Expect(fresh.Status.Phase).To(Equal(networkingapi.PhaseReady))
+
+				found, findErr := destinations(ctx, namespace)
+				g.Expect(findErr).NotTo(HaveOccurred())
+				g.Expect(found).NotTo(BeEmpty())
+				for _, d := range found {
+					g.Expect(d.Forwarding).To(BeTrue(), "SourceDestCheck still enabled on %s", d.Node)
+				}
+				dests = found
+			}).WithTimeout(reconcileTimeout).WithPolling(pollInterval).Should(Succeed())
+
+			// At least one worker must not already be a speaker, or this selector adds nobody.
+			routers, err := routerNodes(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(routers).NotTo(BeEmpty())
+			Expect(len(dests)).To(BeNumerically(">", len(routers)))
+
+			// Workers matched only by forwardingNodeSelector must not be added as peers.
+			after, err := allManagedPeers(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(peerAddresses(after)).To(Equal(beforeIPs))
+
+			addresses := make([]string, 0, len(dests))
+			workers := make([]string, 0, len(dests))
+			for _, d := range dests {
+				addresses = append(addresses, d.PodAddress)
+				workers = append(workers, d.Node)
+			}
+
+			// The advertised prefix is already programmed. The remaining wait is the reply from the other workers.
+			By(fmt.Sprintf("requesting /clientip from every pod via the client instance at %s", clientAddress))
+			e2e.ProbeAllowingOVNKubeRestart(ctx, k8sClient, workers, 2*time.Minute, 30*time.Second, func(g Gomega) {
+				answers, probeErr := probe(ctx, instanceID, addresses)
+				g.Expect(probeErr).NotTo(HaveOccurred())
+				g.Expect(e2e.CheckAnswers(dests, answers, clientAddress)).To(Succeed())
+			})
+		})
+	})
+
+	// ---------------------------------------------------------------
 	// E2E-AWS-05: Full cleanup lifecycle
 	// ---------------------------------------------------------------
 	Context("E2E-AWS-05: Full cleanup lifecycle", func() {
