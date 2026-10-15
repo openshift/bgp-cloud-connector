@@ -5,6 +5,8 @@
 #
 #   hack/ci-e2e-azure.sh
 #
+# Probe change for observing e2e-aro-hcp-operator; not for merging.
+#
 # The sequencing is ours rather than ci-operator's for two reasons.
 #
 # A test that specifies post steps overrides the workflow's post rather
