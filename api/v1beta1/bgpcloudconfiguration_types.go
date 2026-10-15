@@ -276,6 +276,7 @@ type BGPConfig struct {
 // +kubebuilder:validation:XValidation:rule="(self.platform == 'GCP') == has(self.gcp)",message="spec.gcp must be set when spec.platform is GCP, and must be absent otherwise"
 // +kubebuilder:validation:XValidation:rule="self.platform != 'Manual' || (has(self.bgp.peerGroups) && size(self.bgp.peerGroups) > 0)",message="spec.bgp.peerGroups is required when spec.platform is Manual"
 // +kubebuilder:validation:XValidation:rule="self.platform == 'Manual' || !has(self.bgp.peerGroups) || size(self.bgp.peerGroups) == 0",message="spec.bgp.peerGroups may only be set when spec.platform is Manual"
+// +kubebuilder:validation:XValidation:rule="self.platform != 'Manual' || !has(self.forwardingNodeSelector)",message="spec.forwardingNodeSelector may only be set when spec.platform is not Manual"
 type BGPCloudConfigurationSpec struct {
 	// platform selects the cloud provider integration mode.
 	// AWS auto-discovers BGP endpoints from VPC Route Servers.
@@ -287,6 +288,25 @@ type BGPCloudConfigurationSpec struct {
 	// routerNodeSelector is a set of labels that identify which cluster nodes
 	// act as BGP routers. Must match labels applied to BGP router machine pools.
 	RouterNodeSelector map[string]string `json:"routerNodeSelector"`
+	// forwardingNodeSelector selects nodes that send packets sourced from a
+	// CUDN address. That address is not assigned to the node's cloud
+	// interface, so the cloud drops the packet unless the interface is allowed
+	// to pass it. Speakers selected by routerNodeSelector are always included,
+	// whether or not they match this field. Nodes that match only this field
+	// get that interface change and do not become BGP peers.
+	//
+	// The field is optional so an upgrade leaves existing clusters unchanged.
+	// Unset means only speakers are updated. A selector that matches no nodes
+	// has the same result. An empty map is rejected, because an empty label
+	// set matches every node.
+	//
+	// On AWS this clears SourceDestCheck, on Azure it sets enableIPForwarding,
+	// and on GCP it sets canIpForward. The field must be absent when platform
+	// is Manual, because cloud reconciliation does not run.
+	//
+	// +optional
+	// +kubebuilder:validation:MinProperties=1
+	ForwardingNodeSelector map[string]string `json:"forwardingNodeSelector,omitempty"`
 	// aws holds the AWS-specific configuration for auto-discovery of BGP
 	// infrastructure. Required when platform is AWS; must not be set otherwise.
 	// +optional

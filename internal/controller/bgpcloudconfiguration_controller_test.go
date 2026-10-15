@@ -925,6 +925,146 @@ func TestConfigReconcile_AWSNodeFiltering(t *testing.T) {
 	t.Error("CompleteNodeInventory condition not found")
 }
 
+func TestConfigReconcile_ForwardingNodesAreNotPeered(t *testing.T) {
+	mock := &mockPlatform{}
+	config := newTestBGPCloudConfigurationWithAWS()
+	config.Finalizers = []string{ConfigFinalizerName}
+	config.Spec.ForwardingNodeSelector = map[string]string{"cudn": "true"}
+	s := configTestScheme()
+
+	network := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "operator.openshift.io/v1",
+			"kind":       "Network",
+			"metadata":   map[string]interface{}{"name": "cluster"},
+			"spec":       map[string]interface{}{},
+		},
+	}
+	frrNS := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: FRRNamespace}}
+	frrPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "frr-k8s-pod", Namespace: FRRNamespace, Labels: map[string]string{"app": "frr-k8s"}},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+
+	router := newRouterNode("router", "10.0.1.10", "us-east-1a", "aws:///us-east-1a/i-router")
+	router.Labels["cudn"] = "true"
+	worker := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "worker",
+			Labels: map[string]string{
+				"cudn":                        "true",
+				"topology.kubernetes.io/zone": "us-east-1a",
+			},
+		},
+		Spec: corev1.NodeSpec{ProviderID: "aws:///us-east-1a/i-worker"},
+		Status: corev1.NodeStatus{
+			Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.1.20"}},
+		},
+	}
+	bystander := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "bystander",
+			Labels: map[string]string{"topology.kubernetes.io/zone": "us-east-1a"},
+		},
+		Spec: corev1.NodeSpec{ProviderID: "aws:///us-east-1a/i-other"},
+		Status: corev1.NodeStatus{
+			Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.1.30"}},
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(config, network, frrNS, frrPod, router, worker, bystander).
+		WithStatusSubresource(config).
+		Build()
+	r := &BGPCloudConfigurationReconciler{
+		Client: c, Scheme: s,
+		PlatformBuilder: func(_ context.Context, _ client.Client, _ *networkingapi.BGPCloudConfiguration) (platform.CloudPlatform, error) {
+			return mock, nil
+		},
+	}
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}}); err != nil {
+		t.Fatalf("reconcile error: %v", err)
+	}
+	got := map[string]bool{}
+	for _, n := range mock.reconcileNodesArgs {
+		got[n.Name] = n.ForwardingOnly
+	}
+	if len(got) != 2 {
+		t.Fatalf("ReconcileNodes = %v, want router and worker", nodeNames(mock.reconcileNodesArgs))
+	}
+	if forwardingOnly, ok := got["router"]; !ok || forwardingOnly {
+		t.Errorf("router ForwardingOnly=%v present=%v, want a speaker", forwardingOnly, ok)
+	}
+	if forwardingOnly, ok := got["worker"]; !ok || !forwardingOnly {
+		t.Errorf("worker ForwardingOnly=%v present=%v, want forwarding-only", forwardingOnly, ok)
+	}
+	if _, ok := got["bystander"]; ok {
+		t.Errorf("bystander was passed to ReconcileNodes")
+	}
+}
+
+func TestConfigReconcile_UnsetForwardingSelectorAddsNoNodes(t *testing.T) {
+	mock := &mockPlatform{}
+	config := newTestBGPCloudConfigurationWithAWS()
+	config.Finalizers = []string{ConfigFinalizerName}
+	s := configTestScheme()
+
+	network := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "operator.openshift.io/v1",
+			"kind":       "Network",
+			"metadata":   map[string]interface{}{"name": "cluster"},
+			"spec":       map[string]interface{}{},
+		},
+	}
+	frrNS := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: FRRNamespace}}
+	frrPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "frr-k8s-pod", Namespace: FRRNamespace, Labels: map[string]string{"app": "frr-k8s"}},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	router := newRouterNode("router", "10.0.1.10", "us-east-1a", "aws:///us-east-1a/i-router")
+	worker := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "worker",
+			Labels: map[string]string{
+				"cudn":                        "true",
+				"topology.kubernetes.io/zone": "us-east-1a",
+			},
+		},
+		Spec: corev1.NodeSpec{ProviderID: "aws:///us-east-1a/i-worker"},
+		Status: corev1.NodeStatus{
+			Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.1.20"}},
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(config, network, frrNS, frrPod, router, worker).
+		WithStatusSubresource(config).
+		Build()
+	r := &BGPCloudConfigurationReconciler{
+		Client: c, Scheme: s,
+		PlatformBuilder: func(_ context.Context, _ client.Client, _ *networkingapi.BGPCloudConfiguration) (platform.CloudPlatform, error) {
+			return mock, nil
+		},
+	}
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}}); err != nil {
+		t.Fatalf("reconcile error: %v", err)
+	}
+	if len(mock.reconcileNodesArgs) != 1 || mock.reconcileNodesArgs[0].Name != "router" || mock.reconcileNodesArgs[0].ForwardingOnly {
+		t.Fatalf("ReconcileNodes = %+v, want speaker [router]", mock.reconcileNodesArgs)
+	}
+}
+
+func nodeNames(nodes []platform.RouterNode) []string {
+	names := make([]string, len(nodes))
+	for i, n := range nodes {
+		names[i] = n.Name
+	}
+	return names
+}
+
 func TestConfigReconcile_DeleteSucceedsWithCredentialFailure(t *testing.T) {
 	now := metav1.Now()
 	config := newTestBGPCloudConfigurationWithAWS()

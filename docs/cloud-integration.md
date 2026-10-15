@@ -36,7 +36,7 @@ application ingress rules in the node security group.
 | Verify credentials | `sts:GetCallerIdentity` | Every reconcile (before any EC2 calls); credentials resolved as described in [AWS authentication](aws-authentication.md) |
 | Discover Route Server infrastructure | `DescribeRouteServers`, `DescribeRouteServerEndpoints`, `DescribeSubnets` | Every reconcile (before FRR configuration) |
 | Reconcile Route Server peers | `DescribeRouteServerPeers`, `CreateRouteServerPeer`, `DeleteRouteServerPeer`, `CreateTags` | BGP-enabled worker node added, removed, or IP changed |
-| Disable SourceDestCheck | `DescribeInstances`, `ModifyNetworkInterfaceAttribute` | New BGP-enabled worker node detected |
+| Disable SourceDestCheck | `DescribeInstances`, `ModifyNetworkInterfaceAttribute` | New BGP speaker, or a node matching `spec.forwardingNodeSelector` |
 
 **Auto-discovery:** The operator discovers Route Server endpoints, their ENI addresses (BGP neighbor IPs), availability zones, and the Route Server's remote ASN automatically from the provided Route Server IDs. The user does not need to specify per-AZ endpoint IDs or neighbor addresses — the operator derives them via `DescribeRouteServerEndpoints` (endpoint ID + ENI address + subnet), `DescribeSubnets` (subnet → AZ mapping), and `DescribeRouteServers` (remote ASN). The peering plan it arrives at is written to `status.peerGroups` for observability. This also drives FRR configuration generation — the operator creates one FRRConfiguration per discovered AZ with the discovered neighbor addresses.
 
@@ -49,7 +49,7 @@ Azure models a Route Server as a **Virtual Hub**. The actions the operator perfo
 | Action | Azure API | Trigger |
 |:---|:---|:---|
 | Discover neighbours | `VirtualHubsClient.Get` — reads `virtualRouterIps` (neighbours) and `virtualRouterAsn` (remote ASN) | Every reconcile |
-| Enable IP forwarding | `InterfacesClient` read-modify-write of `enableIPForwarding` on the router-node NIC | New BGP-enabled worker node detected (done **before** peering) |
+| Enable IP forwarding | `InterfacesClient` read-modify-write of `enableIPForwarding` on the node's NIC | New BGP speaker, or a node matching `spec.forwardingNodeSelector` (done **before** peering) |
 | Reconcile Route Server BGP connections | `VirtualHubBgpConnectionClient.BeginCreateOrUpdate` / `BeginDelete` | BGP-enabled worker node added, removed, or IP changed |
 
 Azure-specific behaviour:
@@ -67,7 +67,7 @@ GCP peers nodes with a **Cloud Router**, but only after each node joins a **Netw
 | Action | GCP API | Trigger |
 |:---|:---|:---|
 | Discover neighbours | `RoutersService.Get` — reads Cloud Router interface `ipRange`s (neighbours) and `bgp.asn` (remote ASN) | Every reconcile |
-| Set `canIpForward` | `InstancesService.Get` + `Instances.Update` (non-disruptive `REFRESH`) | New BGP-enabled worker node detected |
+| Set `canIpForward` | `InstancesService.Get` + `Instances.Update` (non-disruptive `REFRESH`) | New BGP speaker, or a node matching `spec.forwardingNodeSelector` |
 | Enable nested virtualization | `Instances.Update` (`RESTART` — **restarts the instance**) | New node, when `spec.gcp.enableNestedVirtualization` (default true) |
 | Reconcile NCC spokes | NCC `Spoke` get/create/patch/delete | Node set changes — done **before** peering (spoke membership is a precondition) |
 | Reconcile Cloud Router peers | `Routers.Update` (patches the whole peer list) | BGP-enabled worker node added, removed, or IP changed |

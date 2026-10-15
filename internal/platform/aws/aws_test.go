@@ -1114,6 +1114,30 @@ func TestReconcileNodes_EmptyNodeListLeavesPeersAlone(t *testing.T) {
 	}
 }
 
+func TestReconcileNodes_ForwardingOnlyLeavesPeersAlone(t *testing.T) {
+	mock := managedPeersMock(map[string]string{"ep-a1": "10.0.1.10"})
+	p := &Platform{
+		ec2Client:     mock,
+		endpointsByAZ: map[string][]string{"us-east-1a": {"ep-a1"}},
+		localASN:      65001,
+		clusterID:     "test-cluster",
+	}
+	nodes := []platform.RouterNode{{
+		Name:           "worker",
+		PrivateIP:      "10.0.1.20",
+		Zone:           "us-east-1a",
+		ProviderID:     "aws:///us-east-1a/i-worker",
+		ForwardingOnly: true,
+	}}
+
+	if err := p.ReconcileNodes(context.Background(), nodes); err != nil {
+		t.Fatalf("ReconcileNodes: %v", err)
+	}
+	if len(mock.deletePeerCalls) != 0 {
+		t.Errorf("deleted %d peers, want 0", len(mock.deletePeerCalls))
+	}
+}
+
 // TestReconcileNodes_ShrunkNodeListStillDeletes guards the early return from
 // swallowing the case it must not: an AZ losing its last node while other AZs
 // still have one has to reach EC2, or a removed node keeps its peer forever.
