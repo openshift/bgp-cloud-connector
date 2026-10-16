@@ -13,6 +13,7 @@
 #
 #   enable FRR                     hack/enable-frr.sh
 #   stand up the estate            hack/azure/create-route-server.sh
+#   grant on the Route Server      hack/azure/grant-route-server-role.sh
 #   a client outside the cluster   hack/azure/create-client-vm.sh
 #   label the router nodes         hack/label-router-nodes.sh
 #   describe what was built        hack/azure/write-e2e-profile.sh
@@ -65,6 +66,12 @@ info "az: $(az version --query '"azure-cli"' -o tsv 2>/dev/null || echo unknown)
 "${here}/enable-frr.sh"
 
 "${here}/azure/create-route-server.sh"
+
+# Only when the job names the operator's identity. A job that grants on
+# the whole resource group before the test starts leaves this unset.
+if [[ -n "${ROUTE_SERVER_ASSIGNEE:-}" ]]; then
+    "${here}/azure/grant-route-server-role.sh"
+fi
 
 "${here}/azure/create-client-vm.sh"
 

@@ -980,6 +980,72 @@ ci_workdir=""
 
 
 ######################################################################
+echo "--- azure/lib.sh: azure_ensure_role_assignment ---"
+
+# Recorded and answered: the list says how many matching assignments
+# exist, and the create succeeds unless told otherwise.
+ra_calls="${workdir}/ra-calls"
+stub_ra_count=0
+stub_ra_list_rc=0
+stub_ra_create_rc=0
+# Reached through az_query's and try's "$@".
+# shellcheck disable=SC2329
+az() {
+    printf 'az %s\n' "$*" >>"${ra_calls}"
+    case "$*" in
+        "role assignment list"*)
+            (( stub_ra_list_rc == 0 )) || { echo "ERROR: (AuthorizationFailed) no" >&2; return 1; }
+            printf '%s' "${stub_ra_count}" ;;
+        "role assignment create"*)
+            (( stub_ra_create_rc == 0 )) || { echo "ERROR: (AuthorizationFailed) no" >&2; return 1; }
+            ;;
+    esac
+}
+
+scope_rs="/subscriptions/sub/resourceGroups/net-rg/providers/Microsoft.Network/virtualHubs/infra-rs"
+
+: >"${ra_calls}"; stub_ra_count=0
+azure_ensure_role_assignment oid "Network Contributor" "${scope_rs}" >/dev/null 2>&1
+check "azure_ensure_role_assignment creates an assignment that is not there" "$?" "0"
+check "it creates it for that principal, role and scope" \
+    "$(grep -c -- "role assignment create --assignee-object-id oid --assignee-principal-type ServicePrincipal --role Network Contributor --scope ${scope_rs}" "${ra_calls}")" "1"
+
+# Filtered on principalId rather than asked with --assignee, which
+# resolves the principal through Microsoft Graph, and the CI principal
+# is not guaranteed to be able to read Graph.
+check "it lists without asking Graph to resolve the principal" \
+    "$(grep 'role assignment list' "${ra_calls}" | grep -c -- '--assignee')" "0"
+
+: >"${ra_calls}"; stub_ra_count=1
+azure_ensure_role_assignment oid "Network Contributor" "${scope_rs}" >/dev/null 2>&1
+check "it adopts an assignment that is already there" "$?" "0"
+check "and creates nothing" "$(grep -c 'role assignment create' "${ra_calls}")" "0"
+
+: >"${ra_calls}"; stub_ra_count=0; stub_ra_list_rc=1
+azure_ensure_role_assignment oid "Network Contributor" "${scope_rs}" >/dev/null 2>&1
+check "it fails when it cannot tell whether the assignment exists" "$?" "1"
+check "and creates nothing on a guess" "$(grep -c 'role assignment create' "${ra_calls}")" "0"
+stub_ra_list_rc=0
+
+: >"${ra_calls}"; stub_ra_count=0; stub_ra_create_rc=1
+azure_ensure_role_assignment oid "Network Contributor" "${scope_rs}" >/dev/null 2>&1
+check "it fails when the create is refused" "$?" "1"
+stub_ra_create_rc=0
+
+# Prow logs for openshift repositories are public, and a scope carries
+# the subscription id.
+check "it keeps the scope, and so the subscription, out of what it prints" \
+    "$(azure_ensure_role_assignment oid "Network Contributor" "${scope_rs}" 2>&1 | grep -c '/subscriptions/')" "0"
+
+: >"${ra_calls}"; stub_ra_count=0; dry_run=true
+azure_ensure_role_assignment oid "Network Contributor" "${scope_rs}" >/dev/null 2>&1
+check "it creates nothing in a rehearsal" "$(grep -c 'role assignment create' "${ra_calls}")" "0"
+dry_run=false
+
+unset -f az
+
+
+######################################################################
 echo "--- lib/retry.sh: retry_on_azure_conflict ---"
 
 # Observed on 2026-09-09: a run cancelled 45s into a Route Server

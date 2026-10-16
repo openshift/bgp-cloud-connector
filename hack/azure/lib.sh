@@ -205,3 +205,34 @@ azure_cluster_vnet() {
     fi
     printf '%s' "${vnet}"
 }
+
+# Grant a role to a principal at one scope, keeping an assignment that
+# is already there.
+#
+# Listed at the scope and filtered on principalId rather than asked with
+# --assignee, which resolves the principal through Microsoft Graph, and
+# the CI principal is not guaranteed to be allowed to read Graph. The
+# create names the principal type for the same reason.
+#
+# Only the last segment of the scope is printed. A scope carries the
+# subscription id, and prow logs for openshift repositories are public.
+azure_ensure_role_assignment() {
+    local assignee="$1" role="$2" scope="$3" what count
+    what="${role} on ${scope##*/}"
+    count="$(az_query "list the role assignments on ${scope##*/}" \
+        az role assignment list --scope "${scope}" \
+        --query "[?principalId=='${assignee}' && roleDefinitionName=='${role}'] | length(@)" \
+        -o tsv)" || return 1
+    if [[ "${count}" != 0 ]]; then
+        info "  adopting the existing ${what}"
+        return 0
+    fi
+    if [[ "${dry_run}" == true ]]; then
+        info "  would grant ${what}"
+        return 0
+    fi
+    info "  granting ${what}"
+    az role assignment create --assignee-object-id "${assignee}" \
+        --assignee-principal-type ServicePrincipal \
+        --role "${role}" --scope "${scope}" --output none
+}
