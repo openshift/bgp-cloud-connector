@@ -2,8 +2,14 @@ package azure
 
 import (
 	"context"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
 
 	"github.com/openshift/bgp-cloud-connector/internal/platform"
 )
@@ -86,6 +92,8 @@ var _ Backend = (*fakeRS)(nil)
 type fakeNICs struct {
 	nics    []NIC
 	enabled []string
+	// enableErr, when set, is what every EnableIPForwarding returns.
+	enableErr error
 }
 
 func (f *fakeNICs) ListNICs(_ context.Context, rg string) ([]NIC, error) {
@@ -99,6 +107,9 @@ func (f *fakeNICs) ListNICs(_ context.Context, rg string) ([]NIC, error) {
 }
 
 func (f *fakeNICs) EnableIPForwarding(_ context.Context, _, name string) error {
+	if f.enableErr != nil {
+		return f.enableErr
+	}
 	f.enabled = append(f.enabled, name)
 	return nil
 }
@@ -186,6 +197,91 @@ func TestEnsureNodesCanForward_NoInterface(t *testing.T) {
 	p := &Platform{cfg: Config{}, nics: &fakeNICs{}}
 	if err := p.ensureNodesCanForward(context.Background(), []VirtualMachine{vm}); err == nil {
 		t.Error("expected an error when no interface is attached to the VM")
+	}
+}
+
+// azureRefusal is what the SDK returns when Azure answers a write with code:
+// a ResponseError carrying the request, whose URL names the subscription.
+func azureRefusal(t *testing.T, status int, code string) error {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPut,
+		"https://management.azure.com/subscriptions/53b8f551-f0fc-4bea-8cba-6d1fefd54c8a/resourceGroups/amcdermo-rg/providers/Microsoft.Network/networkInterfaces/router-nic", nil)
+	return runtime.NewResponseErrorWithErrorCode(&http.Response{
+		StatusCode: status,
+		Status:     http.StatusText(status),
+		Header:     http.Header{},
+		Body:       io.NopCloser(strings.NewReader(`{"error":{"code":"` + code + `"}}`)),
+		Request:    req,
+	}, code)
+}
+
+// TestEnsureNodesCanForward_RefusedWriteSaysWhatToDo covers an identity Azure
+// will not let write the interface: a role without networkInterfaces/write,
+// one missing a join on the subnet or backend pool the interface references,
+// or a deny assignment. Each arrives as a 403 with its own code. The condition
+// should name the node and what to do, not repeat Azure's response, which
+// carries the subscription id.
+func TestEnsureNodesCanForward_RefusedWriteSaysWhatToDo(t *testing.T) {
+	vm, err := ParseProviderID(testProviderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, code := range []string{"AuthorizationFailed", "LinkedAuthorizationFailed", "DenyAssignmentAuthorizationFailed"} {
+		t.Run(code, func(t *testing.T) {
+			refusal := azureRefusal(t, http.StatusForbidden, code)
+			nics := &fakeNICs{
+				nics:      []NIC{{Name: "router-nic", ResourceGroup: "amcdermo-rg", VMID: vm.ID}},
+				enableErr: refusal,
+			}
+			p := &Platform{cfg: Config{}, nics: nics}
+
+			err := p.ensureNodesCanForward(context.Background(), []VirtualMachine{vm})
+
+			var refused *forwardingRefusedError
+			if !errors.As(err, &refused) {
+				t.Fatalf("got %v, want a forwardingRefusedError", err)
+			}
+			if refused.nic != "router-nic" || refused.vm != vm.Name || refused.code != code {
+				t.Errorf("got nic=%q vm=%q code=%q, want router-nic, %s, %s",
+					refused.nic, refused.vm, refused.code, vm.Name, code)
+			}
+			want := `IP forwarding is off on network interface "router-nic" of "worker-centralus1-xjf5l", ` +
+				`and Azure refused this identity's change to it (` + code + `). Enable IP forwarding ` +
+				`on the node pool, or let the identity write the interface and join its subnet and ` +
+				`load balancer backend pool`
+			if err.Error() != want {
+				t.Errorf("message\n got: %s\nwant: %s", err.Error(), want)
+			}
+			if !errors.Is(err, refusal) {
+				t.Error("Azure's error is no longer reachable with errors.Is")
+			}
+		})
+	}
+}
+
+// TestEnsureNodesCanForward_OtherWriteFailuresUnchanged pins that only a
+// refusal is reworded: anything else, a throttle or a server error, is still
+// reported as Azure said it.
+func TestEnsureNodesCanForward_OtherWriteFailuresUnchanged(t *testing.T) {
+	vm, err := ParseProviderID(testProviderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failure := azureRefusal(t, http.StatusTooManyRequests, "TooManyRequests")
+	nics := &fakeNICs{
+		nics:      []NIC{{Name: "router-nic", ResourceGroup: "amcdermo-rg", VMID: vm.ID}},
+		enableErr: failure,
+	}
+	p := &Platform{cfg: Config{}, nics: nics}
+
+	err = p.ensureNodesCanForward(context.Background(), []VirtualMachine{vm})
+
+	var refused *forwardingRefusedError
+	if errors.As(err, &refused) {
+		t.Errorf("a %d was reported as a refusal", http.StatusTooManyRequests)
+	}
+	if !errors.Is(err, failure) {
+		t.Errorf("got %v, want it to wrap Azure's error", err)
 	}
 }
 
