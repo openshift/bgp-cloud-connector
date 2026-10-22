@@ -1,4 +1,4 @@
-FROM registry.access.redhat.com/ubi9/go-toolset:1.26.7-1791892434 as builder
+FROM registry.access.redhat.com/ubi9/go-toolset:1.26.7-1792425967 as builder
 WORKDIR /workspace
 # Dummy RUN to create /workspace directory.
 # WORKDIR doesn't create the directory (at least for Podman).
