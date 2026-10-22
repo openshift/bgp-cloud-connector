@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -42,6 +43,8 @@ import (
 	"github.com/openshift/bgp-cloud-connector/internal/platform"
 	awsplatform "github.com/openshift/bgp-cloud-connector/internal/platform/aws"
 )
+
+const wrongName = "wrong-name"
 
 func configTestScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
@@ -135,9 +138,11 @@ func TestConfigReconcile_FullReconcile(t *testing.T) {
 		t.Errorf("expected phase Ready, got %s", updated.Status.Phase)
 	}
 
-	if len(updated.Status.Conditions) != 3 {
-		t.Errorf("expected 3 conditions, got %d", len(updated.Status.Conditions))
+	// 3 per-step conditions + the 3 aggregate summary conditions.
+	if len(updated.Status.Conditions) != 6 {
+		t.Errorf("expected 6 conditions, got %d", len(updated.Status.Conditions))
 	}
+	assertSummary(t, updated.Status.Conditions, metav1.ConditionTrue, metav1.ConditionFalse, metav1.ConditionFalse)
 
 	// Verify FRRConfiguration was created
 	frrConfig := &unstructured.Unstructured{}
@@ -151,10 +156,40 @@ func TestConfigReconcile_FullReconcile(t *testing.T) {
 	}
 }
 
+// A transition into Degraded emits a Warning Event carrying the reason, so the
+// cause reaches `kubectl describe` and `kubectl get events`, not just status.
+func TestConfigReconcile_EmitsEventOnDegraded(t *testing.T) {
+	config := newTestBGPCloudConfiguration()
+	config.Name = wrongName
+
+	s := configTestScheme()
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(config).
+		WithStatusSubresource(config).
+		Build()
+
+	rec := record.NewFakeRecorder(10)
+	r := &BGPCloudConfigurationReconciler{Client: c, Scheme: s, Recorder: rec}
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: wrongName},
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	select {
+	case ev := <-rec.Events:
+		if !strings.Contains(ev, corev1.EventTypeWarning) || !strings.Contains(ev, ReasonInvalidName) {
+			t.Errorf("expected a Warning/%s event, got %q", ReasonInvalidName, ev)
+		}
+	default:
+		t.Error("expected a degraded event to be recorded")
+	}
+}
+
 // singleton name mismatch → Degraded, no requeue (terminal).
 func TestConfigReconcile_InvalidName_NoRequeue(t *testing.T) {
 	config := newTestBGPCloudConfiguration()
-	config.Name = "wrong-name"
+	config.Name = wrongName
 
 	s := configTestScheme()
 	c := fake.NewClientBuilder().WithScheme(s).
@@ -164,7 +199,7 @@ func TestConfigReconcile_InvalidName_NoRequeue(t *testing.T) {
 
 	r := &BGPCloudConfigurationReconciler{Client: c, Scheme: s}
 	result, err := r.Reconcile(context.Background(), reconcile.Request{
-		NamespacedName: types.NamespacedName{Name: "wrong-name"},
+		NamespacedName: types.NamespacedName{Name: wrongName},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -174,10 +209,11 @@ func TestConfigReconcile_InvalidName_NoRequeue(t *testing.T) {
 	}
 
 	updated := &networkingapi.BGPCloudConfiguration{}
-	_ = c.Get(context.Background(), types.NamespacedName{Name: "wrong-name"}, updated)
+	_ = c.Get(context.Background(), types.NamespacedName{Name: wrongName}, updated)
 	if updated.Status.Phase != networkingapi.PhaseDegraded {
 		t.Errorf("expected phase Degraded, got %s", updated.Status.Phase)
 	}
+	assertSummary(t, updated.Status.Conditions, metav1.ConditionFalse, metav1.ConditionFalse, metav1.ConditionTrue)
 	for _, cond := range updated.Status.Conditions {
 		if cond.Type == networkingapi.ConditionNetworkOperatorPatched {
 			if cond.Reason != ReasonInvalidName {
@@ -192,7 +228,7 @@ func TestConfigReconcile_InvalidName_NoRequeue(t *testing.T) {
 // second reconcile of InvalidName still returns no requeue (regression guard).
 func TestConfigReconcile_InvalidName_SecondReconcileNoRequeue(t *testing.T) {
 	config := newTestBGPCloudConfiguration()
-	config.Name = "wrong-name"
+	config.Name = wrongName
 
 	s := configTestScheme()
 	c := fake.NewClientBuilder().WithScheme(s).
@@ -203,7 +239,7 @@ func TestConfigReconcile_InvalidName_SecondReconcileNoRequeue(t *testing.T) {
 	r := &BGPCloudConfigurationReconciler{Client: c, Scheme: s}
 
 	result1, err := r.Reconcile(context.Background(), reconcile.Request{
-		NamespacedName: types.NamespacedName{Name: "wrong-name"},
+		NamespacedName: types.NamespacedName{Name: wrongName},
 	})
 	if err != nil {
 		t.Fatalf("first reconcile error: %v", err)
@@ -213,7 +249,7 @@ func TestConfigReconcile_InvalidName_SecondReconcileNoRequeue(t *testing.T) {
 	}
 
 	result2, err := r.Reconcile(context.Background(), reconcile.Request{
-		NamespacedName: types.NamespacedName{Name: "wrong-name"},
+		NamespacedName: types.NamespacedName{Name: wrongName},
 	})
 	if err != nil {
 		t.Fatalf("second reconcile error: %v", err)
@@ -402,9 +438,11 @@ func TestConfigReconcile_AWSFullReconcile(t *testing.T) {
 	if updated.Status.Phase != networkingapi.PhaseReady {
 		t.Errorf("expected Ready, got %s", updated.Status.Phase)
 	}
-	if len(updated.Status.Conditions) != 6 {
-		t.Errorf("expected 6 conditions, got %d", len(updated.Status.Conditions))
+	// 6 per-step conditions + the 3 aggregate summary conditions.
+	if len(updated.Status.Conditions) != 9 {
+		t.Errorf("expected 9 conditions, got %d", len(updated.Status.Conditions))
 	}
+	assertSummary(t, updated.Status.Conditions, metav1.ConditionTrue, metav1.ConditionFalse, metav1.ConditionFalse)
 	// The discovered plan is reported cloud-neutrally: what FRR was told to
 	// peer with, rather than the route servers one cloud happens to have.
 	if len(updated.Status.PeerGroups) != 1 {
@@ -909,6 +947,8 @@ func TestConfigReconcile_AWSNodeFiltering(t *testing.T) {
 	if updated.Status.Phase != networkingapi.PhaseConfiguring {
 		t.Errorf("expected Configuring, got %s", updated.Status.Phase)
 	}
+	// Incomplete nodes are a transient wait, not a fault: Progressing, not Degraded.
+	assertSummary(t, updated.Status.Conditions, metav1.ConditionFalse, metav1.ConditionTrue, metav1.ConditionFalse)
 	for _, cond := range updated.Status.Conditions {
 		if cond.Type == networkingapi.ConditionCompleteNodeInventory {
 			if cond.Status != metav1.ConditionFalse || cond.Reason != "NodesIncomplete" {

@@ -23,11 +23,13 @@ import (
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -51,6 +53,17 @@ import (
 type BGPRoutingReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// Recorder emits Events on notable transitions. It is nil in unit tests
+	// that construct the reconciler directly; emitEvent tolerates that.
+	Recorder record.EventRecorder
+}
+
+// emitEvent records an Event, tolerating a nil Recorder so unit tests that omit
+// it do not panic. Callers emit only on transitions, not every reconcile.
+func (r *BGPRoutingReconciler) emitEvent(routing *networkingapi.BGPRouting, eventType, reason, message string) {
+	if r.Recorder != nil {
+		r.Recorder.Event(routing, eventType, reason, message)
+	}
 }
 
 func (r *BGPRoutingReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -95,8 +108,11 @@ func (r *BGPRoutingReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	bgpConfig := &networkingapi.BGPCloudConfiguration{}
 	if err := r.Get(ctx, types.NamespacedName{Name: SingletonName}, bgpConfig); err != nil {
 		if err := r.patchRoutingStatus(ctx, routing, *baselineStatus, func(rt *networkingapi.BGPRouting) {
-			rt.Status.Phase = networkingapi.PhasePending
-			rt.Status.Conditions = nil
+			clearRoutingStepConditions(rt)
+			rt.Status.Namespaces = nil
+			setSummaryConditions(&rt.Status.Phase, &rt.Status.Conditions, rt.Generation,
+				networkingapi.PhasePending, ReasonWaitingForConfig,
+				"BGPCloudConfiguration \"cluster\" not found")
 		}); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -105,8 +121,11 @@ func (r *BGPRoutingReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 	if bgpConfig.Status.Phase != networkingapi.PhaseReady {
 		if err := r.patchRoutingStatus(ctx, routing, *baselineStatus, func(rt *networkingapi.BGPRouting) {
-			rt.Status.Phase = networkingapi.PhasePending
-			rt.Status.Conditions = nil
+			clearRoutingStepConditions(rt)
+			rt.Status.Namespaces = nil
+			setSummaryConditions(&rt.Status.Phase, &rt.Status.Conditions, rt.Generation,
+				networkingapi.PhasePending, ReasonWaitingForConfig,
+				fmt.Sprintf("Waiting for BGPCloudConfiguration to become Ready (currently %q)", bgpConfig.Status.Phase))
 		}); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -116,10 +135,12 @@ func (r *BGPRoutingReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	// Phase 1: Validate namespace labels + ensure ClusterUDN
 	log.Info("Phase 1: validating namespace and ensuring ClusterUDN", "network", routing.Spec.Network.Name)
-	if err := ValidateNamespaceLabels(ctx, r.Client, routing.Spec.Network.Name); err != nil {
+	namespaces, err := MatchedNamespaces(ctx, r.Client, routing.Spec.Network.Name)
+	if err != nil {
 		return r.setDegraded(ctx, routing, *baselineStatus, networkingapi.ConditionNetworkCreated,
 			ReasonNamespaceNotReady, fmt.Sprintf("namespace validation failed: %v", err))
 	}
+	routing.Status.Namespaces = namespaces
 	if err := EnsureClusterUDN(ctx, r.Client, routing); err != nil {
 		var validationErr *CUDNValidationError
 		if errors.As(err, &validationErr) {
@@ -130,10 +151,11 @@ func (r *BGPRoutingReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			ReasonCUDNFailed, fmt.Sprintf("failed to ensure ClusterUDN: %v", err))
 	}
 	meta.SetStatusCondition(&routing.Status.Conditions, metav1.Condition{
-		Type:               networkingapi.ConditionNetworkCreated,
-		Status:             metav1.ConditionTrue,
-		Reason:             ReasonCreated,
-		Message:            fmt.Sprintf("ClusterUDN %q ensured", ClusterUDNNamePrefix+routing.Spec.Network.Name),
+		Type:   networkingapi.ConditionNetworkCreated,
+		Status: metav1.ConditionTrue,
+		Reason: ReasonCreated,
+		Message: fmt.Sprintf("ClusterUDN %q ensured, selecting %s",
+			ClusterUDNNamePrefix+routing.Spec.Network.Name, describeNamespaces(namespaces)),
 		ObservedGeneration: routing.Generation,
 	})
 
@@ -151,10 +173,17 @@ func (r *BGPRoutingReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		ObservedGeneration: routing.Generation,
 	})
 
+	readyMsg := fmt.Sprintf("Network is advertised via BGP to %s", describeNamespaces(namespaces))
 	if err := r.patchRoutingStatus(ctx, routing, *baselineStatus, func(rt *networkingapi.BGPRouting) {
-		rt.Status.Phase = networkingapi.PhaseReady
+		setSummaryConditions(&rt.Status.Phase, &rt.Status.Conditions, rt.Generation,
+			networkingapi.PhaseReady, ReasonAsExpected, readyMsg)
 	}); err != nil {
 		return ctrl.Result{}, err
+	}
+
+	if baselineStatus.Phase != networkingapi.PhaseReady {
+		r.emitEvent(routing, corev1.EventTypeNormal, ReasonAsExpected,
+			fmt.Sprintf("Network %q is advertised via BGP to %s", routing.Spec.Network.Name, describeNamespaces(namespaces)))
 	}
 
 	log.Info("reconciliation complete", "phase", routing.Status.Phase)
@@ -199,6 +228,28 @@ func (r *BGPRoutingReconciler) reconcileDelete(ctx context.Context, routing *net
 	return ctrl.Result{}, nil
 }
 
+// clearRoutingStepConditions drops the per-step conditions while leaving the
+// aggregate summary conditions in place. Without a Ready config there is no
+// network to have created, so a stale NetworkCreated=True would contradict the
+// Pending summary; the summary conditions are kept so setSummaryConditions can
+// update them in place and preserve LastTransitionTime, which is what keeps a
+// steady wait from rewriting status every requeue.
+func clearRoutingStepConditions(rt *networkingapi.BGPRouting) {
+	meta.RemoveStatusCondition(&rt.Status.Conditions, networkingapi.ConditionNetworkCreated)
+	meta.RemoveStatusCondition(&rt.Status.Conditions, networkingapi.ConditionRouteAdvertisementsCreated)
+}
+
+// describeNamespaces renders a matched namespace set for a status message or
+// event. With a single member it names it directly, which is the common case
+// and more useful than a count; with several it gives the count. The full list
+// always lives in status.namespaces, so the message stays short either way.
+func describeNamespaces(names []string) string {
+	if len(names) == 1 {
+		return fmt.Sprintf("namespace %q", names[0])
+	}
+	return fmt.Sprintf("%d namespaces", len(names))
+}
+
 func (r *BGPRoutingReconciler) setDegraded(
 	ctx context.Context,
 	routing *networkingapi.BGPRouting,
@@ -214,7 +265,10 @@ func (r *BGPRoutingReconciler) setDegraded(
 	}
 
 	if err := r.patchRoutingStatus(ctx, routing, baselineStatus, func(rt *networkingapi.BGPRouting) {
-		rt.Status.Phase = networkingapi.PhaseDegraded
+		// The network is not Ready, so the reported namespace set no longer holds.
+		rt.Status.Namespaces = nil
+		setSummaryConditions(&rt.Status.Phase, &rt.Status.Conditions, rt.Generation,
+			networkingapi.PhaseDegraded, reason, message)
 		meta.SetStatusCondition(&rt.Status.Conditions, metav1.Condition{
 			Type:               condType,
 			Status:             metav1.ConditionFalse,
@@ -224,6 +278,9 @@ func (r *BGPRoutingReconciler) setDegraded(
 		})
 	}); err != nil {
 		return ctrl.Result{}, err
+	}
+	if baselineStatus.Phase != networkingapi.PhaseDegraded {
+		r.emitEvent(routing, corev1.EventTypeWarning, reason, message)
 	}
 	if terminal {
 		return ctrl.Result{}, nil
@@ -246,6 +303,15 @@ func (r *BGPRoutingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(cudn, handler.EnqueueRequestsFromMapFunc(
 			r.mapClusterUDNToRouting,
 		)).
+		// Watch namespaces so status.namespaces tracks label changes without
+		// waiting for the 5-minute resync. Enqueue every routing (there are few,
+		// one per network) so a label being *removed* re-reconciles the routing
+		// that used to include it, which a per-object mapper reading the new
+		// labels could not. The predicate keeps this off unrelated namespace
+		// churn: only cluster-udn membership label changes matter here.
+		Watches(&corev1.Namespace{}, handler.EnqueueRequestsFromMapFunc(
+			r.enqueueAllRoutings,
+		), builder.WithPredicates(namespaceMembershipChangePredicate())).
 		Watches(&networkingapi.BGPRouting{}, handler.EnqueueRequestsFromMapFunc(
 			r.enqueueAllRoutings,
 		), builder.WithPredicates(predicate.Funcs{
@@ -263,6 +329,37 @@ func (r *BGPRoutingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		})).
 		Named("bgprouting").
 		Complete(r)
+}
+
+// namespaceMembershipChangePredicate admits only the namespace events that can
+// change a network's membership: a create or delete of a namespace carrying the
+// cluster-udn label, or an update that adds, removes, or changes either
+// membership label. Everything else (unrelated namespaces, annotation churn on
+// a member) is filtered out so the routing controller is not woken for it.
+func namespaceMembershipChangePredicate() predicate.Predicate {
+	hasUDNLabel := func(o client.Object) bool {
+		_, ok := o.GetLabels()[LabelClusterUDN]
+		return ok
+	}
+	return predicate.Funcs{
+		CreateFunc: func(e event.CreateEvent) bool { return hasUDNLabel(e.Object) },
+		DeleteFunc: func(e event.DeleteEvent) bool { return hasUDNLabel(e.Object) },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldLabels, newLabels := e.ObjectOld.GetLabels(), e.ObjectNew.GetLabels()
+			return labelChanged(oldLabels, newLabels, LabelClusterUDN) ||
+				labelChanged(oldLabels, newLabels, LabelPrimaryUDN)
+		},
+		GenericFunc: func(event.GenericEvent) bool { return false },
+	}
+}
+
+// labelChanged reports whether the given label differs between the two label
+// maps, treating a missing label as distinct from a present-but-empty one so
+// that adding or removing an empty-valued membership label is detected.
+func labelChanged(oldLabels, newLabels map[string]string, key string) bool {
+	oldVal, oldOK := oldLabels[key]
+	newVal, newOK := newLabels[key]
+	return oldOK != newOK || oldVal != newVal
 }
 
 // enqueueAllRoutings enqueues every BGPRouting so that a DuplicateNetwork
