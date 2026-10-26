@@ -59,6 +59,7 @@ import (
 // +kubebuilder:rbac:groups=networking.openshift.io,resources=bgproutings,verbs=get;list;watch
 // +kubebuilder:rbac:groups=operator.openshift.io,resources=networks,verbs=get;list;watch;patch
 // +kubebuilder:rbac:groups=frrk8s.metallb.io,resources=frrconfigurations,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=frrk8s.metallb.io,resources=bgpsessionstates,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
@@ -193,6 +194,21 @@ func (r *BGPCloudConfigurationReconciler) Reconcile(ctx context.Context, req ctr
 		}
 	}
 
+	// Once the desired configuration is Ready, refresh only the live BGP
+	// session health. This avoids repeating cloud discovery and reconciliation
+	// just to notice a peer going down.
+	if config.Status.Phase == networkingapi.PhaseReady &&
+		config.Status.ObservedGeneration == config.Generation {
+		observed, err := r.reconcileBGPSessionHealth(ctx, config, *baselineStatus)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if observed {
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+	}
+
 	config.Status.Phase = networkingapi.PhaseConfiguring
 	config.Status.ObservedGeneration = config.Generation
 
@@ -235,11 +251,39 @@ func (r *BGPCloudConfigurationReconciler) Reconcile(ctx context.Context, req ctr
 		ObservedGeneration: config.Generation,
 	})
 
+	// Validate the selected router nodes for every platform. Cloud providers
+	// additionally need zone/providerID for their instance reconciliation;
+	// Manual peering only needs the node's routable InternalIP.
+	cloudNodeMetadata := config.Spec.Platform != networkingapi.PlatformManual
+	routerNodes, incompleteNodes, err := r.listRouterNodes(ctx, config, cloudNodeMetadata)
+	if err != nil {
+		return r.setDegraded(ctx, config, *baselineStatus, networkingapi.ConditionCompleteNodeInventory,
+			ReasonCheckFailed, fmt.Sprintf("failed to list router nodes: %v", err))
+	}
+	readyPhase := len(incompleteNodes) == 0
+	if readyPhase {
+		meta.SetStatusCondition(&config.Status.Conditions, metav1.Condition{
+			Type:               networkingapi.ConditionCompleteNodeInventory,
+			Status:             metav1.ConditionTrue,
+			Reason:             ReasonNodesComplete,
+			Message:            fmt.Sprintf("%d selected router node(s) have the required metadata", len(routerNodes)),
+			ObservedGeneration: config.Generation,
+		})
+	} else {
+		incompleteMsg := formatIncompleteNodesMessage(incompleteNodes)
+		meta.SetStatusCondition(&config.Status.Conditions, metav1.Condition{
+			Type:               networkingapi.ConditionCompleteNodeInventory,
+			Status:             metav1.ConditionFalse,
+			Reason:             ReasonNodesIncomplete,
+			Message:            incompleteMsg,
+			ObservedGeneration: config.Generation,
+		})
+	}
+
 	config.Status.PeerGroups = nil
 	if config.Spec.Platform == networkingapi.PlatformManual {
 		meta.RemoveStatusCondition(&config.Status.Conditions, networkingapi.ConditionCloudEndpointsDiscovered)
 		meta.RemoveStatusCondition(&config.Status.Conditions, networkingapi.ConditionCloudResourcesReconciled)
-		meta.RemoveStatusCondition(&config.Status.Conditions, networkingapi.ConditionCompleteNodeInventory)
 	}
 
 	// Build the cloud platform once if configured (used in Phases 3 and 5)
@@ -338,6 +382,10 @@ func (r *BGPCloudConfigurationReconciler) Reconcile(ctx context.Context, req ctr
 		ObservedGeneration: config.Generation,
 	})
 
+	if _, err := r.reconcileBGPSessionHealth(ctx, config, *baselineStatus); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Phase 5: Reconcile cloud resources (if configured)
 	readyPhase := true
 	// Defer this transition Event until the status write succeeds. If the write
@@ -345,18 +393,13 @@ func (r *BGPCloudConfigurationReconciler) Reconcile(ctx context.Context, req ctr
 	incompleteEvent := ""
 	if cloudPlatform != nil {
 		log.Info("Phase 5: reconciling cloud resources")
-		nodes, incomplete, err := r.listRouterNodes(ctx, config)
-		if err != nil {
-			return r.setDegraded(ctx, config, *baselineStatus, networkingapi.ConditionCloudResourcesReconciled,
-				ReasonCloudReconcileFailed, fmt.Sprintf("failed to list router nodes: %v", err))
-		}
-		readyPhase = len(incomplete) == 0
+		incomplete := incompleteNodes
 		if readyPhase {
 			meta.SetStatusCondition(&config.Status.Conditions, metav1.Condition{
 				Type:               networkingapi.ConditionCompleteNodeInventory,
 				Status:             metav1.ConditionTrue,
 				Reason:             ReasonNodesComplete,
-				Message:            "all selected router nodes have IP, zone, and providerID",
+				Message:            fmt.Sprintf("all %d selected router nodes have the required metadata", len(routerNodes)),
 				ObservedGeneration: config.Generation,
 			})
 		} else {
@@ -373,7 +416,7 @@ func (r *BGPCloudConfigurationReconciler) Reconcile(ctx context.Context, req ctr
 				ObservedGeneration: config.Generation,
 			})
 		}
-		if err := cloudPlatform.ReconcileNodes(ctx, nodes); err != nil {
+		if err := cloudPlatform.ReconcileNodes(ctx, routerNodes); err != nil {
 			res, err := r.setDegraded(ctx, config, *baselineStatus, networkingapi.ConditionCloudResourcesReconciled,
 				ReasonCloudReconcileFailed, fmt.Sprintf("failed to reconcile cloud resources: %v", err))
 			return r.emitIncompleteIfWritten(config, incompleteEvent, res, err)
@@ -452,6 +495,13 @@ func (r *BGPCloudConfigurationReconciler) completeReconcile(
 
 	log.Info("reconciliation complete", "phase", config.Status.Phase)
 	if !readyPhase {
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	if sessionCondition := meta.FindStatusCondition(config.Status.Conditions, networkingapi.ConditionBGPSessionsEstablished); sessionCondition != nil && sessionCondition.Status != metav1.ConditionTrue {
+		// BGPSessionState is owned by frr-k8s and is not watched directly: its
+		// CRD is created by the FRR operator after this controller starts. Keep
+		// the health snapshot fresh while sessions converge without making the
+		// manager depend on that optional-at-startup API.
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
@@ -639,7 +689,7 @@ func getInfrastructureName(ctx context.Context, c client.Client) (string, error)
 	return name, nil
 }
 
-func (r *BGPCloudConfigurationReconciler) listRouterNodes(ctx context.Context, config *networkingapi.BGPCloudConfiguration) (complete []platform.RouterNode, incomplete []platform.RouterNode, err error) {
+func (r *BGPCloudConfigurationReconciler) listRouterNodes(ctx context.Context, config *networkingapi.BGPCloudConfiguration, requireCloudMetadata bool) (complete []platform.RouterNode, incomplete []platform.RouterNode, err error) {
 	nodeList := &corev1.NodeList{}
 	sel := labels.SelectorFromSet(config.Spec.RouterNodeSelector)
 	if err := r.List(ctx, nodeList, client.MatchingLabelsSelector{Selector: sel}); err != nil {
@@ -647,6 +697,9 @@ func (r *BGPCloudConfigurationReconciler) listRouterNodes(ctx context.Context, c
 	}
 
 	complete = make([]platform.RouterNode, 0, len(nodeList.Items))
+	if len(nodeList.Items) == 0 {
+		return complete, []platform.RouterNode{{Name: "<no matching nodes>"}}, nil
+	}
 	for i := range nodeList.Items {
 		node := &nodeList.Items[i]
 		rn := platform.RouterNode{
@@ -660,7 +713,7 @@ func (r *BGPCloudConfigurationReconciler) listRouterNodes(ctx context.Context, c
 				break
 			}
 		}
-		if rn.PrivateIP == "" || rn.Zone == "" || rn.ProviderID == "" {
+		if rn.PrivateIP == "" || (requireCloudMetadata && (rn.Zone == "" || rn.ProviderID == "")) {
 			logf.FromContext(ctx).Info("skipping node with incomplete info",
 				"node", node.Name, "ip", rn.PrivateIP, "zone", rn.Zone, "providerID", rn.ProviderID)
 			incomplete = append(incomplete, rn)
@@ -672,6 +725,11 @@ func (r *BGPCloudConfigurationReconciler) listRouterNodes(ctx context.Context, c
 }
 
 func formatIncompleteNodesMessage(incomplete []platform.RouterNode) string {
+	for _, n := range incomplete {
+		if n.Name == "<no matching nodes>" {
+			return "no nodes match spec.routerNodeSelector"
+		}
+	}
 	parts := make([]string, 0, len(incomplete))
 	for _, n := range incomplete {
 		var missing []string

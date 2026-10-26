@@ -93,6 +93,7 @@ const (
 	ConditionFRRConfigurationApplied  = "FRRConfigurationApplied"
 	ConditionCloudResourcesReconciled = "CloudResourcesReconciled"
 	ConditionCompleteNodeInventory    = "CompleteNodeInventory"
+	ConditionBGPSessionsEstablished   = "BGPSessionsEstablished"
 )
 
 // BGPNeighbor identifies a single BGP peer by its IP address and AS number.
@@ -227,6 +228,21 @@ type PeerGroupStatus struct {
 	Neighbors []BGPNeighbor `json:"neighbors,omitempty"`
 }
 
+// BGPSessionStatus reports the last session state observed from frr-k8s.
+// It is deliberately a snapshot: BGPSessionState is owned by frr-k8s and
+// remains the source of truth for detailed per-session diagnostics.
+type BGPSessionStatus struct {
+	// Node is the router node running the session.
+	Node string `json:"node"`
+	// Peer is the remote BGP neighbor address.
+	Peer string `json:"peer"`
+	// BGPStatus is the frr-k8s BGP state, for example Established or Idle.
+	BGPStatus string `json:"bgpStatus"`
+	// BFDStatus is the frr-k8s BFD state when BFD is configured.
+	// +optional
+	BFDStatus string `json:"bfdStatus,omitempty"`
+}
+
 // BGPConfig holds the BGP speaker configuration and optional peer groups.
 type BGPConfig struct {
 	// localASN is the autonomous system number for the cluster's FRR routers.
@@ -299,7 +315,13 @@ type BGPCloudConfigurationStatus struct {
 	// +listType=atomic
 	// +kubebuilder:validation:MaxItems=16
 	PeerGroups []PeerGroupStatus `json:"peerGroups,omitempty"`
-	// frrProviderOwnership records whether this controller may revert the FRR
+	// BGPSessions is the latest per-peer session state reported by frr-k8s.
+	// An empty list means that frr-k8s has not reported a matching session yet.
+	// +optional
+	// +kubebuilder:validation:MaxItems=128
+	// +listType=atomic
+	BGPSessions []BGPSessionStatus `json:"bgpSessions,omitempty"`
+	// FRRProviderOwnership records whether this controller may revert the FRR
 	// provider patch on Network/cluster additionalRoutingCapabilities.providers.
 	// Empty until the first Phase 1 reconcile completes.
 	// Owned: this controller enabled FRR and may revert it on BGPCloudConfiguration deletion.
