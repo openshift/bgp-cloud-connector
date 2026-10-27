@@ -46,7 +46,7 @@ metadata:
     capabilities: Basic Install
     categories: Networking
     containerImage: controller:latest
-    createdAt: "2026-10-08T08:33:53Z"
+    createdAt: "2026-10-27T09:59:24Z"
     description: Automates L3 direct routing between CUDN Pod networks and external
       networks via BGP on OpenShift. Cloud platform aware — auto-discovers BGP infrastructure
       on AWS (VPC Route Server) and works on-premise with explicit configuration.
@@ -103,6 +103,13 @@ spec:
         - apiGroups:
           - ""
           resources:
+          - events
+          verbs:
+          - create
+          - patch
+        - apiGroups:
+          - ""
+          resources:
           - namespaces
           - nodes
           - pods
@@ -134,6 +141,14 @@ spec:
           - infrastructures
           verbs:
           - get
+        - apiGroups:
+          - frrk8s.metallb.io
+          resources:
+          - bgpsessionstates
+          verbs:
+          - get
+          - list
+          - watch
         - apiGroups:
           - frrk8s.metallb.io
           resources:

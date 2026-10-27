@@ -7,6 +7,13 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
   - namespaces
   - nodes
   - pods
@@ -38,6 +45,14 @@ rules:
   - infrastructures
   verbs:
   - get
+- apiGroups:
+  - frrk8s.metallb.io
+  resources:
+  - bgpsessionstates
+  verbs:
+  - get
+  - list
+  - watch
 - apiGroups:
   - frrk8s.metallb.io
   resources:

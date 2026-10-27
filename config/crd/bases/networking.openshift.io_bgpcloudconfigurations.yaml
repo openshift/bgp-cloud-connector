@@ -28,9 +28,19 @@ spec:
     - jsonPath: .status.phase
       name: Phase
       type: string
+    - jsonPath: .status.conditions[?(@.type=='Available')].status
+      name: Available
+      type: string
+    - jsonPath: .status.conditions[?(@.type=='Available')].reason
+      name: Reason
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
+    - jsonPath: .status.conditions[?(@.type=='Available')].message
+      name: Message
+      priority: 1
+      type: string
     name: v1beta1
     schema:
       openAPIV3Schema:
@@ -302,6 +312,38 @@ spec:
             description: BGPCloudConfigurationStatus defines the observed state of
               BGPCloudConfiguration.
             properties:
+              bgpSessions:
+                description: |-
+                  BGPSessions is the latest per-peer session state reported by frr-k8s.
+                  An empty list means that frr-k8s has not reported a matching session yet.
+                items:
+                  description: |-
+                    BGPSessionStatus reports the last session state observed from frr-k8s.
+                    It is deliberately a snapshot: BGPSessionState is owned by frr-k8s and
+                    remains the source of truth for detailed per-session diagnostics.
+                  properties:
+                    bfdStatus:
+                      description: BFDStatus is the frr-k8s BFD state when BFD is
+                        configured.
+                      type: string
+                    bgpStatus:
+                      description: BGPStatus is the frr-k8s BGP state, for example
+                        Established or Idle.
+                      type: string
+                    node:
+                      description: Node is the router node running the session.
+                      type: string
+                    peer:
+                      description: Peer is the remote BGP neighbor address.
+                      type: string
+                  required:
+                  - bgpStatus
+                  - node
+                  - peer
+                  type: object
+                maxItems: 128
+                type: array
+                x-kubernetes-list-type: atomic
               conditions:
                 description: conditions represent the latest available observations
                   of the resource's state.
@@ -365,7 +407,7 @@ spec:
                 x-kubernetes-list-type: map
               frrProviderOwnership:
                 description: |-
-                  frrProviderOwnership records whether this controller may revert the FRR
+                  FRRProviderOwnership records whether this controller may revert the FRR
                   provider patch on Network/cluster additionalRoutingCapabilities.providers.
                   Empty until the first Phase 1 reconcile completes.
                   Owned: this controller enabled FRR and may revert it on BGPCloudConfiguration deletion.
@@ -373,6 +415,12 @@ spec:
                 enum:
                 - External
                 - Owned
+                type: string
+              lastCloudReconcileTime:
+                description: |-
+                  LastCloudReconcileTime records the last successful reconciliation of
+                  provider-side cloud resources by the Ready path.
+                format: date-time
                 type: string
               observedGeneration:
                 description: observedGeneration is the most recent generation observed
