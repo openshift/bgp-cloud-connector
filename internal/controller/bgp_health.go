@@ -35,35 +35,51 @@ func (r *BGPCloudConfigurationReconciler) reconcileBGPSessionHealth(
 	config *networkingapi.BGPCloudConfiguration,
 	baseline networkingapi.BGPCloudConfigurationStatus,
 ) (observed bool, err error) {
+	observed, err = r.observeBGPSessionHealth(ctx, config)
+	if err != nil {
+		// The health-only path persists the Unknown condition immediately so the
+		// next health refresh can report the observation failure.
+		return observed, r.patchConfigStatus(ctx, config, baseline, func(c *networkingapi.BGPCloudConfiguration) {
+			if c.Status.Conditions == nil {
+				c.Status.Conditions = config.Status.Conditions
+			}
+		})
+	}
+	return observed, r.patchConfigStatus(ctx, config, baseline, func(c *networkingapi.BGPCloudConfiguration) {
+		c.Status.BGPSessions = config.Status.BGPSessions
+		c.Status.Conditions = config.Status.Conditions
+	})
+}
+
+// observeBGPSessionHealth updates config.Status in memory. Callers that are
+// already persisting a larger reconciliation should leave persistence to that
+// path rather than patching status here.
+func (r *BGPCloudConfigurationReconciler) observeBGPSessionHealth(ctx context.Context, config *networkingapi.BGPCloudConfiguration) (observed bool, err error) {
 	expected, expectedErr := expectedBGPSessionCount(ctx, r.Client, config)
 	if expectedErr != nil {
-		err = r.patchConfigStatus(ctx, config, baseline, func(c *networkingapi.BGPCloudConfiguration) {
-			meta.SetStatusCondition(&c.Status.Conditions, metav1.Condition{
-				Type:               networkingapi.ConditionBGPSessionsEstablished,
-				Status:             metav1.ConditionUnknown,
-				Reason:             "ExpectedSessionCountUnavailable",
-				Message:            fmt.Sprintf("Unable to determine expected BGP session count: %v", expectedErr),
-				ObservedGeneration: c.Generation,
-			})
+		meta.SetStatusCondition(&config.Status.Conditions, metav1.Condition{
+			Type:               networkingapi.ConditionBGPSessionsEstablished,
+			Status:             metav1.ConditionUnknown,
+			Reason:             "ExpectedSessionCountUnavailable",
+			Message:            fmt.Sprintf("Unable to determine expected BGP session count: %v", expectedErr),
+			ObservedGeneration: config.Generation,
 		})
-		return false, err
+		return false, expectedErr
 	}
 
 	sessions, observed, sessionErr := observeBGPSessions(ctx, r.Client, config)
-	err = r.patchConfigStatus(ctx, config, baseline, func(c *networkingapi.BGPCloudConfiguration) {
-		if sessionErr != nil {
-			meta.SetStatusCondition(&c.Status.Conditions, metav1.Condition{
-				Type:               networkingapi.ConditionBGPSessionsEstablished,
-				Status:             metav1.ConditionUnknown,
-				Reason:             "ObservationFailed",
-				Message:            fmt.Sprintf("Unable to read frr-k8s BGPSessionState: %v", sessionErr),
-				ObservedGeneration: c.Generation,
-			})
-			return
-		}
-		setBGPSessionCondition(c, sessions, observed, expected)
-	})
-	return observed, err
+	if sessionErr != nil {
+		meta.SetStatusCondition(&config.Status.Conditions, metav1.Condition{
+			Type:               networkingapi.ConditionBGPSessionsEstablished,
+			Status:             metav1.ConditionUnknown,
+			Reason:             "ObservationFailed",
+			Message:            fmt.Sprintf("Unable to read frr-k8s BGPSessionState: %v", sessionErr),
+			ObservedGeneration: config.Generation,
+		})
+		return observed, sessionErr
+	}
+	setBGPSessionCondition(config, sessions, observed, expected)
+	return observed, nil
 }
 
 // observeBGPSessions reads the frr-k8s-owned session objects without making
@@ -82,17 +98,40 @@ func observeBGPSessions(ctx context.Context, c client.Client, config *networking
 		return nil, false, err
 	}
 
-	desired := desiredPeers(config)
+	nodes := &corev1.NodeList{}
+	if err := c.List(ctx, nodes, client.MatchingLabelsSelector{
+		Selector: labels.SelectorFromSet(config.Spec.RouterNodeSelector),
+	}); err != nil {
+		return nil, false, err
+	}
+	nodeLabels := make(map[string]labels.Set, len(nodes.Items))
+	for i := range nodes.Items {
+		nodeLabels[nodes.Items[i].Name] = labels.Set(nodes.Items[i].Labels)
+	}
+	groups := sessionPeerGroups(config)
 	out := make([]networkingapi.BGPSessionStatus, 0, len(sessions.Items))
 	for i := range sessions.Items {
 		obj := &sessions.Items[i]
-		peer, _, _ := unstructured.NestedString(obj.Object, "status", "peer")
-		if _, ok := desired[peer]; !ok {
+		peer, _, err := unstructured.NestedString(obj.Object, "status", "peer")
+		if err != nil {
+			return nil, false, fmt.Errorf("BGPSessionState %q has invalid status.peer: %w", obj.GetName(), err)
+		}
+		node, _, err := unstructured.NestedString(obj.Object, "status", "node")
+		if err != nil {
+			return nil, false, fmt.Errorf("BGPSessionState %q has invalid status.node: %w", obj.GetName(), err)
+		}
+		bgpStatus, _, err := unstructured.NestedString(obj.Object, "status", "bgpStatus")
+		if err != nil {
+			return nil, false, fmt.Errorf("BGPSessionState %q has invalid status.bgpStatus: %w", obj.GetName(), err)
+		}
+		bfdStatus, _, err := unstructured.NestedString(obj.Object, "status", "bfdStatus")
+		if err != nil {
+			return nil, false, fmt.Errorf("BGPSessionState %q has invalid status.bfdStatus: %w", obj.GetName(), err)
+		}
+		labelsForNode, found := nodeLabels[node]
+		if !found || !sessionMatchesPeerGroup(peer, labelsForNode, config.Spec.RouterNodeSelector, groups) {
 			continue
 		}
-		node, _, _ := unstructured.NestedString(obj.Object, "status", "node")
-		bgpStatus, _, _ := unstructured.NestedString(obj.Object, "status", "bgpStatus")
-		bfdStatus, _, _ := unstructured.NestedString(obj.Object, "status", "bfdStatus")
 		out = append(out, networkingapi.BGPSessionStatus{
 			Node: node, Peer: peer, BGPStatus: bgpStatus, BFDStatus: bfdStatus,
 		})
@@ -115,26 +154,50 @@ func expectedBGPSessionCount(ctx context.Context, c client.Client, config *netwo
 	}
 
 	count := 0
-	groups := config.Status.PeerGroups
-	if len(groups) == 0 {
-		groups = make([]networkingapi.PeerGroupStatus, 0, len(config.Spec.BGP.PeerGroups))
-		for i, group := range config.Spec.BGP.PeerGroups {
-			groups = append(groups, networkingapi.PeerGroupStatus{
-				Key: fmt.Sprintf("%d", i+1), NodeSelector: group.NodeSelector,
-				Neighbors: group.Neighbors,
-			})
-		}
-	}
+	groups := sessionPeerGroups(config)
 	for i := range nodes.Items {
 		nodeLabels := nodes.Items[i].Labels
 		for _, group := range groups {
-			if !labels.SelectorFromSet(group.NodeSelector).Matches(labels.Set(nodeLabels)) {
+			if !sessionNodeMatchesGroup(labels.Set(nodeLabels), config.Spec.RouterNodeSelector, group.NodeSelector) {
 				continue
 			}
 			count += len(group.Neighbors)
 		}
 	}
 	return count, nil
+}
+
+func sessionPeerGroups(config *networkingapi.BGPCloudConfiguration) []networkingapi.PeerGroupStatus {
+	if len(config.Status.PeerGroups) > 0 {
+		return config.Status.PeerGroups
+	}
+	groups := make([]networkingapi.PeerGroupStatus, 0, len(config.Spec.BGP.PeerGroups))
+	for i, group := range config.Spec.BGP.PeerGroups {
+		groups = append(groups, networkingapi.PeerGroupStatus{
+			Key: fmt.Sprintf("%d", i+1), NodeSelector: group.NodeSelector,
+			Neighbors: group.Neighbors,
+		})
+	}
+	return groups
+}
+
+func sessionNodeMatchesGroup(nodeLabels labels.Set, routerNodeSelector, groupNodeSelector map[string]string) bool {
+	return labels.SelectorFromSet(routerNodeSelector).Matches(nodeLabels) &&
+		labels.SelectorFromSet(groupNodeSelector).Matches(nodeLabels)
+}
+
+func sessionMatchesPeerGroup(peer string, nodeLabels labels.Set, routerNodeSelector map[string]string, groups []networkingapi.PeerGroupStatus) bool {
+	for _, group := range groups {
+		if !sessionNodeMatchesGroup(nodeLabels, routerNodeSelector, group.NodeSelector) {
+			continue
+		}
+		for _, neighbor := range group.Neighbors {
+			if neighbor.Address == peer {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func desiredPeers(config *networkingapi.BGPCloudConfiguration) map[string]struct{} {
@@ -156,7 +219,12 @@ func desiredPeers(config *networkingapi.BGPCloudConfiguration) map[string]struct
 }
 
 func setBGPSessionCondition(config *networkingapi.BGPCloudConfiguration, sessions []networkingapi.BGPSessionStatus, observed bool, expected int) {
-	config.Status.BGPSessions = sessions
+	const maxStatusSessions = 128
+	statusSessions := sessions
+	if len(statusSessions) > maxStatusSessions {
+		statusSessions = statusSessions[:maxStatusSessions]
+	}
+	config.Status.BGPSessions = statusSessions
 	if !observed {
 		meta.RemoveStatusCondition(&config.Status.Conditions, networkingapi.ConditionBGPSessionsEstablished)
 		return

@@ -547,14 +547,14 @@ func TestConfigReconcile_RepeatedReconcile_DoesNotRewriteFRRConfiguration(t *tes
 			resourceVersionAfterFirstPass, frrConfig.GetResourceVersion())
 	}
 
-	// A repeated reconcile now takes the health-only path, so cloud API calls
-	// are avoided while BGPSessionState is being refreshed.
+	// A repeated reconcile keeps provider-side node settings self-healing without
+	// rediscovering cloud endpoints or rewriting FRRConfiguration.
 	if mock.discoverCallCount != discoverCallsAfterFirstPass {
 		t.Errorf("expected DiscoverEndpoints not to run during health refresh, got %d calls after repeat (was %d)",
 			mock.discoverCallCount, discoverCallsAfterFirstPass)
 	}
-	if mock.reconcileNodesCallCount != reconcileNodesCallsAfterFirstPass {
-		t.Errorf("expected ReconcileNodes not to run during health refresh, got %d calls after repeat (was %d)",
+	if mock.reconcileNodesCallCount != reconcileNodesCallsAfterFirstPass+1 {
+		t.Errorf("expected ReconcileNodes once during health refresh, got %d calls after repeat (was %d)",
 			mock.reconcileNodesCallCount, reconcileNodesCallsAfterFirstPass)
 	}
 }

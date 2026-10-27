@@ -60,6 +60,7 @@ import (
 // +kubebuilder:rbac:groups=operator.openshift.io,resources=networks,verbs=get;list;watch;patch
 // +kubebuilder:rbac:groups=frrk8s.metallb.io,resources=frrconfigurations,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=frrk8s.metallb.io,resources=bgpsessionstates,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
@@ -168,6 +169,32 @@ func (r *BGPCloudConfigurationReconciler) reconcileNetworkOperatorPatch(
 	return false, ctrl.Result{}, nil
 }
 
+// reconcileReadyCloudResources keeps provider-side node settings self-healing,
+// including AWS SourceDestCheck, after the initial configuration.
+func (r *BGPCloudConfigurationReconciler) reconcileReadyCloudResources(ctx context.Context, config *networkingapi.BGPCloudConfiguration) error {
+	if config.Spec.Platform == networkingapi.PlatformManual {
+		return nil
+	}
+
+	buildPlatform := r.PlatformBuilder
+	if buildPlatform == nil {
+		buildPlatform = defaultPlatformBuilder
+	}
+	cloudPlatform, err := buildPlatform(ctx, r.Client, config)
+	if err != nil {
+		return err
+	}
+	routerNodes, _, err := r.listRouterNodes(ctx, config, true)
+	if err != nil {
+		return fmt.Errorf("failed to list router nodes: %w", err)
+	}
+	if err := cloudPlatform.ReconcileNodes(ctx, routerNodes); err != nil {
+		return fmt.Errorf("failed to reconcile cloud resources: %w", err)
+	}
+	return nil
+}
+
+//nolint:gocyclo // Reconcile intentionally coordinates the ordered controller phases and their status transitions.
 func (r *BGPCloudConfigurationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -194,13 +221,15 @@ func (r *BGPCloudConfigurationReconciler) Reconcile(ctx context.Context, req ctr
 		}
 	}
 
-	// Once the desired configuration is Ready, refresh only the live BGP
-	// session health. This avoids repeating cloud discovery and reconciliation
-	// just to notice a peer going down.
+	// Once the desired configuration is Ready, keep provider-side node settings
+	// self-healing while refreshing the live BGP session health.
 	if config.Status.Phase == networkingapi.PhaseReady &&
 		config.Status.ObservedGeneration == config.Generation {
 		observed, err := r.reconcileBGPSessionHealth(ctx, config, *baselineStatus)
 		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := r.reconcileReadyCloudResources(ctx, config); err != nil {
 			return ctrl.Result{}, err
 		}
 		if observed {
@@ -270,7 +299,7 @@ func (r *BGPCloudConfigurationReconciler) Reconcile(ctx context.Context, req ctr
 			ObservedGeneration: config.Generation,
 		})
 	} else {
-		incompleteMsg := formatIncompleteNodesMessage(incompleteNodes)
+		incompleteMsg := formatIncompleteNodesMessage(incompleteNodes, cloudNodeMetadata)
 		meta.SetStatusCondition(&config.Status.Conditions, metav1.Condition{
 			Type:               networkingapi.ConditionCompleteNodeInventory,
 			Status:             metav1.ConditionFalse,
@@ -382,8 +411,8 @@ func (r *BGPCloudConfigurationReconciler) Reconcile(ctx context.Context, req ctr
 		ObservedGeneration: config.Generation,
 	})
 
-	if _, err := r.reconcileBGPSessionHealth(ctx, config, *baselineStatus); err != nil {
-		return ctrl.Result{}, err
+	if _, err := r.observeBGPSessionHealth(ctx, config); err != nil {
+		log.Info("BGP session health observation failed; continuing reconciliation", "error", err)
 	}
 
 	// Phase 5: Reconcile cloud resources (if configured)
@@ -403,7 +432,11 @@ func (r *BGPCloudConfigurationReconciler) Reconcile(ctx context.Context, req ctr
 				ObservedGeneration: config.Generation,
 			})
 		} else {
-			incompleteMsg := formatIncompleteNodesMessage(incomplete)
+<<<<<<< HEAD
+			incompleteMsg := formatIncompleteNodesMessage(incomplete, cloudNodeMetadata)
+			// Emit only on the transition into incomplete: the inventory is
+			// re-checked every 30s while it stays incomplete, and an event per
+			// pass would bury the one that matters.
 			prev := meta.FindStatusCondition(baselineStatus.Conditions, networkingapi.ConditionCompleteNodeInventory)
 			if prev == nil || prev.Status != metav1.ConditionFalse {
 				incompleteEvent = incompleteMsg
@@ -724,7 +757,7 @@ func (r *BGPCloudConfigurationReconciler) listRouterNodes(ctx context.Context, c
 	return complete, incomplete, nil
 }
 
-func formatIncompleteNodesMessage(incomplete []platform.RouterNode) string {
+func formatIncompleteNodesMessage(incomplete []platform.RouterNode, requireCloudMetadata bool) string {
 	for _, n := range incomplete {
 		if n.Name == "<no matching nodes>" {
 			return "no nodes match spec.routerNodeSelector"
@@ -736,11 +769,13 @@ func formatIncompleteNodesMessage(incomplete []platform.RouterNode) string {
 		if n.PrivateIP == "" {
 			missing = append(missing, "IP")
 		}
-		if n.Zone == "" {
-			missing = append(missing, "zone")
-		}
-		if n.ProviderID == "" {
-			missing = append(missing, "providerID")
+		if requireCloudMetadata {
+			if n.Zone == "" {
+				missing = append(missing, "zone")
+			}
+			if n.ProviderID == "" {
+				missing = append(missing, "providerID")
+			}
 		}
 		parts = append(parts, n.Name+" (missing "+strings.Join(missing, "/")+")")
 	}

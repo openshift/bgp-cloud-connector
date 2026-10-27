@@ -243,7 +243,8 @@ func main() {
 	if err := (&controller.BGPCloudConfigurationReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
-		//nolint:staticcheck // Keep the legacy recorder until the controller-runtime event API migration is complete.
+<<<<<<< HEAD
+		//nolint:staticcheck // Keep the legacy recorder API until controller-runtime's EventRecorder migration is complete.
 		Recorder: mgr.GetEventRecorderFor("bgpcloudconfiguration"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "BGPCloudConfiguration")
@@ -252,7 +253,8 @@ func main() {
 	if err := (&controller.BGPRoutingReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
-		//nolint:staticcheck // Keep the legacy recorder until the controller-runtime event API migration is complete.
+<<<<<<< HEAD
+		//nolint:staticcheck // Keep the legacy recorder API until controller-runtime's EventRecorder migration is complete.
 		Recorder: mgr.GetEventRecorderFor("bgprouting"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "BGPRouting")
