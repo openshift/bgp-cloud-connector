@@ -416,6 +416,12 @@ spec:
                 - External
                 - Owned
                 type: string
+              lastCloudReconcileTime:
+                description: |-
+                  LastCloudReconcileTime records the last successful reconciliation of
+                  provider-side cloud resources by the Ready path.
+                format: date-time
+                type: string
               observedGeneration:
                 description: observedGeneration is the most recent generation observed
                   by the controller.

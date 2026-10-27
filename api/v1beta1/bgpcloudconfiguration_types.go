@@ -321,6 +321,10 @@ type BGPCloudConfigurationStatus struct {
 	// +kubebuilder:validation:MaxItems=128
 	// +listType=atomic
 	BGPSessions []BGPSessionStatus `json:"bgpSessions,omitempty"`
+	// LastCloudReconcileTime records the last successful reconciliation of
+	// provider-side cloud resources by the Ready path.
+	// +optional
+	LastCloudReconcileTime *metav1.Time `json:"lastCloudReconcileTime,omitempty"`
 	// FRRProviderOwnership records whether this controller may revert the FRR
 	// provider patch on Network/cluster additionalRoutingCapabilities.providers.
 	// Empty until the first Phase 1 reconcile completes.
