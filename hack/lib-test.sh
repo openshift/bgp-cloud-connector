@@ -404,6 +404,15 @@ check "gcp_query fails rather than reporting nothing" "$?" "1"
 check "gcp_query says why" \
     "$( (gcp_query "list routers" gcloud compute routers list) 2>&1 >/dev/null | grep -c 'cannot list routers')" "1"
 
+# CI masks the project id in its logs, so runs print a fingerprint that
+# tells projects apart without naming one. The expected value is
+# sha256("openshift-qe") computed independently; a fingerprint that
+# hashed a trailing newline would differ.
+check "gcp_project_fingerprint is the first 8 hex of the id's sha256" \
+    "$(gcp_project_fingerprint openshift-qe)" "4d6cb5a3"
+check "gcp_project_fingerprint tells projects apart" \
+    "$(gcp_project_fingerprint openshift-gce-devel-ci-2)" "015269ed"
+
 # The existence checks return 2 when they could not ask, which is
 # neither present nor absent: a create that read 2 as absent would build
 # a second estate, and a delete would report success over the first.

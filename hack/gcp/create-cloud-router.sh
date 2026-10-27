@@ -59,6 +59,7 @@ firewall="$(gcp_firewall_name "${infra}")"
 
 info "cluster:  ${infra}"
 info "project:  ${project}"
+info "fingerprint: $(gcp_project_fingerprint "${project}") (sha256 of the project id; CI masks the id)"
 info "region:   ${region}"
 info "asn:      ${asn} (the cluster's localASN must differ)"
 info ""

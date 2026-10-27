@@ -69,6 +69,14 @@ gcp_router_name()   { printf '%s-cudn-cr' "$1"; }
 gcp_firewall_name() { printf '%s-bgp' "$1"; }
 gcp_spoke_prefix()  { printf '%s-bgp-spoke' "$1"; }
 
+# A short fingerprint of a project id: the first 8 hex digits of its
+# sha256. CI masks the project id in job logs, which are public, and a
+# run has to say which project it leased without naming it; anyone who
+# already knows the candidate projects can tell them apart by this.
+gcp_project_fingerprint() {
+    printf '%s' "$1" | sha256sum | cut -c1-8
+}
+
 # Existence is decided here, not by gcloud.
 #
 # --filter is not an identity test and is not even consistent about what
