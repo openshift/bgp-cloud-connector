@@ -57,6 +57,10 @@ else
     info "no cluster is reachable; skipping cluster-side cleanup"
 fi
 
+# The client first and separately: it shares nothing with the estate but
+# the network, and either script can be run on its own at a desk.
+INFRA="${infra}" GCP_PROJECT="${project}" GCP_REGION="${region}" \
+    "${here}/gcp/delete-client-vm.sh"
 INFRA="${infra}" GCP_PROJECT="${project}" GCP_REGION="${region}" \
     "${here}/gcp/delete-cloud-router.sh"
 
