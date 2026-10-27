@@ -243,7 +243,6 @@ func main() {
 	if err := (&controller.BGPCloudConfigurationReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
-<<<<<<< HEAD
 		//nolint:staticcheck // Keep the legacy recorder API until controller-runtime's EventRecorder migration is complete.
 		Recorder: mgr.GetEventRecorderFor("bgpcloudconfiguration"),
 	}).SetupWithManager(mgr); err != nil {
@@ -253,7 +252,6 @@ func main() {
 	if err := (&controller.BGPRoutingReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
-<<<<<<< HEAD
 		//nolint:staticcheck // Keep the legacy recorder API until controller-runtime's EventRecorder migration is complete.
 		Recorder: mgr.GetEventRecorderFor("bgprouting"),
 	}).SetupWithManager(mgr); err != nil {
