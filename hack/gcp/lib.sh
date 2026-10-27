@@ -69,6 +69,11 @@ gcp_router_name()   { printf '%s-cudn-cr' "$1"; }
 gcp_firewall_name() { printf '%s-bgp' "$1"; }
 gcp_spoke_prefix()  { printf '%s-bgp-spoke' "$1"; }
 
+# The e2e client outside the cluster, and the rule admitting it to the
+# workers. The client's network tag is its own name.
+gcp_client_name()          { printf '%s-e2e-client' "$1"; }
+gcp_client_firewall_name() { printf '%s-e2e-client' "$1"; }
+
 # A short fingerprint of a project id: the first 8 hex digits of its
 # sha256. CI masks the project id in job logs, which are public, and a
 # run has to say which project it leased without naming it; anyone who
@@ -117,6 +122,12 @@ gcp_firewall_exists() {
         --format='value(name)'
 }
 
+gcp_instance_exists() {
+    gcp_name_exists "$1" "list instances in $2" \
+        gcloud compute instances list --project="$3" --zones="$2" \
+        --format='value(name)'
+}
+
 # The permissions the scripts here and the e2e suite need, as IAM names
 # them, including the ones gcloud uses on its own: it waits on the
 # operation a create returns and reads the resource back, so a create
@@ -137,29 +148,38 @@ gcp_firewall_exists() {
 # Consumed by the scripts that source this, not here.
 # shellcheck disable=SC2034
 gcp_estate_permissions=(
-    compute.firewalls.create          # create-cloud-router.sh, firewall
-    compute.firewalls.delete          # delete-cloud-router.sh
-    compute.firewalls.get             # gcloud reads the rule back after creating it
-    compute.firewalls.list            # gcp_firewall_exists
-    compute.globalOperations.get      # gcloud waits on firewall create and delete
-    compute.instances.get             # the suite, reading canIpForward
-    compute.instances.update          # the suite, flipping canIpForward for the operator to repair
-    compute.networks.list             # create-cloud-router.sh, the network read
-    compute.networks.updatePolicy     # attaching the rule and the router; the suite's peer edit
-    compute.regionOperations.get      # gcloud and the suite wait on router changes
-    compute.routers.create            # create-cloud-router.sh
-    compute.routers.delete            # delete-cloud-router.sh
-    compute.routers.get               # write-e2e-profile.sh and the suite; gcloud reads back after add-interface
-    compute.routers.list              # gcp_router_exists
-    compute.routers.update            # add-interface, twice; the suite, removing a peer for the operator to repair
-    compute.subnetworks.list          # create-cloud-router.sh, the subnet read
-    compute.zoneOperations.get        # the suite waits on the instance update
-    networkconnectivity.hubs.create   # create-cloud-router.sh
-    networkconnectivity.hubs.delete   # delete-cloud-router.sh
-    networkconnectivity.hubs.get      # gcloud reads the hub back after creating it
-    networkconnectivity.hubs.list     # gcp_hub_exists
-    networkconnectivity.operations.get # gcloud waits on hub create and delete
-    networkconnectivity.spokes.list   # delete-cloud-router.sh, before the hub goes; the suite
+    compute.disks.create                  # create-client-vm.sh, the boot disk
+    compute.firewalls.create              # create-cloud-router.sh, firewall
+    compute.firewalls.delete              # delete-cloud-router.sh
+    compute.firewalls.get                 # gcloud reads the rule back after creating it
+    compute.firewalls.list                # gcp_firewall_exists
+    compute.globalOperations.get          # gcloud waits on firewall create and delete
+    compute.instances.create              # create-client-vm.sh
+    compute.instances.delete              # delete-client-vm.sh
+    compute.instances.get                 # the suite, reading canIpForward and finding the client
+    compute.instances.getSerialPortOutput # the e2e suite, reading a probe round
+    compute.instances.list                # gcp_instance_exists, and the e2e suite
+    compute.instances.setLabels           # create-client-vm.sh, labels at create
+    compute.instances.setMetadata         # the startup script at create, and each probe round
+    compute.instances.setTags             # create-client-vm.sh, the network tag at create
+    compute.instances.update              # the suite, flipping canIpForward for the operator to repair
+    compute.networks.list                 # create-cloud-router.sh, the network read
+    compute.networks.updatePolicy         # attaching the rule and the router; the suite's peer edit
+    compute.regionOperations.get          # gcloud and the suite wait on router changes
+    compute.routers.create                # create-cloud-router.sh
+    compute.routers.delete                # delete-cloud-router.sh
+    compute.routers.get                   # write-e2e-profile.sh and the suite; gcloud reads back after add-interface
+    compute.routers.list                  # gcp_router_exists
+    compute.routers.update                # add-interface, twice; the suite, removing a peer for the operator to repair
+    compute.subnetworks.list              # create-cloud-router.sh, the subnet read
+    compute.subnetworks.use               # create-client-vm.sh, an address in the worker subnet
+    compute.zoneOperations.get            # the suite waits on the instance update
+    networkconnectivity.hubs.create       # create-cloud-router.sh
+    networkconnectivity.hubs.delete       # delete-cloud-router.sh
+    networkconnectivity.hubs.get          # gcloud reads the hub back after creating it
+    networkconnectivity.hubs.list         # gcp_hub_exists
+    networkconnectivity.operations.get    # gcloud waits on hub create and delete
+    networkconnectivity.spokes.list       # delete-cloud-router.sh, before the hub goes; the suite
 )
 
 # gcp_permissions_held prints which of the named permissions this
