@@ -36,6 +36,7 @@ import (
 
 	networkingapi "github.com/openshift/bgp-cloud-connector/api/v1beta1"
 	gcpplatform "github.com/openshift/bgp-cloud-connector/internal/platform/gcp"
+	e2e "github.com/openshift/bgp-cloud-connector/test/e2e"
 )
 
 const (
@@ -285,6 +286,66 @@ var _ = Describe("GCP E2E", Ordered, func() {
 				g.Expect(instErr).NotTo(HaveOccurred())
 				g.Expect(inst.CanIpForward).To(BeTrue())
 			}).WithTimeout(reconcileTimeout).WithPolling(pollInterval).Should(Succeed())
+		})
+	})
+
+	// ---------------------------------------------------------------
+	// E2E-GCP-05: traffic from outside the cluster
+	//
+	// Before E2E-GCP-04, which removes everything this needs. The
+	// container is Ordered, so position is what decides.
+	// ---------------------------------------------------------------
+	Context("E2E-GCP-05: Traffic from outside the cluster", func() {
+		It("should reach a pod on every worker whose instance forwards, "+
+			"from the client VM's own address, and no other", func(ctx context.Context) {
+			namespace := bgpRouting.Spec.Network.Name
+
+			By("finding the client VM")
+			vm, err := findClientVM(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("running a netexec pod on every worker")
+			Expect(e2e.EnsureNetexec(ctx, k8sClient, namespace)).To(Succeed())
+
+			// Each node's expected result comes from its instance as GCP
+			// reports it, not from its labels. A pod's reply leaves
+			// through its own node's interface with the advertised
+			// network's address as its source, and GCP drops that unless
+			// the instance has canIpForward. A node that left the router
+			// set keeps whatever setting it was given, so labels alone
+			// cannot say which nodes answer.
+			var dests []e2e.Destination
+			Eventually(func(g Gomega) {
+				found, findErr := destinations(ctx, namespace)
+				g.Expect(findErr).NotTo(HaveOccurred())
+				dests = found
+			}).WithTimeout(5 * time.Minute).WithPolling(pollInterval).Should(Succeed())
+
+			routers, err := routerNodes(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			isRouter := map[string]bool{}
+			for _, n := range routers {
+				isRouter[n.Name] = true
+			}
+			addresses := make([]string, 0, len(dests))
+			workers := make([]string, 0, len(dests))
+			for _, d := range dests {
+				GinkgoWriter.Printf("worker %s: pod %s, router=%v, forwarding=%v\n",
+					d.Node, d.PodAddress, isRouter[d.Node], d.Forwarding)
+				addresses = append(addresses, d.PodAddress)
+				workers = append(workers, d.Node)
+			}
+
+			By(fmt.Sprintf("requesting /clientip from every pod via the client VM at %s", vm.address))
+			e2e.ProbeAllowingOVNKubeRestart(ctx, k8sClient, workers, 10*time.Minute, 30*time.Second, func(g Gomega) {
+				answers, probeErr := probe(ctx, vm, addresses)
+				g.Expect(probeErr).NotTo(HaveOccurred())
+				g.Expect(e2e.CheckAnswers(dests, answers, vm.address)).To(Succeed())
+			})
+
+			// After the probe, so that a run which trips this has already
+			// shown whether every pod it could reach answered.
+			Expect(e2e.CheckCoverage(dests)).To(Succeed())
 		})
 	})
 
