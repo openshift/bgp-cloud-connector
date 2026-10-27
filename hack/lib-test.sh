@@ -502,6 +502,31 @@ gcloud() { echo "ERROR: reauth" >&2; return 1; }
 (gcp_hub_spokes hub-a proj) >/dev/null 2>&1
 check "gcp_hub_spokes fails rather than reporting none" "$?" "1"
 
+# GCP names instances per zone, not per project, so a client looked for
+# in one zone can exist in another. The lookup is project-wide, exact in
+# shell, and reports every zone the name is in.
+# shellcheck disable=SC2329
+gcloud() {
+    printf 'amcdermo-e2e-client\tus-east1-c\n'
+    printf 'amcdermo-e2e-client-old\tus-east1-b\n'
+    printf 'other\tus-east1-d\n'
+}
+check "gcp_instance_zones finds the instance in whichever zone it is" \
+    "$(gcp_instance_zones amcdermo-e2e-client proj | tr '\n' ' ')" "us-east1-c "
+check "gcp_instance_zones reports nothing for a name that is not there" \
+    "$(gcp_instance_zones amcdermo-e2e-clien proj | tr '\n' ' ')" ""
+# shellcheck disable=SC2329
+gcloud() {
+    printf 'amcdermo-e2e-client\tus-east1-b\n'
+    printf 'amcdermo-e2e-client\tus-east1-c\n'
+}
+check "gcp_instance_zones reports every zone the name is in" \
+    "$(gcp_instance_zones amcdermo-e2e-client proj | tr '\n' ' ')" "us-east1-b us-east1-c "
+# shellcheck disable=SC2329
+gcloud() { echo "ERROR: reauth" >&2; return 1; }
+(gcp_instance_zones amcdermo-e2e-client proj) >/dev/null 2>&1
+check "gcp_instance_zones fails rather than reporting none" "$?" "1"
+
 # Interface addresses arrive as one semicolon-separated value, each
 # carrying the mask it was allocated with. A BGP neighbour address is
 # neither.

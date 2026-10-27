@@ -12,6 +12,7 @@
 #
 #   enable FRR                     hack/enable-frr.sh
 #   stand up the estate            hack/gcp/create-cloud-router.sh
+#   a client outside the cluster   hack/gcp/create-client-vm.sh
 #   label the router nodes         hack/label-router-nodes.sh
 #   describe what was built        hack/gcp/write-e2e-profile.sh
 #   run the suite                  make test-e2e-gcp
@@ -68,7 +69,15 @@ info "gcloud: $(gcloud version 2>/dev/null | head -1)"
 
 "${here}/gcp/create-cloud-router.sh"
 
-"${here}/label-router-nodes.sh"
+"${here}/gcp/create-client-vm.sh"
+
+# One worker is left out of the router set, so E2E-GCP-05 has a pod on a
+# node that is not a BGP speaker as well as pods on nodes that are.
+# Without one the suite cannot see the reply path
+# openshift/bgp-cloud-connector#121 describes, which GCP shares with
+# Azure and AWS. The other specs check whatever router set this leaves,
+# so a smaller one costs them nothing.
+NON_ROUTER_WORKERS="${NON_ROUTER_WORKERS:-1}" "${here}/label-router-nodes.sh"
 
 # Into the scratch directory, so the suite reads a profile describing
 # the estate that is actually up and the repository is left exactly as
@@ -87,7 +96,23 @@ sed -e 's/^/  /' "${profile_dir}/bgpcloudconfiguration.yaml"
 # as well as the end, so a run killed by Ctrl-C or by a timeout does not
 # leave the next one failing on AlreadyExists.
 info "--- e2e suite ---"
-E2E_MANIFEST_DIR="${profile_dir}" make -C "${repo_root}" test-e2e-gcp
+suite_rc=0
+E2E_MANIFEST_DIR="${profile_dir}" make -C "${repo_root}" test-e2e-gcp || suite_rc=$?
+
+# Whatever the suite's outcome, and never allowed to change it. A worker
+# missing the br-ex flows for the advertised network still advertises it
+# and does not answer, which is what E2E-GCP-05 sees. E2E-GCP-04 deletes
+# the BGPRouting, so after a run that reached it the flows are expected
+# to be gone; a failure before it skips it, the container being Ordered,
+# and the flows are as the failing spec found them.
+info "--- br-ex flows ---"
+"${here}/report-br-ex-flows.sh" "${profile_dir}/bgprouting.yaml" \
+    ${ARTIFACT_DIR:+"${ARTIFACT_DIR}/br-ex-flows"} \
+    || warn "could not read the br-ex flows on every worker; see above"
+
+if (( suite_rc != 0 )); then
+    exit "${suite_rc}"
+fi
 
 info "e2e suite passed"
 info ""

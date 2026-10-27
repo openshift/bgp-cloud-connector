@@ -67,8 +67,21 @@ else
     info "no cluster is reachable; skipping cluster-side cleanup"
 fi
 
+# The client first and separately: it shares nothing with the estate but
+# the network, and either script can be run on its own at a desk. Both
+# run whatever the other does, so a failed client delete does not leave
+# the hub and Cloud Router up as well.
+failed=()
 INFRA="${infra}" GCP_PROJECT="${project}" GCP_REGION="${region}" \
-    "${here}/gcp/delete-cloud-router.sh"
+    "${here}/gcp/delete-client-vm.sh" || failed+=(delete-client-vm.sh)
+INFRA="${infra}" GCP_PROJECT="${project}" GCP_REGION="${region}" \
+    "${here}/gcp/delete-cloud-router.sh" || failed+=(delete-cloud-router.sh)
+
+if (( ${#failed[@]} > 0 )); then
+    die "teardown incomplete: ${failed[*]} failed, so GCP resources may still be up" \
+        "Rerun hack/ci-e2e-gcp-teardown.sh with INFRA=${infra}, GCP_REGION=${region}" \
+        "and GCP_PROJECT set to the project above."
+fi
 
 info ""
 ok "teardown complete"
