@@ -20,6 +20,9 @@ package: bgp-cloud-connector
 schema: olm.channel
 ---
 entries:
+- name: bgp-cloud-connector.v1.1.0
+  replaces: bgp-cloud-connector.v1.0.0
+  skipRange: <1.1.0
 - name: bgp-cloud-connector.v1.0.0
   replaces: bgp-cloud-connector.v0.1.0
   skipRange: <1.0.0
@@ -421,6 +424,136 @@ relatedImages:
 - image: registry.redhat.io/bgpcc/bgp-cloud-connector-operator-bundle@sha256:875c4548aec9352e19c7d76eae7ad0f1a9b33fc32dd408443fbdd4cdf0a98611
   name: ""
 - image: registry.redhat.io/bgpcc/bgp-cloud-connector-rhel9-operator@sha256:c6bbb0ba9bbd05924de7db6951bcdcc69888fb0339aa4000ecab246221cba575
+  name: bgp-cloud-connector
+schema: olm.bundle
+---
+image: registry.redhat.io/bgpcc/bgp-cloud-connector-operator-bundle@sha256:ddadf878d5d124aa2d7f5835b224578fdfc0d5f71e838bf9b47145699f4e2175
+name: bgp-cloud-connector.v1.1.0
+package: bgp-cloud-connector
+properties:
+- type: olm.gvk
+  value:
+    group: networking.openshift.io
+    kind: BGPCloudConfiguration
+    version: v1beta1
+- type: olm.gvk
+  value:
+    group: networking.openshift.io
+    kind: BGPRouting
+    version: v1beta1
+- type: olm.package
+  value:
+    packageName: bgp-cloud-connector
+    version: 1.1.0
+- type: olm.csv.metadata
+  value:
+    annotations:
+      alm-examples: |-
+        [
+          {
+            "apiVersion": "networking.openshift.io/v1beta1",
+            "kind": "BGPCloudConfiguration",
+            "metadata": {
+              "name": "cluster"
+            },
+            "spec": {
+              "aws": {
+                "region": "us-east-1",
+                "routeServerIDs": [
+                  "rs-0abc123456789abcd"
+                ]
+              },
+              "bgp": {
+                "livenessDetection": "bgp-keepalive",
+                "localASN": 65001
+              },
+              "platform": "AWS",
+              "routerNodeSelector": {
+                "bgp_router": "true"
+              }
+            }
+          },
+          {
+            "apiVersion": "networking.openshift.io/v1beta1",
+            "kind": "BGPRouting",
+            "metadata": {
+              "name": "cudn1"
+            },
+            "spec": {
+              "network": {
+                "name": "prod",
+                "subnets": [
+                  "10.100.0.0/16"
+                ]
+              }
+            }
+          }
+        ]
+      capabilities: Basic Install
+      categories: Networking
+      containerImage: registry.redhat.io/bgpcc/bgp-cloud-connector-rhel9-operator@sha256:36bbbd780ff4933a9060422b52f3f35c41062181e161228276320aac13862632
+      createdAt: "2026-10-26T12:57:43Z"
+      description: Automates L3 direct routing between CUDN Pod networks and external
+        networks via BGP on OpenShift. Cloud platform aware — auto-discovers BGP infrastructure
+        on AWS (VPC Route Server) and Azure (Route Server), and works on-premise with
+        explicit configuration.
+      features.operators.openshift.io/disconnected: "true"
+      features.operators.openshift.io/fips-compliant: "true"
+      features.operators.openshift.io/proxy-aware: "true"
+      features.operators.openshift.io/tls-profiles: "true"
+      features.operators.openshift.io/token-auth-aws: "true"
+      features.operators.openshift.io/token-auth-azure: "true"
+      features.operators.openshift.io/token-auth-gcp: "false"
+      operatorframework.io/suggested-namespace: openshift-bgp-cloud-connector
+      operators.openshift.io/valid-subscription: '["OpenShift Kubernetes Engine",
+        "OpenShift Container Platform", "OpenShift Platform Plus"]'
+      operators.operatorframework.io/builder: operator-sdk-v1.42.2
+      operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
+    apiServiceDefinitions: {}
+    crdDescriptions:
+      owned:
+      - description: BGPCloudConfiguration is the singleton cluster-scoped BGP infrastructure
+          configuration.
+        displayName: BGP Cloud Configuration
+        kind: BGPCloudConfiguration
+        name: bgpcloudconfigurations.networking.openshift.io
+        version: v1beta1
+      - description: |-
+          BGPRouting declares a single network to advertise via BGP.
+          Users must pre-create and label namespaces; the operator manages only the
+          ClusterUserDefinedNetwork and RouteAdvertisements.
+        displayName: BGP Routing
+        kind: BGPRouting
+        name: bgproutings.networking.openshift.io
+        version: v1beta1
+    description: |
+      BGP cloud connector automates L3 direct routing between
+      Cluster User Defined Networks (CUDN) and external networks via BGP
+      on OpenShift. Core BGP and CUDN functionality works on any OpenShift
+      cluster with external BGP servers. When platform configuration is
+      provided (e.g. AWS or Azure), the operator auto-discovers cloud BGP
+      infrastructure and manages cloud-side networking resources. It
+      replaces manual in-cluster configuration steps by reconciling
+      FRRConfiguration, ClusterUserDefinedNetwork, and
+      RouteAdvertisements resources from two simple CRs.
+    displayName: BGP cloud connector
+    installModes:
+    - supported: true
+      type: OwnNamespace
+    - supported: true
+      type: SingleNamespace
+    - supported: false
+      type: MultiNamespace
+    - supported: false
+      type: AllNamespaces
+    maturity: alpha
+    minKubeVersion: 1.31.0
+    provider:
+      name: Red Hat
+relatedImages:
+- image: registry.redhat.io/bgpcc/bgp-cloud-connector-operator-bundle@sha256:ddadf878d5d124aa2d7f5835b224578fdfc0d5f71e838bf9b47145699f4e2175
+  name: ""
+- image: registry.redhat.io/bgpcc/bgp-cloud-connector-rhel9-operator@sha256:36bbbd780ff4933a9060422b52f3f35c41062181e161228276320aac13862632
   name: bgp-cloud-connector
 schema: olm.bundle
 ---
