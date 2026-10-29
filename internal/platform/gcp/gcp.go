@@ -122,8 +122,18 @@ func (p *Platform) ReconcileNodes(ctx context.Context, nodes []platform.RouterNo
 		if changed {
 			logger.Info("enabled canIpForward", "instance", node.Name)
 		}
+	}
 
-		if p.cfg.NestedVirt {
+	speakerNodes, err := toRouterNodes(platform.Speakers(nodes))
+	if err != nil {
+		return err
+	}
+	if len(speakerNodes) == 0 {
+		return nil
+	}
+
+	if p.cfg.NestedVirt {
+		for _, node := range speakerNodes {
 			changed, err := p.compute.EnsureNestedVirtualization(ctx, node)
 			if err != nil {
 				platform.RecordCloudAPIError(platform.PlatformGCP, platform.OpNodeForwarding)
@@ -137,7 +147,7 @@ func (p *Platform) ReconcileNodes(ctx context.Context, nodes []platform.RouterNo
 
 	// A VM cannot peer with a Cloud Router until it belongs to a router
 	// appliance spoke, so the spokes come before the peers.
-	spokeChanges, err := ReconcileNCCSpokes(ctx, p.ncc, p.cfg.NCCHubName, p.cfg.NCCSpokePrefix, p.cfg.SiteToSite, routerNodes)
+	spokeChanges, err := ReconcileNCCSpokes(ctx, p.ncc, p.cfg.NCCHubName, p.cfg.NCCSpokePrefix, p.cfg.SiteToSite, speakerNodes)
 	if err != nil {
 		platform.RecordCloudAPIError(platform.PlatformGCP, platform.OpNCC)
 		return fmt.Errorf("reconciling NCC spokes: %w", err)
@@ -151,7 +161,7 @@ func (p *Platform) ReconcileNodes(ctx context.Context, nodes []platform.RouterNo
 		platform.RecordCloudAPIError(platform.PlatformGCP, platform.OpPeer)
 		return fmt.Errorf("reading Cloud Router %q topology: %w", p.cfg.CloudRouterName, err)
 	}
-	changed, err := p.compute.ReconcilePeers(ctx, p.cfg.CloudRouterName, p.cfg.ClusterID, routerNodes, topology, int(p.cfg.LocalASN))
+	changed, err := p.compute.ReconcilePeers(ctx, p.cfg.CloudRouterName, p.cfg.ClusterID, speakerNodes, topology, int(p.cfg.LocalASN))
 	if err != nil {
 		platform.RecordCloudAPIError(platform.PlatformGCP, platform.OpPeer)
 		return fmt.Errorf("reconciling Cloud Router peers: %w", err)
@@ -160,10 +170,10 @@ func (p *Platform) ReconcileNodes(ctx context.Context, nodes []platform.RouterNo
 	// the Cloud Router's whole peer list in one patch, so it either applied or
 	// returned the error above; there is no half-written state for a re-read
 	// to catch, and asking again would only cost another API call.
-	managed := len(desiredPeers(p.cfg.ClusterID, routerNodes, topology, int(p.cfg.LocalASN)))
+	managed := len(desiredPeers(p.cfg.ClusterID, speakerNodes, topology, int(p.cfg.LocalASN)))
 	platform.SetCloudPeersManaged(platform.PlatformGCP, float64(managed))
 	if changed {
-		logger.Info("Cloud Router peers updated", "router", p.cfg.CloudRouterName, "nodes", len(routerNodes))
+		logger.Info("Cloud Router peers updated", "router", p.cfg.CloudRouterName, "nodes", len(speakerNodes))
 	}
 	return nil
 }

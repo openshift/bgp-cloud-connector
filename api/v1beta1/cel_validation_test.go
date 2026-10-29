@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -88,6 +89,21 @@ func validManualConfig(name string) *networkingapi.BGPCloudConfiguration {
 						RemoteASN: 64512,
 					}},
 				}},
+			},
+			RouterNodeSelector: map[string]string{"role": "router"},
+		},
+	}
+}
+
+func validAWSConfig(name string) *networkingapi.BGPCloudConfiguration {
+	return &networkingapi.BGPCloudConfiguration{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: networkingapi.BGPCloudConfigurationSpec{
+			Platform: networkingapi.PlatformAWS,
+			BGP:      networkingapi.BGPConfig{LocalASN: 65001},
+			AWS: &networkingapi.AWSConfig{
+				Region:         "us-east-1",
+				RouteServerIDs: []string{"rs-123"},
 			},
 			RouterNodeSelector: map[string]string{"role": "router"},
 		},
@@ -387,6 +403,54 @@ func TestCEL_RoutingBareIP(t *testing.T) {
 		t.Fatal("bare IP (not CIDR) should be rejected")
 	}
 	assertErrorContains(t, err, "each subnet must be a valid CIDR")
+}
+
+func TestCEL_ForwardingSelectorAccepted(t *testing.T) {
+	obj := validAWSConfig("cel-forwarding-selector")
+	obj.Spec.ForwardingNodeSelector = map[string]string{"cudn": "true"}
+	if err := testClient.Create(ctx, obj); err != nil {
+		t.Fatalf("non-empty forwardingNodeSelector should be accepted: %v", err)
+	}
+	t.Cleanup(func() { _ = testClient.Delete(ctx, obj) })
+}
+
+func TestCEL_ForwardingSelectorRejectsEmpty(t *testing.T) {
+	// A typed client drops an empty map because of omitempty, so the apiserver
+	// would see the field as absent. Send the empty object explicitly.
+	obj := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "networking.openshift.io/v1beta1",
+		"kind":       "BGPCloudConfiguration",
+		"metadata":   map[string]interface{}{"name": "cel-forwarding-empty"},
+		"spec": map[string]interface{}{
+			"platform":           "AWS",
+			"bgp":                map[string]interface{}{"localASN": int64(65001)},
+			"routerNodeSelector": map[string]interface{}{"role": "router"},
+			"aws": map[string]interface{}{
+				"region":         "us-east-1",
+				"routeServerIDs": []interface{}{"rs-123"},
+			},
+			"forwardingNodeSelector": map[string]interface{}{},
+		},
+	}}
+
+	err := testClient.Create(ctx, obj)
+	if err == nil {
+		t.Cleanup(func() { _ = testClient.Delete(ctx, obj) })
+		t.Fatal("empty forwardingNodeSelector should be rejected")
+	}
+	assertErrorContains(t, err, "forwardingNodeSelector")
+}
+
+func TestCEL_ForwardingSelectorRejectedOnManual(t *testing.T) {
+	obj := validManualConfig("cel-forwarding-manual")
+	obj.Spec.ForwardingNodeSelector = map[string]string{"cudn": "true"}
+
+	err := testClient.Create(ctx, obj)
+	if err == nil {
+		t.Cleanup(func() { _ = testClient.Delete(ctx, obj) })
+		t.Fatal("forwardingNodeSelector on Manual should be rejected")
+	}
+	assertErrorContains(t, err, "spec.forwardingNodeSelector may only be set when spec.platform is not Manual")
 }
 
 // --- helpers ---

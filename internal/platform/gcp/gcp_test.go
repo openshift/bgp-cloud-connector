@@ -11,13 +11,17 @@ import (
 type recordingCompute struct {
 	topology       *CloudRouterTopology
 	reconcilePeers int
+	canIPForward   int
+	nestedVirt     int
 }
 
 func (c *recordingCompute) EnsureCanIPForward(context.Context, RouterNode) (bool, error) {
+	c.canIPForward++
 	return false, nil
 }
 
 func (c *recordingCompute) EnsureNestedVirtualization(context.Context, RouterNode) (bool, error) {
+	c.nestedVirt++
 	return false, nil
 }
 
@@ -99,6 +103,29 @@ func TestReconcileNodes_EmptyNodeListLeavesCloudAlone(t *testing.T) {
 	}
 	if compute.reconcilePeers != 0 {
 		t.Errorf("ReconcilePeers called %d times, want 0: writing an empty peer set removes every owned peer", compute.reconcilePeers)
+	}
+}
+
+func TestReconcileNodes_ForwardingOnlyLeavesPeersAlone(t *testing.T) {
+	compute := &recordingCompute{topology: testTopology()}
+	ncc := &recordingNCC{existing: []string{"cluster-bgp-spoke-0"}}
+	p := testPlatform(compute, ncc)
+	p.cfg.NestedVirt = true
+	nodes := []platform.RouterNode{{
+		Name:           "worker-a",
+		ProviderID:     "gce://openshift-qe/us-east1-b/worker-a",
+		PrivateIP:      "10.0.0.5",
+		ForwardingOnly: true,
+	}}
+
+	if err := p.ReconcileNodes(context.Background(), nodes); err != nil {
+		t.Fatalf("ReconcileNodes: %v", err)
+	}
+	if compute.canIPForward != 1 {
+		t.Errorf("EnsureCanIPForward called %d times, want 1", compute.canIPForward)
+	}
+	if compute.nestedVirt != 0 || compute.reconcilePeers != 0 || len(ncc.updated) != 0 || len(ncc.deleted) != 0 {
+		t.Errorf("nestedVirt=%d peers=%d ncc updated=%v deleted=%v, want none", compute.nestedVirt, compute.reconcilePeers, ncc.updated, ncc.deleted)
 	}
 }
 

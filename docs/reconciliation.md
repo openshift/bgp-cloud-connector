@@ -50,12 +50,15 @@ Phase 4: Apply FRR Configuration (per peer group)
           │
           ▼
 Phase 5: Reconcile AWS Resources (if spec.aws configured)
-  ├── List Nodes matching spec.routerNodeSelector
+  ├── List nodes matching spec.routerNodeSelector or spec.forwardingNodeSelector
   ├── For each node: read AZ from topology.kubernetes.io/zone label,
   │   private IP from status.addresses, instance ID from spec.providerID
   ├── Route Server peers: for each AZ, ensure peers exist on the
-  │   discovered endpoint IDs for the local BGP-enabled worker nodes only
-  ├── Source/dest check: disable on the primary ENI of each node
+  │   discovered endpoint IDs for the speakers only. No speakers leaves
+  │   existing peers in place.
+  ├── Forwarding: every selected node. Unset forwardingNodeSelector, or one
+  │   that matches nobody, updates speakers only. Nodes that match only
+  │   forwardingNodeSelector are not peered.
   └── Condition: CloudResourcesReconciled
           │
           ▼
