@@ -59,6 +59,8 @@ var _ = Describe("E2E", Ordered, func() {
 
 			By("verifying Network/cluster ownership is External (FRR pre-enabled externally)")
 			Expect(CheckConfigNetworkOwnershipExternal(ctx, k8sClient, configCR.Name)).To(Succeed())
+			By("verifying the configuration Normal Event is recorded")
+			eventuallyExpectEvent(ctx, configCR, corev1.EventTypeNormal, "AsExpected")
 
 			By("verifying FRRConfigurations exist")
 			azCount := len(bgpConfig.Spec.BGP.PeerGroups)
@@ -71,6 +73,25 @@ var _ = Describe("E2E", Ordered, func() {
 				}, frrCfg)).To(Succeed(), "FRRConfiguration %d should exist", i)
 			}
 
+			By("applying BGPRouting CR")
+			routingCR := bgpRouting.DeepCopy()
+			routingCR.ResourceVersion = ""
+			By("verifying the complete namespace selector has no matches")
+			matched := &corev1.NamespaceList{}
+			selector := client.MatchingLabels{labelPrimaryUDN: "", labelClusterUDN: routingCR.Spec.Network.Name}
+			Expect(k8sClient.List(ctx, matched, selector)).To(Succeed())
+			Expect(matched.Items).To(BeEmpty(),
+				"the missing-namespace assertion requires no namespace to match the full selector")
+			Expect(k8sClient.Create(ctx, routingCR)).To(Succeed())
+
+			By("waiting for missing namespace validation and verifying its Warning Event")
+			Eventually(func(g Gomega) {
+				rt := &networkingapi.BGPRouting{}
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: routingCR.Name}, rt)).To(Succeed())
+				g.Expect(rt.Status.Phase).To(Equal(networkingapi.PhaseDegraded))
+			}).WithTimeout(reconcileTimeout).WithPolling(pollInterval).Should(Succeed())
+			eventuallyExpectEvent(ctx, routingCR, corev1.EventTypeWarning, "NamespaceNotReady")
+
 			By("creating labeled namespace for ClusterUDN")
 			ns := &corev1.Namespace{
 				ObjectMeta: metav1.ObjectMeta{
@@ -82,11 +103,6 @@ var _ = Describe("E2E", Ordered, func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, ns)).To(Succeed())
-
-			By("applying BGPRouting CR")
-			routingCR := bgpRouting.DeepCopy()
-			routingCR.ResourceVersion = ""
-			Expect(k8sClient.Create(ctx, routingCR)).To(Succeed())
 
 			By("waiting for routing phase=Ready")
 			Eventually(func(g Gomega) {
@@ -276,6 +292,22 @@ var _ = Describe("E2E", Ordered, func() {
 		})
 	})
 })
+
+func eventuallyExpectEvent(ctx context.Context, object client.Object, eventType, reason string) {
+	Eventually(func(g Gomega) {
+		events := &corev1.EventList{}
+		g.Expect(k8sClient.List(ctx, events, client.InNamespace("default"))).To(Succeed())
+		found := false
+		for i := range events.Items {
+			event := &events.Items[i]
+			if event.InvolvedObject.UID == object.GetUID() && event.Type == eventType && event.Reason == reason {
+				found = true
+				break
+			}
+		}
+		g.Expect(found).To(BeTrue(), "expected %s %s Event for %s", eventType, reason, object.GetName())
+	}).WithTimeout(reconcileTimeout).WithPolling(pollInterval).Should(Succeed())
+}
 
 func assertBGPNotEstablished(ctx context.Context) {
 	neighborAddrs := make(map[string]bool)

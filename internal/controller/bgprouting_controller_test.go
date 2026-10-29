@@ -18,17 +18,20 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -134,8 +137,14 @@ func TestRoutingReconcile_FullReconcile(t *testing.T) {
 	if updated.Status.Phase != networkingapi.PhaseReady {
 		t.Errorf("expected Ready, got %s", updated.Status.Phase)
 	}
-	if len(updated.Status.Conditions) != 2 {
-		t.Errorf("expected 2 conditions, got %d", len(updated.Status.Conditions))
+	// 2 per-step conditions + the 3 aggregate summary conditions.
+	if len(updated.Status.Conditions) != 5 {
+		t.Errorf("expected 5 conditions, got %d", len(updated.Status.Conditions))
+	}
+	assertSummary(t, updated.Status.Conditions, metav1.ConditionTrue, metav1.ConditionFalse, metav1.ConditionFalse)
+	// The matched namespace is reported so an admin sees what the network covers.
+	if len(updated.Status.Namespaces) != 1 || updated.Status.Namespaces[0] != "app1" {
+		t.Errorf("expected status.namespaces [app1], got %v", updated.Status.Namespaces)
 	}
 
 	// Verify ClusterUDN created
@@ -150,6 +159,64 @@ func TestRoutingReconcile_FullReconcile(t *testing.T) {
 	ra.SetGroupVersionKind(RouteAdvertisementsGVK)
 	if err := c.Get(context.Background(), types.NamespacedName{Name: RouteAdvertisementName}, ra); err != nil {
 		t.Fatalf("RouteAdvertisements not created: %v", err)
+	}
+}
+
+func TestRoutingReconcile_CUDNFailureMakesRoutingUnavailable(t *testing.T) {
+	routing := newTestBGPRouting()
+	routing.Finalizers = []string{RoutingFinalizerName}
+	config := newReadyBGPCloudConfiguration()
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		Name:   "app1",
+		Labels: map[string]string{LabelPrimaryUDN: "", LabelClusterUDN: "prod"},
+	}}
+
+	s := routingTestScheme()
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(routing, config, ns).
+		WithStatusSubresource(routing, config).
+		Build()
+	if err := EnsureClusterUDN(context.Background(), c, routing); err != nil {
+		t.Fatalf("ensure CUDN: %v", err)
+	}
+	cudn := &unstructured.Unstructured{}
+	cudn.SetGroupVersionKind(ClusterUDNGVK)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: ClusterUDNNamePrefix + "prod"}, cudn); err != nil {
+		t.Fatalf("get CUDN: %v", err)
+	}
+	if err := unstructured.SetNestedSlice(cudn.Object, []interface{}{
+		map[string]interface{}{
+			"type":    "NetworkCreated",
+			"status":  "False",
+			"reason":  "NetworkAttachmentDefinitionSyncError",
+			"message": "invalid primary network state for namespace app-partial",
+		},
+	}, "status", "conditions"); err != nil {
+		t.Fatalf("set CUDN status: %v", err)
+	}
+	if err := c.Update(context.Background(), cudn); err != nil {
+		t.Fatalf("update CUDN status: %v", err)
+	}
+
+	r := &BGPRoutingReconciler{Client: c, Scheme: s}
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "prod"}}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	updated := &networkingapi.BGPRouting{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "prod"}, updated); err != nil {
+		t.Fatalf("get routing: %v", err)
+	}
+	if updated.Status.Phase != networkingapi.PhaseDegraded {
+		t.Fatalf("phase = %s, want Degraded", updated.Status.Phase)
+	}
+	assertSummary(t, updated.Status.Conditions, metav1.ConditionFalse, metav1.ConditionFalse, metav1.ConditionTrue)
+	condition := meta.FindStatusCondition(updated.Status.Conditions, networkingapi.ConditionNetworkCreated)
+	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != ReasonCUDNFailed {
+		t.Fatalf("NetworkCreated condition = %#v, want False/%s", condition, ReasonCUDNFailed)
+	}
+	if !strings.Contains(condition.Message, "NetworkAttachmentDefinitionSyncError") {
+		t.Errorf("NetworkCreated message = %q, want CUDN failure reason", condition.Message)
 	}
 }
 
@@ -248,6 +315,7 @@ func TestRoutingReconcile_NoNamespace(t *testing.T) {
 	if updated.Status.Phase != networkingapi.PhaseDegraded {
 		t.Errorf("expected Degraded, got %s", updated.Status.Phase)
 	}
+	assertSummary(t, updated.Status.Conditions, metav1.ConditionFalse, metav1.ConditionFalse, metav1.ConditionTrue)
 }
 
 func TestRoutingReconcile_DeleteLastRemovesRA(t *testing.T) {
@@ -471,6 +539,98 @@ func TestRoutingReconcile_NamespaceNotReady_StillTransient(t *testing.T) {
 	}
 	if result.RequeueAfter != 30*time.Second {
 		t.Errorf("NamespaceNotReady must remain transient (30s), got %v", result.RequeueAfter)
+	}
+}
+
+// A transition into Degraded emits a Warning Event carrying the reason.
+func TestRoutingReconcile_EmitsEventOnDegraded(t *testing.T) {
+	routing := newTestBGPRouting()
+	routing.Finalizers = []string{RoutingFinalizerName}
+	config := newReadyBGPCloudConfiguration()
+
+	s := routingTestScheme()
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(routing, config).
+		WithStatusSubresource(routing, config).
+		Build()
+
+	rec := record.NewFakeRecorder(10)
+	r := &BGPRoutingReconciler{Client: c, Scheme: s, Recorder: rec}
+	// No labelled namespace exists → NamespaceNotReady degraded.
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "prod"},
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	select {
+	case ev := <-rec.Events:
+		if !strings.Contains(ev, corev1.EventTypeWarning) || !strings.Contains(ev, ReasonNamespaceNotReady) {
+			t.Errorf("expected a Warning/%s event, got %q", ReasonNamespaceNotReady, ev)
+		}
+	default:
+		t.Error("expected a degraded event to be recorded")
+	}
+}
+
+// TestRoutingReconcile_WaitForConfig_DoesNotChurnStatus guards the hot loop that
+// wiping and rebuilding the summary conditions every requeue would cause: the
+// conditions would come back with a fresh LastTransitionTime, the status write
+// would differ from etcd, and the 10s requeue would rewrite status forever. A
+// settled wait must not write status.
+func TestRoutingReconcile_WaitForConfig_DoesNotChurnStatus(t *testing.T) {
+	routing := newTestBGPRouting()
+	routing.Finalizers = []string{RoutingFinalizerName}
+	config := newReadyBGPCloudConfiguration()
+	config.Status.Phase = networkingapi.PhaseConfiguring // not Ready
+
+	s := routingTestScheme()
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(routing, config).
+		WithStatusSubresource(routing, config).
+		Build()
+
+	r := &BGPRoutingReconciler{Client: c, Scheme: s}
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "prod"}}
+
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+	first := &networkingapi.BGPRouting{}
+	if err := c.Get(context.Background(), req.NamespacedName, first); err != nil {
+		t.Fatalf("get after first reconcile: %v", err)
+	}
+	if first.Status.Phase != networkingapi.PhasePending {
+		t.Fatalf("expected Pending while config not Ready, got %s", first.Status.Phase)
+	}
+	assertSummary(t, first.Status.Conditions, metav1.ConditionFalse, metav1.ConditionTrue, metav1.ConditionFalse)
+	rv := first.ResourceVersion
+
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+	second := &networkingapi.BGPRouting{}
+	if err := c.Get(context.Background(), req.NamespacedName, second); err != nil {
+		t.Fatalf("get after second reconcile: %v", err)
+	}
+	if second.ResourceVersion != rv {
+		t.Errorf("waiting-for-config reconcile rewrote status: resourceVersion %s -> %s", rv, second.ResourceVersion)
+	}
+}
+
+func TestDescribeNamespaces(t *testing.T) {
+	cases := []struct {
+		in   []string
+		want string
+	}{
+		{[]string{"app1"}, `namespace "app1"`},
+		{[]string{"app1", "app2"}, "2 namespaces"},
+		{[]string{"app1", "app2", "app3"}, "3 namespaces"},
+	}
+	for _, tc := range cases {
+		if got := describeNamespaces(tc.in); got != tc.want {
+			t.Errorf("describeNamespaces(%v) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
 

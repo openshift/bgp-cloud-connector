@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -42,6 +43,8 @@ import (
 	"github.com/openshift/bgp-cloud-connector/internal/platform"
 	awsplatform "github.com/openshift/bgp-cloud-connector/internal/platform/aws"
 )
+
+const wrongName = "wrong-name"
 
 func configTestScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
@@ -135,9 +138,11 @@ func TestConfigReconcile_FullReconcile(t *testing.T) {
 		t.Errorf("expected phase Ready, got %s", updated.Status.Phase)
 	}
 
-	if len(updated.Status.Conditions) != 3 {
-		t.Errorf("expected 3 conditions, got %d", len(updated.Status.Conditions))
+	// 3 per-step conditions + the 3 aggregate summary conditions.
+	if len(updated.Status.Conditions) != 6 {
+		t.Errorf("expected 6 conditions, got %d", len(updated.Status.Conditions))
 	}
+	assertSummary(t, updated.Status.Conditions, metav1.ConditionTrue, metav1.ConditionFalse, metav1.ConditionFalse)
 
 	// Verify FRRConfiguration was created
 	frrConfig := &unstructured.Unstructured{}
@@ -151,10 +156,40 @@ func TestConfigReconcile_FullReconcile(t *testing.T) {
 	}
 }
 
+// A transition into Degraded emits a Warning Event carrying the reason, so the
+// cause reaches `kubectl describe` and `kubectl get events`, not just status.
+func TestConfigReconcile_EmitsEventOnDegraded(t *testing.T) {
+	config := newTestBGPCloudConfiguration()
+	config.Name = wrongName
+
+	s := configTestScheme()
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(config).
+		WithStatusSubresource(config).
+		Build()
+
+	rec := record.NewFakeRecorder(10)
+	r := &BGPCloudConfigurationReconciler{Client: c, Scheme: s, Recorder: rec}
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: wrongName},
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	select {
+	case ev := <-rec.Events:
+		if !strings.Contains(ev, corev1.EventTypeWarning) || !strings.Contains(ev, ReasonInvalidName) {
+			t.Errorf("expected a Warning/%s event, got %q", ReasonInvalidName, ev)
+		}
+	default:
+		t.Error("expected a degraded event to be recorded")
+	}
+}
+
 // singleton name mismatch → Degraded, no requeue (terminal).
 func TestConfigReconcile_InvalidName_NoRequeue(t *testing.T) {
 	config := newTestBGPCloudConfiguration()
-	config.Name = "wrong-name"
+	config.Name = wrongName
 
 	s := configTestScheme()
 	c := fake.NewClientBuilder().WithScheme(s).
@@ -164,7 +199,7 @@ func TestConfigReconcile_InvalidName_NoRequeue(t *testing.T) {
 
 	r := &BGPCloudConfigurationReconciler{Client: c, Scheme: s}
 	result, err := r.Reconcile(context.Background(), reconcile.Request{
-		NamespacedName: types.NamespacedName{Name: "wrong-name"},
+		NamespacedName: types.NamespacedName{Name: wrongName},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -174,10 +209,11 @@ func TestConfigReconcile_InvalidName_NoRequeue(t *testing.T) {
 	}
 
 	updated := &networkingapi.BGPCloudConfiguration{}
-	_ = c.Get(context.Background(), types.NamespacedName{Name: "wrong-name"}, updated)
+	_ = c.Get(context.Background(), types.NamespacedName{Name: wrongName}, updated)
 	if updated.Status.Phase != networkingapi.PhaseDegraded {
 		t.Errorf("expected phase Degraded, got %s", updated.Status.Phase)
 	}
+	assertSummary(t, updated.Status.Conditions, metav1.ConditionFalse, metav1.ConditionFalse, metav1.ConditionTrue)
 	for _, cond := range updated.Status.Conditions {
 		if cond.Type == networkingapi.ConditionNetworkOperatorPatched {
 			if cond.Reason != ReasonInvalidName {
@@ -192,7 +228,7 @@ func TestConfigReconcile_InvalidName_NoRequeue(t *testing.T) {
 // second reconcile of InvalidName still returns no requeue (regression guard).
 func TestConfigReconcile_InvalidName_SecondReconcileNoRequeue(t *testing.T) {
 	config := newTestBGPCloudConfiguration()
-	config.Name = "wrong-name"
+	config.Name = wrongName
 
 	s := configTestScheme()
 	c := fake.NewClientBuilder().WithScheme(s).
@@ -203,7 +239,7 @@ func TestConfigReconcile_InvalidName_SecondReconcileNoRequeue(t *testing.T) {
 	r := &BGPCloudConfigurationReconciler{Client: c, Scheme: s}
 
 	result1, err := r.Reconcile(context.Background(), reconcile.Request{
-		NamespacedName: types.NamespacedName{Name: "wrong-name"},
+		NamespacedName: types.NamespacedName{Name: wrongName},
 	})
 	if err != nil {
 		t.Fatalf("first reconcile error: %v", err)
@@ -213,7 +249,7 @@ func TestConfigReconcile_InvalidName_SecondReconcileNoRequeue(t *testing.T) {
 	}
 
 	result2, err := r.Reconcile(context.Background(), reconcile.Request{
-		NamespacedName: types.NamespacedName{Name: "wrong-name"},
+		NamespacedName: types.NamespacedName{Name: wrongName},
 	})
 	if err != nil {
 		t.Fatalf("second reconcile error: %v", err)
@@ -402,9 +438,11 @@ func TestConfigReconcile_AWSFullReconcile(t *testing.T) {
 	if updated.Status.Phase != networkingapi.PhaseReady {
 		t.Errorf("expected Ready, got %s", updated.Status.Phase)
 	}
-	if len(updated.Status.Conditions) != 6 {
-		t.Errorf("expected 6 conditions, got %d", len(updated.Status.Conditions))
+	// 6 per-step conditions + the 3 aggregate summary conditions.
+	if len(updated.Status.Conditions) != 9 {
+		t.Errorf("expected 9 conditions, got %d", len(updated.Status.Conditions))
 	}
+	assertSummary(t, updated.Status.Conditions, metav1.ConditionTrue, metav1.ConditionFalse, metav1.ConditionFalse)
 	// The discovered plan is reported cloud-neutrally: what FRR was told to
 	// peer with, rather than the route servers one cloud happens to have.
 	if len(updated.Status.PeerGroups) != 1 {
@@ -909,6 +947,8 @@ func TestConfigReconcile_AWSNodeFiltering(t *testing.T) {
 	if updated.Status.Phase != networkingapi.PhaseConfiguring {
 		t.Errorf("expected Configuring, got %s", updated.Status.Phase)
 	}
+	// Incomplete nodes are a transient wait, not a fault: Progressing, not Degraded.
+	assertSummary(t, updated.Status.Conditions, metav1.ConditionFalse, metav1.ConditionTrue, metav1.ConditionFalse)
 	for _, cond := range updated.Status.Conditions {
 		if cond.Type == networkingapi.ConditionCompleteNodeInventory {
 			if cond.Status != metav1.ConditionFalse || cond.Reason != "NodesIncomplete" {
@@ -923,6 +963,123 @@ func TestConfigReconcile_AWSNodeFiltering(t *testing.T) {
 		}
 	}
 	t.Error("CompleteNodeInventory condition not found")
+}
+
+// incompleteInventoryObjects returns an AWS configuration with one complete
+// router node and one router node that has no InternalIP.
+func incompleteInventoryObjects() []client.Object {
+	config := newTestBGPCloudConfigurationWithAWS()
+	config.Finalizers = []string{ConfigFinalizerName}
+	network := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "operator.openshift.io/v1",
+		"kind":       "Network",
+		"metadata":   map[string]interface{}{"name": SingletonName},
+		"spec":       map[string]interface{}{},
+	}}
+	frrNS := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: FRRNamespace}}
+	frrPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "frr-k8s-pod",
+			Namespace: FRRNamespace,
+			Labels:    map[string]string{"app": "frr-k8s"},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	missingIP := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "node-no-ip",
+			Labels: map[string]string{"bgp_router": "true", "topology.kubernetes.io/zone": "us-east-1a"},
+		},
+		Spec: corev1.NodeSpec{ProviderID: "aws:///us-east-1a/i-004"},
+	}
+	return []client.Object{
+		config,
+		network,
+		frrNS,
+		frrPod,
+		missingIP,
+		newRouterNode("node-1", "10.0.1.10", "us-east-1a", "aws:///us-east-1a/i-001"),
+	}
+}
+
+// conflictingStatusUpdates makes the next n BGPCloudConfiguration status
+// updates fail as if a concurrent writer changed the object first.
+func conflictingStatusUpdates(n *int) interceptor.Funcs {
+	return interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, cl client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if _, ok := obj.(*networkingapi.BGPCloudConfiguration); ok && *n > 0 {
+				*n = *n - 1
+				return apierrors.NewConflict(
+					schema.GroupResource{Group: "networking.openshift.io", Resource: "bgpcloudconfigurations"},
+					SingletonName,
+					fmt.Errorf("the object has been modified"),
+				)
+			}
+			return cl.SubResource(sub).Update(ctx, obj, opts...)
+		},
+	}
+}
+
+func warningCounts(rec *record.FakeRecorder) map[string]int {
+	counts := map[string]int{}
+	for {
+		select {
+		case event := <-rec.Events:
+			fields := strings.Fields(event)
+			if len(fields) > 1 && fields[0] == corev1.EventTypeWarning {
+				counts[fields[1]]++
+			}
+		default:
+			return counts
+		}
+	}
+}
+
+func reconcileIncompleteInventory(t *testing.T, mock *mockPlatform, conflicts *int, passes int) map[string]int {
+	t.Helper()
+	objects := incompleteInventoryObjects()
+	s := configTestScheme()
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(objects...).
+		WithStatusSubresource(objects[0]).
+		WithInterceptorFuncs(conflictingStatusUpdates(conflicts)).
+		Build()
+	rec := record.NewFakeRecorder(20)
+	r := &BGPCloudConfigurationReconciler{
+		Client: c, Scheme: s, Recorder: rec,
+		PlatformBuilder: func(context.Context, client.Client, *networkingapi.BGPCloudConfiguration) (platform.CloudPlatform, error) {
+			return mock, nil
+		},
+	}
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: SingletonName}}
+	for range passes {
+		_, _ = r.Reconcile(context.Background(), req)
+	}
+	return warningCounts(rec)
+}
+
+func TestConfigReconcile_NodesIncompleteEmittedOnceAcrossStatusConflict(t *testing.T) {
+	conflicts := 1
+	got := reconcileIncompleteInventory(t, &mockPlatform{}, &conflicts, 2)
+	if got[ReasonNodesIncomplete] != 1 {
+		t.Errorf("NodesIncomplete warnings across a conflicted pass and a clean pass = %d, want 1", got[ReasonNodesIncomplete])
+	}
+}
+
+func TestConfigReconcile_NodesIncompleteEmittedOnceWhenDegradedWriteConflicts(t *testing.T) {
+	conflicts := 1
+	got := reconcileIncompleteInventory(t, &mockPlatform{reconcileNodesErr: fmt.Errorf("ec2 API timeout")}, &conflicts, 2)
+	if got[ReasonNodesIncomplete] != 1 {
+		t.Errorf("NodesIncomplete warnings across a conflicted degraded pass and a clean pass = %d, want 1", got[ReasonNodesIncomplete])
+	}
+}
+
+func TestConfigReconcile_IncompleteAndReconcileFailureEachReportedOnce(t *testing.T) {
+	conflicts := 0
+	got := reconcileIncompleteInventory(t, &mockPlatform{reconcileNodesErr: fmt.Errorf("ec2 API timeout")}, &conflicts, 2)
+	if got[ReasonNodesIncomplete] != 1 || got[ReasonCloudReconcileFailed] != 1 {
+		t.Errorf("warnings over two passes = %v, want NodesIncomplete=1 CloudReconcileFailed=1", got)
+	}
 }
 
 func TestConfigReconcile_DeleteSucceedsWithCredentialFailure(t *testing.T) {

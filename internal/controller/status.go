@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
 
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -31,6 +32,85 @@ import (
 
 	networkingapi "github.com/openshift/bgp-cloud-connector/api/v1beta1"
 )
+
+// sanitizeEventMessage keeps controller-generated Events concise and prevents
+// control characters from being copied into an Event message from an error or
+// another user-controlled API field.
+func sanitizeEventMessage(message string) string {
+	message = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, message)
+	return truncateConditionMessage(message)
+}
+
+// setSummaryConditions assigns phase and derives the Available/Progressing/
+// Degraded summary conditions from it, so a caller sets both through one call
+// and the four can never drift apart. The summary conditions sit alongside the
+// granular per-step conditions and give cluster tooling a single health signal:
+// `kubectl wait --for=condition=Available` and the Available printcolumn both
+// read them. The reason follows the OpenShift ClusterOperator convention, where
+// a healthy condition reads AsExpected.
+//
+// reason and message describe the current situation. Available always carries
+// them, because it is the summary surfaced in the printcolumn and must show the
+// cause when the resource is not available. Progressing and Degraded each carry
+// the detail only when they are the axis in effect, and otherwise read
+// AsExpected with no message — echoing the same message onto every False row
+// reads as noise. reason and message must be stable across a settled reconcile,
+// or the baseline-diff that keeps status writes off the hot loop is defeated.
+func setSummaryConditions(
+	phase *networkingapi.PhaseType,
+	conds *[]metav1.Condition,
+	generation int64,
+	target networkingapi.PhaseType,
+	reason, message string,
+) {
+	*phase = target
+
+	// Available mirrors the current state and always carries the detail.
+	available := metav1.Condition{
+		Type: ConditionAvailable, Status: metav1.ConditionFalse,
+		Reason: reason, Message: message, ObservedGeneration: generation,
+	}
+	// Progressing and Degraded default to their healthy, detail-free form and
+	// take the detail only in the branch that turns them on.
+	progressing := metav1.Condition{
+		Type: ConditionProgressing, Status: metav1.ConditionFalse,
+		Reason: ReasonAsExpected, ObservedGeneration: generation,
+	}
+	degraded := metav1.Condition{
+		Type: ConditionDegraded, Status: metav1.ConditionFalse,
+		Reason: ReasonAsExpected, ObservedGeneration: generation,
+	}
+
+	switch target {
+	case networkingapi.PhaseReady:
+		available.Status = metav1.ConditionTrue
+	case networkingapi.PhaseDegraded:
+		degraded.Status = metav1.ConditionTrue
+		degraded.Reason = reason
+		degraded.Message = message
+	default: // Pending, Configuring: work is still in flight.
+		progressing.Status = metav1.ConditionTrue
+		progressing.Reason = reason
+		progressing.Message = message
+	}
+
+	for _, c := range []metav1.Condition{available, progressing, degraded} {
+		meta.SetStatusCondition(conds, c)
+	}
+}
+
+// degradedCauseChanged reports whether reason is a new degraded fault relative
+// to the status observed at the start of reconciliation. Requeues for the same
+// fault should update the existing Event count, not create an Event stream.
+func degradedCauseChanged(baseline []metav1.Condition, reason string) bool {
+	previous := meta.FindStatusCondition(baseline, ConditionDegraded)
+	return previous == nil || previous.Status != metav1.ConditionTrue || previous.Reason != reason
+}
 
 // configStatusEqual reports whether two Config status values are semantically equal.
 func configStatusEqual(a, b networkingapi.BGPCloudConfigurationStatus) bool {

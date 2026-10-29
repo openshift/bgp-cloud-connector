@@ -18,15 +18,118 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	networkingapi "github.com/openshift/bgp-cloud-connector/api/v1beta1"
 )
+
+// assertSummary checks the Available/Progressing/Degraded aggregate conditions.
+// It is shared by the two controller test files: every terminal reconcile
+// outcome sets exactly one of the three True, and the assertion pins which.
+func assertSummary(t *testing.T, conds []metav1.Condition, wantAvail, wantProg, wantDegraded metav1.ConditionStatus) {
+	t.Helper()
+	for _, tc := range []struct {
+		condType string
+		want     metav1.ConditionStatus
+	}{
+		{ConditionAvailable, wantAvail},
+		{ConditionProgressing, wantProg},
+		{ConditionDegraded, wantDegraded},
+	} {
+		got := meta.FindStatusCondition(conds, tc.condType)
+		if got == nil {
+			t.Errorf("summary condition %q not set", tc.condType)
+			continue
+		}
+		if got.Status != tc.want {
+			t.Errorf("summary condition %q = %s, want %s", tc.condType, got.Status, tc.want)
+		}
+		if got.Reason == "" {
+			t.Errorf("summary condition %q has empty reason", tc.condType)
+		}
+	}
+}
+
+func TestSetSummaryConditions(t *testing.T) {
+	cases := []struct {
+		name                             string
+		target                           networkingapi.PhaseType
+		wantAvail, wantProg, wantDegrade metav1.ConditionStatus
+	}{
+		{"ready", networkingapi.PhaseReady, metav1.ConditionTrue, metav1.ConditionFalse, metav1.ConditionFalse},
+		{"configuring", networkingapi.PhaseConfiguring, metav1.ConditionFalse, metav1.ConditionTrue, metav1.ConditionFalse},
+		{"pending", networkingapi.PhasePending, metav1.ConditionFalse, metav1.ConditionTrue, metav1.ConditionFalse},
+		{"degraded", networkingapi.PhaseDegraded, metav1.ConditionFalse, metav1.ConditionFalse, metav1.ConditionTrue},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var phase networkingapi.PhaseType
+			var conds []metav1.Condition
+			setSummaryConditions(&phase, &conds, 7, tc.target, ReasonAsExpected, "message")
+
+			if phase != tc.target {
+				t.Errorf("phase = %s, want %s", phase, tc.target)
+			}
+			if len(conds) != 3 {
+				t.Fatalf("expected 3 summary conditions, got %d", len(conds))
+			}
+			assertSummary(t, conds, tc.wantAvail, tc.wantProg, tc.wantDegrade)
+			for _, c := range conds {
+				if c.ObservedGeneration != 7 {
+					t.Errorf("condition %q observedGeneration = %d, want 7", c.Type, c.ObservedGeneration)
+				}
+			}
+		})
+	}
+}
+
+func TestSetSummaryConditions_StableAcrossCalls(t *testing.T) {
+	// A settled reconcile must produce byte-identical summary conditions, or the
+	// baseline diff would rewrite status every pass and hot-loop the controller.
+	var phase networkingapi.PhaseType
+	var conds []metav1.Condition
+	setSummaryConditions(&phase, &conds, 1, networkingapi.PhaseReady, ReasonAsExpected, "ready")
+	first := meta.FindStatusCondition(conds, ConditionAvailable).LastTransitionTime
+
+	setSummaryConditions(&phase, &conds, 1, networkingapi.PhaseReady, ReasonAsExpected, "ready")
+	second := meta.FindStatusCondition(conds, ConditionAvailable).LastTransitionTime
+
+	if !first.Equal(&second) {
+		t.Errorf("LastTransitionTime changed on an unchanged condition: %v -> %v", first, second)
+	}
+}
+
+func TestDegradedCauseChanged(t *testing.T) {
+	degraded := []metav1.Condition{{
+		Type:   ConditionDegraded,
+		Status: metav1.ConditionTrue,
+		Reason: ReasonNamespaceNotReady,
+	}}
+
+	if !degradedCauseChanged(nil, ReasonNamespaceNotReady) {
+		t.Fatal("expected a first degraded condition to be a new cause")
+	}
+	if degradedCauseChanged(degraded, ReasonNamespaceNotReady) {
+		t.Fatal("expected a persistent degraded cause not to emit again")
+	}
+	if !degradedCauseChanged(degraded, ReasonCUDNFailed) {
+		t.Fatal("expected a changed degraded reason to emit")
+	}
+}
+
+func TestSanitizeEventMessage(t *testing.T) {
+	got := sanitizeEventMessage("bad\nmessage\x00")
+	if strings.ContainsAny(got, "\x00\n") {
+		t.Fatalf("event message contains control characters: %q", got)
+	}
+}
 
 func TestConfigStatusEqual(t *testing.T) {
 	base := networkingapi.BGPCloudConfigurationStatus{
