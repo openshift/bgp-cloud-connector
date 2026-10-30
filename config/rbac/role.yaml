@@ -140,3 +140,11 @@ rules:
   - secrets
   verbs:
   - get
+- apiGroups:
+  - ""
+  resourceNames:
+  - bgp-cloud-connector-gcp-credentials
+  resources:
+  - secrets
+  verbs:
+  - get
