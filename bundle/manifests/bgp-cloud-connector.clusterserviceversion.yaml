@@ -22,6 +22,9 @@ metadata:
               "localASN": 65001
             },
             "platform": "AWS",
+            "routeAdvertisementNodeSelector": {
+              "bgp_router": "true"
+            },
             "routerNodeSelector": {
               "bgp_router": "true"
             }
