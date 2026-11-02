@@ -34,7 +34,11 @@ Add the minor to `bgpcc-releases` in `products/bgp-cloud-connector/bgp-cloud-con
 
 Example: [!1952](https://gitlab.cee.redhat.com/releng/pyxis-repo-configs/-/merge_requests/1952) added `1.1`.
 
-### 4. This repository
+### 4. Lifecycle data
+
+File a PLMCORE ticket requesting lifecycle data for the new minor. The FBC lifecycle injection task reads that data from PLCC. Example: [PLMCORE-18011](https://redhat.atlassian.net/browse/PLMCORE-18011).
+
+### 5. This repository
 
 Set `LABEL cpe` to the same CPE in `Containerfile.bgp-cloud-connector` and `Containerfile.bgp-cloud-connector-bundle`. The advisory CPE comes from the RPA; the image label has to match it.
 
@@ -46,6 +50,11 @@ These steps apply to a new minor and to a z-stream.
 2. After that pull request merges, merge the Konflux nudging pull request that updates the operator image digest in the bundle. Example: [#190](https://github.com/openshift/bgp-cloud-connector/pull/190).
 3. After the nudging pull request has merged, check that the stage release built from it is green. Continue only then.
 4. Create the production `Release` for the operator and bundle (`releasePlan: bgp-cloud-connector-release-plan-prod`). Set `spec.snapshot` to the snapshot of the green stage release.
-5. Add that released production bundle to the `stable` channel in every catalog template, currently `catalog/v4.22/catalog-template.yaml` and `catalog/v5.0/catalog-template.yaml`, and regenerate each catalog (`make generate-catalog OCP_VERSION=4.22` and `make generate-catalog OCP_VERSION=5.0`). The bundle image must be `registry.redhat.io/bgpcc/bgp-cloud-connector-operator-bundle@sha256:…`. `registry.stage.redhat.io` fails the FBC enterprise contract (`olm.allowed_registries_related`). Example: [#157](https://github.com/openshift/bgp-cloud-connector/pull/157).
+5. Add that released production bundle to the `stable` channel in every catalog template, then regenerate. Example: [#157](https://github.com/openshift/bgp-cloud-connector/pull/157).
+
+   - Templates: there are currently two, `catalog/v4.22/catalog-template.yaml` and `catalog/v5.0/catalog-template.yaml`.
+   - Bundle image: `registry.redhat.io/bgpcc/bgp-cloud-connector-operator-bundle@sha256:…`. `registry.stage.redhat.io` fails the FBC enterprise contract (`olm.allowed_registries_related`).
+   - Upgrade edge: `replaces` names the previous stable bundle. `skipRange` includes every version less than the one being added, so those versions can upgrade directly to it.
+   - Regenerate with `make generate-catalog OCP_VERSION=4.22` and `make generate-catalog OCP_VERSION=5.0`.
 6. After that pull request merges, a stage release is triggered for each FBC catalog. Check that each of those stage releases is green. Continue only then.
 7. Create one production `Release` per FBC catalog (`bgp-cloud-connector-fbc-v4-22-release-plan-prod` and `bgp-cloud-connector-fbc-v5-0-release-plan-prod`). Set each `spec.snapshot` to the snapshot of that catalog's green stage release.
