@@ -64,7 +64,6 @@ import (
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=config.openshift.io,resources=infrastructures,verbs=get
 // +kubebuilder:rbac:groups=cloudcredential.openshift.io,resources=credentialsrequests,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups="",resources=secrets,resourceNames=bgp-cloud-connector-aws-credentials,verbs=get,namespace=openshift-bgp-cloud-connector
