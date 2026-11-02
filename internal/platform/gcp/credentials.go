@@ -25,6 +25,7 @@ import (
 	"google.golang.org/api/option"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -149,7 +150,7 @@ const computeScope = "https://www.googleapis.com/auth/cloud-platform"
 // Where none of those exist the request is raised and ErrCredentialsPending
 // is returned, which Reconcile waits out rather than treating as a fault:
 // the secret appears a moment later and the next reconcile finds it.
-func ResolveCredentials(ctx context.Context, c client.Client, namespace string) ([]option.ClientOption, error) {
+func ResolveCredentials(ctx context.Context, c client.Client, namespace string, owner metav1.OwnerReference) ([]option.ClientOption, error) {
 	logger := log.FromContext(ctx)
 
 	secret := &corev1.Secret{}
@@ -165,7 +166,7 @@ func ResolveCredentials(ctx context.Context, c client.Client, namespace string) 
 		// secret exists means a permission added in code never reaches
 		// the cluster, and the operator fails with a 403 for something
 		// it believes it asked for. Observed on a live cluster.
-		if err := reconcileCredentialsRequest(ctx, c, namespace); err != nil {
+		if err := reconcileCredentialsRequest(ctx, c, namespace, owner); err != nil {
 			return nil, err
 		}
 		logger.V(1).Info("using the credential provided by the cloud credential operator",
@@ -180,7 +181,7 @@ func ResolveCredentials(ctx context.Context, c client.Client, namespace string) 
 		return optionsFor(raw)
 	}
 
-	if err := reconcileCredentialsRequest(ctx, c, namespace); err != nil {
+	if err := reconcileCredentialsRequest(ctx, c, namespace, owner); err != nil {
 		return nil, err
 	}
 	return nil, fmt.Errorf("%w: secret %s/%s has not been written yet",
@@ -244,9 +245,11 @@ func optionsFor(raw []byte) ([]option.ClientOption, error) {
 
 // reconcileCredentialsRequest asks for the credential, and keeps asking
 // for the same thing: a request that has drifted is rewritten rather than
-// left, so the permissions in this file are the ones in the cluster.
-func reconcileCredentialsRequest(ctx context.Context, c client.Client, namespace string) error {
-	desired := desiredCredentialsRequest(namespace)
+// left, so the permissions in this file are the ones in the cluster. It
+// also adopts a request that has no owner, which is what a release made
+// before this one left behind.
+func reconcileCredentialsRequest(ctx context.Context, c client.Client, namespace string, owner metav1.OwnerReference) error {
+	desired := desiredCredentialsRequest(namespace, owner)
 
 	existing := &unstructured.Unstructured{}
 	existing.SetGroupVersionKind(CredentialsRequestGVK)
@@ -265,7 +268,8 @@ func reconcileCredentialsRequest(ctx context.Context, c client.Client, namespace
 
 	existingSpec, _, _ := unstructured.NestedMap(existing.Object, "spec")
 	desiredSpec, _, _ := unstructured.NestedMap(desired.Object, "spec")
-	if equalSpecs(existingSpec, desiredSpec) {
+	adopted := ensureOwnerReference(existing, owner)
+	if equalSpecs(existingSpec, desiredSpec) && !adopted {
 		return nil
 	}
 	if err := unstructured.SetNestedMap(existing.Object, desiredSpec, "spec"); err != nil {
@@ -283,7 +287,7 @@ func equalSpecs(a, b map[string]any) bool {
 	return errA == nil && errB == nil && string(left) == string(right)
 }
 
-func desiredCredentialsRequest(namespace string) *unstructured.Unstructured {
+func desiredCredentialsRequest(namespace string, owner metav1.OwnerReference) *unstructured.Unstructured {
 	perms := make([]any, 0, len(permissions))
 	for _, p := range permissions {
 		perms = append(perms, p)
@@ -311,5 +315,28 @@ func desiredCredentialsRequest(namespace string) *unstructured.Unstructured {
 		},
 	}}
 	cr.SetGroupVersionKind(CredentialsRequestGVK)
+	cr.SetOwnerReferences([]metav1.OwnerReference{owner})
 	return cr
+}
+
+// ensureOwnerReference names the configuration among the object's
+// owners and reports whether that changed anything. A request made
+// before this operator set an owner has none, and a configuration that
+// was deleted and recreated leaves one whose UID no longer resolves; in
+// both cases the object would outlive the configuration it belongs to.
+func ensureOwnerReference(obj *unstructured.Unstructured, owner metav1.OwnerReference) bool {
+	refs := obj.GetOwnerReferences()
+	for i := range refs {
+		if refs[i].Kind != owner.Kind || refs[i].Name != owner.Name {
+			continue
+		}
+		if refs[i].UID == owner.UID {
+			return false
+		}
+		refs[i] = owner
+		obj.SetOwnerReferences(refs)
+		return true
+	}
+	obj.SetOwnerReferences(append(refs, owner))
+	return true
 }

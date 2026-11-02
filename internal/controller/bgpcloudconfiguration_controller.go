@@ -570,7 +570,7 @@ func buildGCPPlatform(ctx context.Context, c client.Client, config *networkingap
 	// out rather than treating as a fault. Where the pod already has a
 	// credential -- a manager run from a desk against a gcloud login --
 	// this returns at once and the cluster is left alone.
-	creds, err := gcpplatform.ResolveCredentials(ctx, c, OperatorNamespace())
+	creds, err := gcpplatform.ResolveCredentials(ctx, c, OperatorNamespace(), configOwnerReference(config))
 	if err != nil {
 		return nil, err
 	}

@@ -37,6 +37,20 @@ import (
 
 const testNamespace = "openshift-bgp-cloud-connector"
 
+// testOwner stands in for the singleton BGPCloudConfiguration the
+// controller passes in, which is the owner every request this operator
+// makes is expected to carry.
+func testOwner() metav1.OwnerReference {
+	controller := true
+	return metav1.OwnerReference{
+		APIVersion: "networking.openshift.io/v1beta1",
+		Kind:       "BGPCloudConfiguration",
+		Name:       "cluster",
+		UID:        "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
+		Controller: &controller,
+	}
+}
+
 func credentialsTestScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
@@ -78,7 +92,7 @@ func TestResolveCredentials_CreatesRequestAndWaits(t *testing.T) {
 	noAmbient(t)
 	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).Build()
 
-	_, err := ResolveCredentials(context.Background(), c, testNamespace)
+	_, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
 	if !errors.Is(err, platform.ErrCredentialsPending) {
 		t.Fatalf("ResolveCredentials: got %v, want %v", err, platform.ErrCredentialsPending)
 	}
@@ -102,7 +116,7 @@ func TestResolveCredentials_CreatesRequestAndWaits(t *testing.T) {
 func TestResolveCredentials_RequestsOnlyThePermissionsItUses(t *testing.T) {
 	noAmbient(t)
 	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).Build()
-	_, _ = ResolveCredentials(context.Background(), c, testNamespace)
+	_, _ = ResolveCredentials(context.Background(), c, testNamespace, testOwner())
 
 	cr := &unstructured.Unstructured{}
 	cr.SetGroupVersionKind(CredentialsRequestGVK)
@@ -133,7 +147,7 @@ func TestResolveCredentials_UsesTheMintedServiceAccount(t *testing.T) {
 	}
 	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).WithObjects(secret).Build()
 
-	got, err := ResolveCredentials(context.Background(), c, testNamespace)
+	got, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
 	if err != nil {
 		t.Fatalf("ResolveCredentials: %v", err)
 	}
@@ -170,7 +184,7 @@ func TestResolveCredentials_WorkloadIdentityWinsOverTheServiceAccount(t *testing
 	if parsed.Type != "external_account" {
 		t.Errorf("credential type = %q, want external_account: the federated config must win", parsed.Type)
 	}
-	if _, err := ResolveCredentials(context.Background(), c, testNamespace); err != nil {
+	if _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner()); err != nil {
 		t.Fatalf("ResolveCredentials: %v", err)
 	}
 }
@@ -208,7 +222,7 @@ func TestResolveCredentials_SecretWithNothingUsableIsAnError(t *testing.T) {
 	}
 	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).WithObjects(secret).Build()
 
-	if _, err := ResolveCredentials(context.Background(), c, testNamespace); err == nil {
+	if _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner()); err == nil {
 		t.Fatal("expected an error for a secret with no usable credential")
 	}
 }
@@ -243,7 +257,7 @@ func TestResolveCredentials_KeepsTheRequestCurrentWhileUsingTheSecret(t *testing
 	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).
 		WithObjects(secret, stale).Build()
 
-	if _, err := ResolveCredentials(context.Background(), c, testNamespace); err != nil {
+	if _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner()); err != nil {
 		t.Fatalf("ResolveCredentials: %v", err)
 	}
 
@@ -271,7 +285,7 @@ func TestResolveCredentials_AmbientLeavesTheClusterAlone(t *testing.T) {
 	t.Cleanup(func() { ambientCredentials = previous })
 
 	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).Build()
-	if _, err := ResolveCredentials(context.Background(), c, testNamespace); err != nil {
+	if _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner()); err != nil {
 		t.Fatalf("ResolveCredentials: %v", err)
 	}
 
@@ -282,6 +296,66 @@ func TestResolveCredentials_AmbientLeavesTheClusterAlone(t *testing.T) {
 	}, cr)
 	if err == nil {
 		t.Error("a request was raised even though the process already had a credential")
+	}
+}
+
+func getCredentialsRequest(t *testing.T, c client.Client) *unstructured.Unstructured {
+	t.Helper()
+	cr := &unstructured.Unstructured{}
+	cr.SetGroupVersionKind(CredentialsRequestGVK)
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: CredentialsRequestName, Namespace: CredentialsRequestNamespace,
+	}, cr); err != nil {
+		t.Fatalf("reading the request back: %v", err)
+	}
+	return cr
+}
+
+// The request must name the configuration as its owner, so that
+// deleting the configuration takes the request with it and, on a
+// cluster that mints, the service account CCO made for it. Without an
+// owner the object outlives everything that referred to it.
+func TestResolveCredentials_RequestIsOwnedByTheConfiguration(t *testing.T) {
+	noAmbient(t)
+
+	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).Build()
+	if _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner()); !errors.Is(err, platform.ErrCredentialsPending) {
+		t.Fatalf("ResolveCredentials: got %v, want %v", err, platform.ErrCredentialsPending)
+	}
+
+	refs := getCredentialsRequest(t, c).GetOwnerReferences()
+	if len(refs) != 1 {
+		t.Fatalf("ownerReferences = %v, want exactly one", refs)
+	}
+	if got, want := refs[0], testOwner(); got.APIVersion != want.APIVersion ||
+		got.Kind != want.Kind || got.Name != want.Name || got.UID != want.UID {
+		t.Errorf("ownerReference = %+v, want %+v", got, want)
+	}
+}
+
+// A request made by an earlier release has no owner, and there is
+// nothing else in the system that will ever give it one. Reconciling
+// has to adopt it, or the fix only reaches clusters installed after it.
+// The secret is in place here, because that is the state such a
+// cluster is in: the request was served long ago.
+func TestResolveCredentials_ExistingRequestIsAdopted(t *testing.T) {
+	noAmbient(t)
+
+	unowned := desiredCredentialsRequest(testNamespace, metav1.OwnerReference{})
+	unowned.SetOwnerReferences(nil)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: CredentialsSecretName, Namespace: testNamespace},
+		Data:       map[string][]byte{secretServiceAccountKey: []byte(serviceAccountJSON)},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).WithObjects(unowned, secret).Build()
+	if _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner()); err != nil {
+		t.Fatalf("ResolveCredentials: %v", err)
+	}
+
+	refs := getCredentialsRequest(t, c).GetOwnerReferences()
+	if len(refs) != 1 || refs[0].UID != testOwner().UID {
+		t.Errorf("ownerReferences = %v, want the configuration adopted", refs)
 	}
 }
 
