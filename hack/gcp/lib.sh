@@ -117,7 +117,10 @@ gcp_firewall_exists() {
         --format='value(name)'
 }
 
-# The permissions the scripts here need, as IAM names them.
+# The permissions the scripts here and the e2e suite need, as IAM names
+# them, including the ones gcloud uses on its own: it waits on the
+# operation a create returns and reads the resource back, so a create
+# needs the matching operations.get and get as well.
 #
 # This is the CI cluster profile's account in a job and yours at a desk.
 # It is not the operator's: that identity is minted by the cloud
@@ -134,21 +137,29 @@ gcp_firewall_exists() {
 # Consumed by the scripts that source this, not here.
 # shellcheck disable=SC2034
 gcp_estate_permissions=(
-    compute.firewalls.create        # create-cloud-router.sh, firewall
-    compute.firewalls.delete        # delete-cloud-router.sh
-    compute.firewalls.list          # gcp_firewall_exists
-    compute.networks.list           # create-cloud-router.sh, the network read
-    compute.networks.updatePolicy   # attaching the rule and the router
-    compute.routers.create          # create-cloud-router.sh
-    compute.routers.delete          # delete-cloud-router.sh
-    compute.routers.get             # write-e2e-profile.sh, via describe
-    compute.routers.list            # gcp_router_exists
-    compute.routers.update          # add-interface, twice
-    compute.subnetworks.list        # create-cloud-router.sh, the subnet read
-    networkconnectivity.hubs.create # create-cloud-router.sh
-    networkconnectivity.hubs.delete # delete-cloud-router.sh
-    networkconnectivity.hubs.list   # gcp_hub_exists
-    networkconnectivity.spokes.list # delete-cloud-router.sh, before the hub goes
+    compute.firewalls.create          # create-cloud-router.sh, firewall
+    compute.firewalls.delete          # delete-cloud-router.sh
+    compute.firewalls.get             # gcloud reads the rule back after creating it
+    compute.firewalls.list            # gcp_firewall_exists
+    compute.globalOperations.get      # gcloud waits on firewall create and delete
+    compute.instances.get             # the suite, reading canIpForward
+    compute.instances.update          # the suite, flipping canIpForward for the operator to repair
+    compute.networks.list             # create-cloud-router.sh, the network read
+    compute.networks.updatePolicy     # attaching the rule and the router; the suite's peer edit
+    compute.regionOperations.get      # gcloud and the suite wait on router changes
+    compute.routers.create            # create-cloud-router.sh
+    compute.routers.delete            # delete-cloud-router.sh
+    compute.routers.get               # write-e2e-profile.sh and the suite; gcloud reads back after add-interface
+    compute.routers.list              # gcp_router_exists
+    compute.routers.update            # add-interface, twice; the suite, removing a peer for the operator to repair
+    compute.subnetworks.list          # create-cloud-router.sh, the subnet read
+    compute.zoneOperations.get        # the suite waits on the instance update
+    networkconnectivity.hubs.create   # create-cloud-router.sh
+    networkconnectivity.hubs.delete   # delete-cloud-router.sh
+    networkconnectivity.hubs.get      # gcloud reads the hub back after creating it
+    networkconnectivity.hubs.list     # gcp_hub_exists
+    networkconnectivity.operations.get # gcloud waits on hub create and delete
+    networkconnectivity.spokes.list   # delete-cloud-router.sh, before the hub goes; the suite
 )
 
 # gcp_permissions_held prints which of the named permissions this
