@@ -20,6 +20,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"strconv"
+	"strings"
 
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/option"
@@ -71,6 +74,20 @@ const (
 	// credential was ever supplied. cloud-network-config-controller
 	// carries the same workaround for the same reason.
 	defaultUniverseDomain = "googleapis.com"
+)
+
+// The variables the OperatorHub console writes into the Subscription
+// when the cluster uses workload identity federation and the CSV
+// declares token-auth-gcp. OLM puts them in the operator's environment.
+const (
+	projectNumberEnvVar       = "PROJECT_NUMBER"
+	poolIDEnvVar              = "POOL_ID"
+	providerIDEnvVar          = "PROVIDER_ID"
+	serviceAccountEmailEnvVar = "SERVICE_ACCOUNT_EMAIL"
+
+	// cloudTokenPath is where the deployment projects the bound
+	// service account token the federated credential presents.
+	cloudTokenPath = "/var/run/secrets/openshift/serviceaccount/token"
 )
 
 // permissions is what the operator actually calls, and nothing else. It
@@ -249,11 +266,15 @@ func optionsFor(raw []byte) ([]option.ClientOption, error) {
 // also adopts a request that has no owner, which is what a release made
 // before this one left behind.
 func reconcileCredentialsRequest(ctx context.Context, c client.Client, namespace string, owner metav1.OwnerReference) error {
-	desired := desiredCredentialsRequest(namespace, owner)
+	wif, err := workloadIdentityFromEnv()
+	if err != nil {
+		return err
+	}
+	desired := desiredCredentialsRequest(namespace, owner, wif)
 
 	existing := &unstructured.Unstructured{}
 	existing.SetGroupVersionKind(CredentialsRequestGVK)
-	err := c.Get(ctx, types.NamespacedName{
+	err = c.Get(ctx, types.NamespacedName{
 		Name: CredentialsRequestName, Namespace: CredentialsRequestNamespace,
 	}, existing)
 	switch {
@@ -287,32 +308,44 @@ func equalSpecs(a, b map[string]any) bool {
 	return errA == nil && errB == nil && string(left) == string(right)
 }
 
-func desiredCredentialsRequest(namespace string, owner metav1.OwnerReference) *unstructured.Unstructured {
+// desiredCredentialsRequest is the request this build makes. wif is nil
+// unless the Subscription names a workload identity, in which case the
+// request carries it: on a cluster using workload identity federation
+// the cloud credential operator writes no secret for a request without
+// a service account to impersonate.
+func desiredCredentialsRequest(namespace string, owner metav1.OwnerReference, wif *workloadIdentity) *unstructured.Unstructured {
 	perms := make([]any, 0, len(permissions))
 	for _, p := range permissions {
 		perms = append(perms, p)
+	}
+	providerSpec := map[string]any{
+		"apiVersion":  "cloudcredential.openshift.io/v1",
+		"kind":        "GCPProviderSpec",
+		"permissions": perms,
+		// The herd sets this: the check asks whether an API is
+		// enabled on the project, which the operator's own calls
+		// report more usefully when they fail.
+		"skipServiceCheck": true,
+	}
+	spec := map[string]any{
+		"serviceAccountNames": []any{ServiceAccountName},
+		"secretRef": map[string]any{
+			"name":      CredentialsSecretName,
+			"namespace": namespace,
+		},
+		"providerSpec": providerSpec,
+	}
+	if wif != nil {
+		providerSpec["serviceAccountEmail"] = wif.serviceAccountEmail
+		providerSpec["audience"] = wif.audience()
+		spec["cloudTokenPath"] = cloudTokenPath
 	}
 	cr := &unstructured.Unstructured{Object: map[string]any{
 		"metadata": map[string]any{
 			"name":      CredentialsRequestName,
 			"namespace": CredentialsRequestNamespace,
 		},
-		"spec": map[string]any{
-			"serviceAccountNames": []any{ServiceAccountName},
-			"secretRef": map[string]any{
-				"name":      CredentialsSecretName,
-				"namespace": namespace,
-			},
-			"providerSpec": map[string]any{
-				"apiVersion":  "cloudcredential.openshift.io/v1",
-				"kind":        "GCPProviderSpec",
-				"permissions": perms,
-				// The herd sets this: the check asks whether an API is
-				// enabled on the project, which the operator's own calls
-				// report more usefully when they fail.
-				"skipServiceCheck": true,
-			},
-		},
+		"spec": spec,
 	}}
 	cr.SetGroupVersionKind(CredentialsRequestGVK)
 	cr.SetOwnerReferences([]metav1.OwnerReference{owner})
@@ -339,4 +372,65 @@ func ensureOwnerReference(obj *unstructured.Unstructured, owner metav1.OwnerRefe
 	}
 	obj.SetOwnerReferences(append(refs, owner))
 	return true
+}
+
+// workloadIdentity is a workload identity the Subscription named, parsed:
+// every part is present, the project is a number, and the pool and
+// provider are single path segments. Only workloadIdentityFromEnv makes
+// one, so audience always has the form the cloud credential operator
+// accepts.
+type workloadIdentity struct {
+	projectNumber       uint64
+	poolID              string
+	providerID          string
+	serviceAccountEmail string
+}
+
+// audience is the pool provider the operator's token is exchanged
+// against, in the form GCPProviderSpec.Audience documents.
+func (w workloadIdentity) audience() string {
+	return fmt.Sprintf("//iam.googleapis.com/projects/%d/locations/global/workloadIdentityPools/%s/providers/%s",
+		w.projectNumber, w.poolID, w.providerID)
+}
+
+// workloadIdentityFromEnv parses the Subscription's four variables. None
+// set means the cluster mints and the request asks for nothing more; all
+// four set and well formed give the identity; anything else is reported,
+// because the console leaves out any field left empty and the cloud
+// credential operator would reject the result only on the request's own
+// status.
+func workloadIdentityFromEnv() (*workloadIdentity, error) {
+	names := []string{projectNumberEnvVar, poolIDEnvVar, providerIDEnvVar, serviceAccountEmailEnvVar}
+	values := make(map[string]string, len(names))
+	var missing []string
+	for _, name := range names {
+		values[name] = os.Getenv(name)
+		if values[name] == "" {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) == len(names) {
+		return nil, nil
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("workload identity federation needs %s set in the Subscription; %s missing",
+			strings.Join(names, ", "), strings.Join(missing, ", "))
+	}
+	project, err := strconv.ParseUint(values[projectNumberEnvVar], 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("%s is %q; the audience names the project by number, not by id",
+			projectNumberEnvVar, values[projectNumberEnvVar])
+	}
+	for _, name := range []string{poolIDEnvVar, providerIDEnvVar} {
+		if strings.Contains(values[name], "/") {
+			return nil, fmt.Errorf("%s is %q; it is one segment of the audience path and cannot contain a slash",
+				name, values[name])
+		}
+	}
+	return &workloadIdentity{
+		projectNumber:       project,
+		poolID:              values[poolIDEnvVar],
+		providerID:          values[providerIDEnvVar],
+		serviceAccountEmail: values[serviceAccountEmailEnvVar],
+	}, nil
 }

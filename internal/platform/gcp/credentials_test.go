@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -341,7 +342,7 @@ func TestResolveCredentials_RequestIsOwnedByTheConfiguration(t *testing.T) {
 func TestResolveCredentials_ExistingRequestIsAdopted(t *testing.T) {
 	noAmbient(t)
 
-	unowned := desiredCredentialsRequest(testNamespace, metav1.OwnerReference{})
+	unowned := desiredCredentialsRequest(testNamespace, metav1.OwnerReference{}, nil)
 	unowned.SetOwnerReferences(nil)
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: CredentialsSecretName, Namespace: testNamespace},
@@ -356,6 +357,176 @@ func TestResolveCredentials_ExistingRequestIsAdopted(t *testing.T) {
 	refs := getCredentialsRequest(t, c).GetOwnerReferences()
 	if len(refs) != 1 || refs[0].UID != testOwner().UID {
 		t.Errorf("ownerReferences = %v, want the configuration adopted", refs)
+	}
+}
+
+// withWorkloadIdentityEnv sets the four variables the OperatorHub console
+// writes into the Subscription on a cluster using workload identity
+// federation, and clears any it is not given, so a test sees exactly
+// what it names and nothing from the environment it runs in.
+func withWorkloadIdentityEnv(t *testing.T, env map[string]string) {
+	t.Helper()
+	for _, name := range []string{projectNumberEnvVar, poolIDEnvVar, providerIDEnvVar, serviceAccountEmailEnvVar} {
+		t.Setenv(name, env[name])
+	}
+}
+
+func fullWorkloadIdentityEnv() map[string]string {
+	return map[string]string{
+		projectNumberEnvVar:       "123456789012",
+		poolIDEnvVar:              "my-pool",
+		providerIDEnvVar:          "my-provider",
+		serviceAccountEmailEnvVar: "bgpcc@my-project.iam.gserviceaccount.com",
+	}
+}
+
+const wantAudience = "//iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/my-pool/providers/my-provider"
+
+// Without the console's variables the request must carry none of the
+// federation fields. The cloud credential operator mints for a request
+// without them, and on a cluster that mints a token path is a request
+// for something it cannot do.
+func TestResolveCredentials_RequestOmitsWorkloadIdentityFieldsWithoutEnv(t *testing.T) {
+	noAmbient(t)
+	withWorkloadIdentityEnv(t, nil)
+
+	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).Build()
+	if _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner()); !errors.Is(err, platform.ErrCredentialsPending) {
+		t.Fatalf("ResolveCredentials: got %v, want %v", err, platform.ErrCredentialsPending)
+	}
+
+	cr := getCredentialsRequest(t, c)
+	for _, path := range [][]string{
+		{"spec", "providerSpec", "serviceAccountEmail"},
+		{"spec", "providerSpec", "audience"},
+		{"spec", "cloudTokenPath"},
+	} {
+		if v, found, _ := unstructured.NestedString(cr.Object, path...); found {
+			t.Errorf("%s was set to %q with no workload identity in the environment", strings.Join(path, "."), v)
+		}
+	}
+}
+
+// With the console's variables the request must carry the service
+// account, the audience in the form the cloud credential operator
+// validates, and the token path. On a cluster using workload identity
+// federation it writes no secret for a request without a service
+// account.
+func TestResolveCredentials_RequestCarriesWorkloadIdentityFromEnv(t *testing.T) {
+	noAmbient(t)
+	withWorkloadIdentityEnv(t, fullWorkloadIdentityEnv())
+
+	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).Build()
+	if _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner()); !errors.Is(err, platform.ErrCredentialsPending) {
+		t.Fatalf("ResolveCredentials: got %v, want %v", err, platform.ErrCredentialsPending)
+	}
+
+	cr := getCredentialsRequest(t, c)
+	for _, tc := range []struct {
+		path []string
+		want string
+	}{
+		{[]string{"spec", "providerSpec", "serviceAccountEmail"}, "bgpcc@my-project.iam.gserviceaccount.com"},
+		{[]string{"spec", "providerSpec", "audience"}, wantAudience},
+		{[]string{"spec", "cloudTokenPath"}, cloudTokenPath},
+	} {
+		if got, _, _ := unstructured.NestedString(cr.Object, tc.path...); got != tc.want {
+			t.Errorf("%s = %q, want %q", strings.Join(tc.path, "."), got, tc.want)
+		}
+	}
+}
+
+// The variables arrive by editing the Subscription, which can happen
+// after the operator has made its request. A request that is never
+// rewritten would leave the operator waiting on a secret the cloud
+// credential operator has no reason to write.
+func TestResolveCredentials_ExistingRequestGainsWorkloadIdentity(t *testing.T) {
+	noAmbient(t)
+	withWorkloadIdentityEnv(t, nil)
+
+	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).Build()
+	if _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner()); !errors.Is(err, platform.ErrCredentialsPending) {
+		t.Fatalf("first resolve: got %v, want %v", err, platform.ErrCredentialsPending)
+	}
+
+	withWorkloadIdentityEnv(t, fullWorkloadIdentityEnv())
+	if _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner()); !errors.Is(err, platform.ErrCredentialsPending) {
+		t.Fatalf("second resolve: got %v, want %v", err, platform.ErrCredentialsPending)
+	}
+
+	if got, _, _ := unstructured.NestedString(getCredentialsRequest(t, c).Object, "spec", "providerSpec", "audience"); got != wantAudience {
+		t.Errorf("audience = %q after the variables appeared, want %q", got, wantAudience)
+	}
+}
+
+// The console leaves out any field the administrator left empty, so a
+// partial set is a real input. A request built from it would be
+// rejected by the cloud credential operator on its own status, where
+// nobody looks; say which variable is missing here instead, and do not
+// touch the request.
+func TestResolveCredentials_PartialWorkloadIdentityIsAnError(t *testing.T) {
+	noAmbient(t)
+	env := fullWorkloadIdentityEnv()
+	delete(env, providerIDEnvVar)
+	withWorkloadIdentityEnv(t, env)
+
+	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).Build()
+	_, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
+	if err == nil || errors.Is(err, platform.ErrCredentialsPending) {
+		t.Fatalf("ResolveCredentials: got %v, want an error that is not a wait", err)
+	}
+	if !strings.Contains(err.Error(), providerIDEnvVar) {
+		t.Errorf("the error does not name %s: %q", providerIDEnvVar, err)
+	}
+
+	cr := &unstructured.Unstructured{}
+	cr.SetGroupVersionKind(CredentialsRequestGVK)
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: CredentialsRequestName, Namespace: CredentialsRequestNamespace,
+	}, cr); err == nil {
+		t.Error("a request was raised from an incomplete workload identity")
+	}
+}
+
+// The audience names the project by number. The cloud credential
+// operator rejects anything else as malformed, again only on its own
+// status, so a project id in the number's place is caught here.
+func TestResolveCredentials_ProjectNumberMustBeANumber(t *testing.T) {
+	noAmbient(t)
+	env := fullWorkloadIdentityEnv()
+	env[projectNumberEnvVar] = "my-project"
+	withWorkloadIdentityEnv(t, env)
+
+	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).Build()
+	_, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
+	if err == nil || errors.Is(err, platform.ErrCredentialsPending) {
+		t.Fatalf("ResolveCredentials: got %v, want an error that is not a wait", err)
+	}
+	if !strings.Contains(err.Error(), projectNumberEnvVar) {
+		t.Errorf("the error does not name %s: %q", projectNumberEnvVar, err)
+	}
+}
+
+// The pool and provider are path segments of the audience, and the
+// cloud credential operator's pattern for it allows no slash in either.
+// An id carrying one would produce an audience it rejects.
+func TestResolveCredentials_IDsCannotSpanPathSegments(t *testing.T) {
+	for _, name := range []string{poolIDEnvVar, providerIDEnvVar} {
+		t.Run(name, func(t *testing.T) {
+			noAmbient(t)
+			env := fullWorkloadIdentityEnv()
+			env[name] = "projects/1/locations/global/workloadIdentityPools/x"
+			withWorkloadIdentityEnv(t, env)
+
+			c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).Build()
+			_, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner())
+			if err == nil || errors.Is(err, platform.ErrCredentialsPending) {
+				t.Fatalf("ResolveCredentials: got %v, want an error that is not a wait", err)
+			}
+			if !strings.Contains(err.Error(), name) {
+				t.Errorf("the error does not name %s: %q", name, err)
+			}
+		})
 	}
 }
 
