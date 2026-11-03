@@ -20,26 +20,35 @@ func NewComputeClient(ctx context.Context, project, region string) (ComputeClien
 	if err != nil {
 		return nil, err
 	}
-	return &computeClient{
+	return &computeClient{api: &gceAPI{
 		svc:     svc,
 		project: project,
 		region:  region,
 		inst:    svc.Instances,
 		routers: svc.Routers,
-	}, nil
+	}}, nil
+}
+
+// computeAPI is the slice of the GCE API computeClient needs, as an interface a
+// test can fake in place of the live service. Each method is one SDK round-trip;
+// the reconcile logic that decides which to call lives above it on computeClient.
+type computeAPI interface {
+	GetInstance(ctx context.Context, zone, name string) (*compute.Instance, error)
+	UpdateInstance(ctx context.Context, zone, name string, inst *compute.Instance, mostDisruptiveAllowedAction string) (*compute.Operation, error)
+	GetRouter(ctx context.Context, name string) (*compute.Router, error)
+	PatchRouter(ctx context.Context, name string, patch *compute.Router) (*compute.Operation, error)
+	UpdateRouter(ctx context.Context, name string, router *compute.Router) (*compute.Operation, error)
+	WaitZoneOp(ctx context.Context, zone string, op *compute.Operation) error
+	WaitRegionOp(ctx context.Context, op *compute.Operation) error
 }
 
 type computeClient struct {
-	svc     *compute.Service
-	project string
-	region  string
-	inst    *compute.InstancesService
-	routers *compute.RoutersService
+	api computeAPI
 }
 
 func (c *computeClient) EnsureCanIPForward(ctx context.Context, node RouterNode) (bool, error) {
 	zone := shortZone(node.Zone)
-	inst, err := c.inst.Get(c.project, zone, node.Name).Context(ctx).Do()
+	inst, err := c.api.GetInstance(ctx, zone, node.Name)
 	if err != nil {
 		return false, err
 	}
@@ -47,14 +56,11 @@ func (c *computeClient) EnsureCanIPForward(ctx context.Context, node RouterNode)
 		return false, nil
 	}
 	inst.CanIpForward = true
-	op, err := c.inst.Update(c.project, zone, node.Name, inst).
-		MostDisruptiveAllowedAction("REFRESH").
-		Context(ctx).
-		Do()
+	op, err := c.api.UpdateInstance(ctx, zone, node.Name, inst, "REFRESH")
 	if err != nil {
 		return false, err
 	}
-	if err := c.waitZoneOp(ctx, zone, op); err != nil {
+	if err := c.api.WaitZoneOp(ctx, zone, op); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -62,7 +68,7 @@ func (c *computeClient) EnsureCanIPForward(ctx context.Context, node RouterNode)
 
 func (c *computeClient) EnsureNestedVirtualization(ctx context.Context, node RouterNode) (bool, error) {
 	zone := shortZone(node.Zone)
-	inst, err := c.inst.Get(c.project, zone, node.Name).Context(ctx).Do()
+	inst, err := c.api.GetInstance(ctx, zone, node.Name)
 	if err != nil {
 		return false, err
 	}
@@ -74,44 +80,18 @@ func (c *computeClient) EnsureNestedVirtualization(ctx context.Context, node Rou
 	}
 	inst.AdvancedMachineFeatures.EnableNestedVirtualization = true
 	// GCP rejects REFRESH for this field; API returns 400 requiring RESTART.
-	op, err := c.inst.Update(c.project, zone, node.Name, inst).
-		MostDisruptiveAllowedAction("RESTART").
-		Context(ctx).
-		Do()
+	op, err := c.api.UpdateInstance(ctx, zone, node.Name, inst, "RESTART")
 	if err != nil {
 		return false, err
 	}
-	if err := c.waitZoneOp(ctx, zone, op); err != nil {
+	if err := c.api.WaitZoneOp(ctx, zone, op); err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
-func (c *computeClient) waitZoneOp(ctx context.Context, zone string, op *compute.Operation) error {
-	if op == nil {
-		return nil
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(500 * time.Millisecond):
-		}
-		cur, err := c.svc.ZoneOperations.Get(c.project, zone, op.Name).Context(ctx).Do()
-		if err != nil {
-			return err
-		}
-		if cur.Status == "DONE" {
-			if cur.Error != nil {
-				return fmt.Errorf("operation failed: %v", cur.Error)
-			}
-			return nil
-		}
-	}
-}
-
 func (c *computeClient) GetRouterTopology(ctx context.Context, routerName string) (*CloudRouterTopology, error) {
-	r, err := c.routers.Get(c.project, c.region, routerName).Context(ctx).Do()
+	r, err := c.api.GetRouter(ctx, routerName)
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +117,7 @@ func (c *computeClient) GetRouterTopology(ctx context.Context, routerName string
 }
 
 func (c *computeClient) ReconcilePeers(ctx context.Context, routerName, clusterName string, nodes []RouterNode, topology *CloudRouterTopology, frrASN int) (bool, error) {
-	r, err := c.routers.Get(c.project, c.region, routerName).Context(ctx).Do()
+	r, err := c.api.GetRouter(ctx, routerName)
 	if err != nil {
 		return false, err
 	}
@@ -151,18 +131,18 @@ func (c *computeClient) ReconcilePeers(ctx context.Context, routerName, clusterN
 	}
 
 	patch := &compute.Router{BgpPeers: desired}
-	op, err := c.routers.Patch(c.project, c.region, routerName, patch).Context(ctx).Do()
+	op, err := c.api.PatchRouter(ctx, routerName, patch)
 	if err != nil {
 		return false, err
 	}
-	if err := c.waitRegionOp(ctx, op); err != nil {
+	if err := c.api.WaitRegionOp(ctx, op); err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
 func (c *computeClient) ClearPeers(ctx context.Context, routerName, clusterName string) (bool, error) {
-	r, err := c.routers.Get(c.project, c.region, routerName).Context(ctx).Do()
+	r, err := c.api.GetRouter(ctx, routerName)
 	if err != nil {
 		return false, err
 	}
@@ -171,20 +151,54 @@ func (c *computeClient) ClearPeers(ctx context.Context, routerName, clusterName 
 		return false, nil
 	}
 	r.BgpPeers = kept
-	op, err := c.routers.Update(c.project, c.region, routerName, r).Context(ctx).Do()
+	op, err := c.api.UpdateRouter(ctx, routerName, r)
 	if err != nil {
 		if ge, ok := err.(*googleapi.Error); ok && ge.Code == 400 {
 			return false, err
 		}
 		return false, err
 	}
-	if err := c.waitRegionOp(ctx, op); err != nil {
+	if err := c.api.WaitRegionOp(ctx, op); err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
-func (c *computeClient) waitRegionOp(ctx context.Context, op *compute.Operation) error {
+// gceAPI is the live computeAPI: a thin pass-through to the generated GCE
+// client that holds no logic worth unit testing on its own. The project and
+// region every call needs live here, out of the reconcile logic above.
+type gceAPI struct {
+	svc     *compute.Service
+	project string
+	region  string
+	inst    *compute.InstancesService
+	routers *compute.RoutersService
+}
+
+func (g *gceAPI) GetInstance(ctx context.Context, zone, name string) (*compute.Instance, error) {
+	return g.inst.Get(g.project, zone, name).Context(ctx).Do()
+}
+
+func (g *gceAPI) UpdateInstance(ctx context.Context, zone, name string, inst *compute.Instance, mostDisruptiveAllowedAction string) (*compute.Operation, error) {
+	return g.inst.Update(g.project, zone, name, inst).
+		MostDisruptiveAllowedAction(mostDisruptiveAllowedAction).
+		Context(ctx).
+		Do()
+}
+
+func (g *gceAPI) GetRouter(ctx context.Context, name string) (*compute.Router, error) {
+	return g.routers.Get(g.project, g.region, name).Context(ctx).Do()
+}
+
+func (g *gceAPI) PatchRouter(ctx context.Context, name string, patch *compute.Router) (*compute.Operation, error) {
+	return g.routers.Patch(g.project, g.region, name, patch).Context(ctx).Do()
+}
+
+func (g *gceAPI) UpdateRouter(ctx context.Context, name string, router *compute.Router) (*compute.Operation, error) {
+	return g.routers.Update(g.project, g.region, name, router).Context(ctx).Do()
+}
+
+func (g *gceAPI) WaitZoneOp(ctx context.Context, zone string, op *compute.Operation) error {
 	if op == nil {
 		return nil
 	}
@@ -194,17 +208,49 @@ func (c *computeClient) waitRegionOp(ctx context.Context, op *compute.Operation)
 			return ctx.Err()
 		case <-time.After(500 * time.Millisecond):
 		}
-		cur, err := c.svc.RegionOperations.Get(c.project, c.region, op.Name).Context(ctx).Do()
+		cur, err := g.svc.ZoneOperations.Get(g.project, zone, op.Name).Context(ctx).Do()
 		if err != nil {
 			return err
 		}
-		if cur.Status == "DONE" {
-			if cur.Error != nil {
-				return fmt.Errorf("operation failed: %v", cur.Error)
-			}
-			return nil
+		if done, err := computeOpDone(cur); done {
+			return err
 		}
 	}
+}
+
+func (g *gceAPI) WaitRegionOp(ctx context.Context, op *compute.Operation) error {
+	if op == nil {
+		return nil
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+		cur, err := g.svc.RegionOperations.Get(g.project, g.region, op.Name).Context(ctx).Do()
+		if err != nil {
+			return err
+		}
+		if done, err := computeOpDone(cur); done {
+			return err
+		}
+	}
+}
+
+// computeOpDone reports whether a GCE operation has reached its terminal state,
+// and if so whether it failed. A zone and a region operation are polled from
+// different endpoints but carry the same status and error shape, so both wait
+// loops decide when to stop here. Splitting this out lets the DONE-with-error
+// path be tested without a fake clock behind the WaitZoneOp/WaitRegionOp seam.
+func computeOpDone(op *compute.Operation) (bool, error) {
+	if op.Status != "DONE" {
+		return false, nil
+	}
+	if op.Error != nil {
+		return true, fmt.Errorf("operation failed: %v", op.Error)
+	}
+	return true, nil
 }
 
 // maxPeerNameLength is the GCE limit on a Cloud Router peer name.
