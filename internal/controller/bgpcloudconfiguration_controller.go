@@ -345,10 +345,10 @@ func (r *BGPCloudConfigurationReconciler) Reconcile(ctx context.Context, req ctr
 	incompleteEvent := ""
 	if cloudPlatform != nil {
 		log.Info("Phase 5: reconciling cloud resources")
-		nodes, incomplete, err := r.listRouterNodes(ctx, config)
+		nodes, incomplete, err := r.listNodes(ctx, config)
 		if err != nil {
 			return r.setDegraded(ctx, config, *baselineStatus, networkingapi.ConditionCloudResourcesReconciled,
-				ReasonCloudReconcileFailed, fmt.Sprintf("failed to list router nodes: %v", err))
+				ReasonCloudReconcileFailed, fmt.Sprintf("failed to list selected nodes: %v", err))
 		}
 		readyPhase = len(incomplete) == 0
 		if readyPhase {
@@ -356,7 +356,7 @@ func (r *BGPCloudConfigurationReconciler) Reconcile(ctx context.Context, req ctr
 				Type:               networkingapi.ConditionCompleteNodeInventory,
 				Status:             metav1.ConditionTrue,
 				Reason:             ReasonNodesComplete,
-				Message:            "all selected router nodes have IP, zone, and providerID",
+				Message:            "all selected nodes have IP, zone, and providerID",
 				ObservedGeneration: config.Generation,
 			})
 		} else {
@@ -383,7 +383,7 @@ func (r *BGPCloudConfigurationReconciler) Reconcile(ctx context.Context, req ctr
 				Type:               networkingapi.ConditionCloudResourcesReconciled,
 				Status:             metav1.ConditionTrue,
 				Reason:             ReasonReconciled,
-				Message:            "Cloud BGP peerings and router node settings reconciled",
+				Message:            "Cloud BGP peerings and forwarding settings reconciled",
 				ObservedGeneration: config.Generation,
 			})
 		} else {
@@ -391,7 +391,7 @@ func (r *BGPCloudConfigurationReconciler) Reconcile(ctx context.Context, req ctr
 				Type:               networkingapi.ConditionCloudResourcesReconciled,
 				Status:             metav1.ConditionFalse,
 				Reason:             ReasonNodesIncomplete,
-				Message:            "Cloud resources reconciled only for complete router nodes",
+				Message:            "Cloud resources reconciled only for complete selected nodes",
 				ObservedGeneration: config.Generation,
 			})
 		}
@@ -639,9 +639,24 @@ func getInfrastructureName(ctx context.Context, c client.Client) (string, error)
 	return name, nil
 }
 
-func (r *BGPCloudConfigurationReconciler) listRouterNodes(ctx context.Context, config *networkingapi.BGPCloudConfiguration) (complete []platform.RouterNode, incomplete []platform.RouterNode, err error) {
+func (r *BGPCloudConfigurationReconciler) listNodes(ctx context.Context, config *networkingapi.BGPCloudConfiguration) (complete []platform.RouterNode, incomplete []platform.RouterNode, err error) {
+	speakers, incomplete, err := r.listNodesForSelector(ctx, config.Spec.RouterNodeSelector, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(config.Spec.ForwardingNodeSelector) == 0 {
+		return speakers, incomplete, nil
+	}
+	forwarding, forwardingIncomplete, err := r.listNodesForSelector(ctx, config.Spec.ForwardingNodeSelector, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	return appendAbsentNodes(speakers, forwarding), appendAbsentNodes(incomplete, forwardingIncomplete), nil
+}
+
+func (r *BGPCloudConfigurationReconciler) listNodesForSelector(ctx context.Context, selector map[string]string, forwardingOnly bool) (complete []platform.RouterNode, incomplete []platform.RouterNode, err error) {
 	nodeList := &corev1.NodeList{}
-	sel := labels.SelectorFromSet(config.Spec.RouterNodeSelector)
+	sel := labels.SelectorFromSet(selector)
 	if err := r.List(ctx, nodeList, client.MatchingLabelsSelector{Selector: sel}); err != nil {
 		return nil, nil, err
 	}
@@ -650,9 +665,10 @@ func (r *BGPCloudConfigurationReconciler) listRouterNodes(ctx context.Context, c
 	for i := range nodeList.Items {
 		node := &nodeList.Items[i]
 		rn := platform.RouterNode{
-			Name:       node.Name,
-			ProviderID: node.Spec.ProviderID,
-			Zone:       node.Labels["topology.kubernetes.io/zone"],
+			Name:           node.Name,
+			ProviderID:     node.Spec.ProviderID,
+			Zone:           node.Labels["topology.kubernetes.io/zone"],
+			ForwardingOnly: forwardingOnly,
 		}
 		for _, addr := range node.Status.Addresses {
 			if addr.Type == corev1.NodeInternalIP {
@@ -686,7 +702,7 @@ func formatIncompleteNodesMessage(incomplete []platform.RouterNode) string {
 		}
 		parts = append(parts, n.Name+" (missing "+strings.Join(missing, "/")+")")
 	}
-	return truncateConditionMessage(fmt.Sprintf("%d router node(s) incomplete: %s", len(incomplete), strings.Join(parts, "; ")))
+	return truncateConditionMessage(fmt.Sprintf("%d selected node(s) incomplete: %s", len(incomplete), strings.Join(parts, "; ")))
 }
 
 // truncateConditionMessage keeps a message inside the 32768-byte limit the API
@@ -909,4 +925,20 @@ func (r *BGPCloudConfigurationReconciler) SetupWithManager(mgr ctrl.Manager) err
 		})).
 		Named("bgpcloudconfiguration").
 		Complete(r)
+}
+
+// appendAbsentNodes appends nodes from extra whose names are not already in first.
+func appendAbsentNodes(first, extra []platform.RouterNode) []platform.RouterNode {
+	seen := make(map[string]struct{}, len(first))
+	for _, n := range first {
+		seen[n.Name] = struct{}{}
+	}
+	for _, n := range extra {
+		if _, found := seen[n.Name]; found {
+			continue
+		}
+		seen[n.Name] = struct{}{}
+		first = append(first, n)
+	}
+	return first
 }

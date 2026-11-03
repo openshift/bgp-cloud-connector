@@ -211,6 +211,14 @@ func allManagedPeers(ctx context.Context) ([]ec2types.RouteServerPeer, error) {
 	return all, nil
 }
 
+func peerAddresses(peers []ec2types.RouteServerPeer) map[string]bool {
+	addresses := make(map[string]bool, len(peers))
+	for _, p := range peers {
+		addresses[aws.ToString(p.PeerAddress)] = true
+	}
+	return addresses
+}
+
 func routerNodes(ctx context.Context) ([]corev1.Node, error) {
 	nodeList := &corev1.NodeList{}
 	if err := k8sClient.List(ctx, nodeList, client.MatchingLabels(bgpConfig.Spec.RouterNodeSelector)); err != nil {
