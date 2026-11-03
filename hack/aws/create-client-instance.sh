@@ -24,7 +24,7 @@
 #
 #   - a security group for the instance;
 #   - an inbound rule on each security group the workers use, admitting
-#     TCP CLIENT_PORT from that group. The installer's node group admits
+#     TCP 8080 from that group. The installer's node group admits
 #     only NodePorts from the VPC's range, so without this nothing the
 #     client sends reaches a node at all.
 #
@@ -45,8 +45,9 @@ set -o pipefail
 # shellcheck source=hack/aws/lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
-# The port the suite's netexec pods serve on.
-client_port="${CLIENT_PORT:-8080}"
+# The port the suite's netexec pods serve on. It must equal NetexecPort
+# in test/e2e/dataplane.go, which is fixed, so it is not configurable.
+client_port=8080
 
 # The smallest current general-purpose size. It runs curl and nothing
 # else.
