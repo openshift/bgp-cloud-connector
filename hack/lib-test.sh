@@ -685,6 +685,21 @@ check "no worker is not an answer" "$?" "1"
 unset -f gcloud oc
 
 ######################################################################
+echo "--- gcp/lib.sh: the operator's workload identity ---"
+
+# The role a workload identity run grants the operator is the list the
+# operator asks CCO for. That list is Go, in credentials.go, and the
+# operator writes its request only once a BGPCloudConfiguration exists,
+# which is after the identity has to be in place; so the shell carries a
+# copy, and this is what keeps the copy honest.
+go_permissions="$(awk '/^var permissions = \[\]string\{/{p=1; next} p && /^\}/{exit} p' \
+    "${here}/../internal/platform/gcp/credentials.go" | grep -o '"[^"]*"' | tr -d '"' | sort)"
+check "the operator's role is the list the operator asks CCO for" \
+    "$(printf '%s\n' "${gcp_operator_permissions[@]}" | sort)" "${go_permissions}"
+check "and that list was read, not empty on both sides" \
+    "$(( $(grep -c . <<<"${go_permissions}") > 10 ))" "1"
+
+######################################################################
 echo "--- lib/retry.sh ---"
 #
 # The teardown has two claims behind it. That AWS answers "not ready

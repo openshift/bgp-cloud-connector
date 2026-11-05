@@ -228,6 +228,37 @@ gcp_estate_permissions=(
     networkconnectivity.spokes.list       # delete-cloud-router.sh, before the hub goes; the suite
 )
 
+# The operator's own permissions, for the role a workload identity
+# cluster grants the service account it impersonates. CCO cannot mint on
+# such a cluster, so somebody has to make that role, and in a test run
+# that is create-operator-identity.sh.
+#
+# A copy of the list in internal/platform/gcp/credentials.go, which is
+# what the operator asks CCO for. The operator writes that request only
+# once a BGPCloudConfiguration exists, after the identity has to be in
+# place, so the list cannot be read from the cluster; hack/lib-test.sh
+# fails if the two differ.
+#
+# Consumed by the scripts that source this, not here.
+# shellcheck disable=SC2034
+gcp_operator_permissions=(
+    compute.routers.get
+    compute.routers.update
+    compute.networks.updatePolicy
+    compute.networks.get
+    compute.instances.get
+    compute.instances.update
+    compute.zoneOperations.get
+    compute.regionOperations.get
+    networkconnectivity.operations.get
+    networkconnectivity.hubs.get
+    networkconnectivity.spokes.get
+    networkconnectivity.spokes.list
+    networkconnectivity.spokes.create
+    networkconnectivity.spokes.update
+    networkconnectivity.spokes.delete
+)
+
 # gcp_permissions_held prints which of the named permissions this
 # credential actually holds on the project, one per line.
 #
