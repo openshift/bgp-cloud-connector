@@ -169,7 +169,7 @@ func (r *BGPRoutingReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	// Phase 2: Ensure shared RouteAdvertisements
 	log.Info("Phase 2: ensuring RouteAdvertisements")
-	if err := EnsureRouteAdvertisements(ctx, r.Client); err != nil {
+	if err := EnsureRouteAdvertisements(ctx, r.Client, bgpConfig.Spec.RouteAdvertisementNodeSelector); err != nil {
 		return r.setDegraded(ctx, routing, *baselineStatus, networkingapi.ConditionRouteAdvertisementsCreated,
 			ReasonRAFailed, fmt.Sprintf("failed to ensure RouteAdvertisements: %v", err))
 	}
@@ -308,6 +308,22 @@ func (r *BGPRoutingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&networkingapi.BGPRouting{}).
+		// A RouteAdvertisements selector is owned by BGPCloudConfiguration,
+		// but the shared RouteAdvertisements object is reconciled here. Requeue
+		// all routings when the configuration generation changes so selector
+		// updates are applied without waiting for the resync interval.
+		Watches(&networkingapi.BGPCloudConfiguration{}, handler.EnqueueRequestsFromMapFunc(
+			r.enqueueAllRoutings,
+		), builder.WithPredicates(predicate.Funcs{
+			CreateFunc: func(event.CreateEvent) bool { return true },
+			DeleteFunc: func(event.DeleteEvent) bool { return true },
+			UpdateFunc: func(e event.UpdateEvent) bool {
+				oldConfig, ok1 := e.ObjectOld.(*networkingapi.BGPCloudConfiguration)
+				newConfig, ok2 := e.ObjectNew.(*networkingapi.BGPCloudConfiguration)
+				return !ok1 || !ok2 || oldConfig.Generation != newConfig.Generation
+			},
+			GenericFunc: func(event.GenericEvent) bool { return false },
+		})).
 		Watches(cudn, handler.EnqueueRequestsFromMapFunc(
 			r.mapClusterUDNToRouting,
 		)).

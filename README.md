@@ -46,6 +46,8 @@ Requires an OCP 4.21+ cluster. See [Development and deployment](docs/deployment.
 2. **On a cloud platform, set up credentials** — [AWS](docs/aws-authentication.md), [Azure](docs/azure-authentication.md), or [GCP](docs/gcp-authentication.md). (Skip for `platform: Manual`.)
 3. **Create the shared BGP configuration** (`BGPCloudConfiguration`, singleton named `cluster`) — set `spec.platform` and the matching cloud block (`spec.aws` / `spec.azure` / `spec.gcp`), or `platform: Manual` with explicit `spec.bgp.peerGroups`:
 
+   Required `spec.routerNodeSelector` selects nodes that peer with external BGP routers. The optional `spec.routeAdvertisementNodeSelector` independently selects nodes for PodNetwork route advertisements; omit it to retain the default all-node RA selector.
+
    ```bash
    $EDITOR config/samples/networking_v1beta1_bgpcloudconfiguration.yaml
    oc apply -f config/samples/networking_v1beta1_bgpcloudconfiguration.yaml

@@ -96,6 +96,7 @@ func newReadyBGPCloudConfiguration() *networkingapi.BGPCloudConfiguration {
 func TestRoutingReconcile_FullReconcile(t *testing.T) {
 	routing := newTestBGPRouting()
 	config := newReadyBGPCloudConfiguration()
+	config.Spec.RouteAdvertisementNodeSelector = map[string]string{"bgp_router": "true"}
 	ns := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "app1",
@@ -159,6 +160,13 @@ func TestRoutingReconcile_FullReconcile(t *testing.T) {
 	ra.SetGroupVersionKind(RouteAdvertisementsGVK)
 	if err := c.Get(context.Background(), types.NamespacedName{Name: RouteAdvertisementName}, ra); err != nil {
 		t.Fatalf("RouteAdvertisements not created: %v", err)
+	}
+	selector, found, err := unstructured.NestedMap(ra.Object, "spec", "nodeSelector", "matchLabels")
+	if err != nil || !found {
+		t.Fatalf("RouteAdvertisements nodeSelector not found: %v", err)
+	}
+	if selector["bgp_router"] != "true" {
+		t.Errorf("RouteAdvertisements nodeSelector = %#v, want bgp_router=true", selector)
 	}
 }
 
@@ -263,6 +271,10 @@ func TestRoutingReconcile_RepeatedReconcile_DoesNotRewriteSharedRouteAdvertiseme
 	ra.SetGroupVersionKind(RouteAdvertisementsGVK)
 	if err := c.Get(context.Background(), types.NamespacedName{Name: RouteAdvertisementName}, ra); err != nil {
 		t.Fatalf("RouteAdvertisements not created: %v", err)
+	}
+	selector, found, err := unstructured.NestedMap(ra.Object, "spec", "nodeSelector")
+	if err != nil || !found || len(selector) != 0 {
+		t.Fatalf("default RouteAdvertisements nodeSelector = %#v, want empty selector (err: %v)", selector, err)
 	}
 	resourceVersionAfterFirstPass := ra.GetResourceVersion()
 

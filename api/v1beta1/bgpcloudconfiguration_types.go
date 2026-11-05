@@ -268,6 +268,12 @@ type BGPCloudConfigurationSpec struct {
 	// routerNodeSelector is a set of labels that identify which cluster nodes
 	// act as BGP routers. Must match labels applied to BGP router machine pools.
 	RouterNodeSelector map[string]string `json:"routerNodeSelector"`
+	// routeAdvertisementNodeSelector selects the nodes from which PodNetwork
+	// routes are advertised. When omitted, RouteAdvertisements keeps its
+	// default empty selector and selects all nodes. The selector is limited to
+	// matchLabels for consistency with routerNodeSelector.
+	// +optional
+	RouteAdvertisementNodeSelector map[string]string `json:"routeAdvertisementNodeSelector,omitempty"`
 	// aws holds the AWS-specific configuration for auto-discovery of BGP
 	// infrastructure. Required when platform is AWS; must not be set otherwise.
 	// +optional
