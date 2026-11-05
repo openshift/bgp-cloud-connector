@@ -1,1 +1,1 @@
-export OPERATOR_IMAGE_PULLSPEC='registry.redhat.io/bgpcc/bgp-cloud-connector-rhel9-operator@sha256:36bbbd780ff4933a9060422b52f3f35c41062181e161228276320aac13862632'
+export OPERATOR_IMAGE_PULLSPEC='registry.redhat.io/bgpcc/bgp-cloud-connector-rhel9-operator@sha256:d50ade7aa076938aa912ed4a7f3b69f8cf7d1d85f73769c061ec47356c9bb84b'
