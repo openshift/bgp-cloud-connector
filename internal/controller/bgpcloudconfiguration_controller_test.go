@@ -528,29 +528,25 @@ func TestConfigReconcile_RepeatedReconcile_DoesNotRewriteFRRConfiguration(t *tes
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "bgp-cc-1", Namespace: FRRNamespace}, frrConfig); err != nil {
 		t.Fatalf("FRRConfiguration not created from discovery: %v", err)
 	}
-	resourceVersionAfterFirstPass := frrConfig.GetResourceVersion()
 	discoverCallsAfterFirstPass := mock.discoverCallCount
 	reconcileNodesCallsAfterFirstPass := mock.reconcileNodesCallCount
 
-	// Reconcile again with no external state changed. This is the scenario
-	// that used to loop forever: the FRRConfiguration watch re-enqueues this
-	// same request every time createOrUpdate rewrites the object.
+	// Simulate drift of a managed dependent object. A normal reconcile must
+	// repair it even while the BGPCloudConfiguration is already Ready.
+	if err := c.Delete(context.Background(), frrConfig); err != nil {
+		t.Fatalf("delete FRRConfiguration to simulate drift: %v", err)
+	}
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
-		t.Fatalf("second reconcile error: %v", err)
+		t.Fatalf("reconcile after FRRConfiguration drift: %v", err)
 	}
 
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "bgp-cc-1", Namespace: FRRNamespace}, frrConfig); err != nil {
-		t.Fatalf("get FRRConfiguration after repeat reconcile: %v", err)
+		t.Fatalf("get repaired FRRConfiguration: %v", err)
 	}
-	if frrConfig.GetResourceVersion() != resourceVersionAfterFirstPass {
-		t.Fatalf("expected no rewrite of FRRConfiguration on repeated reconcile, resourceVersion changed from %q to %q",
-			resourceVersionAfterFirstPass, frrConfig.GetResourceVersion())
-	}
-
-	// A repeated reconcile takes the health-only path until the five-minute cloud
-	// reconciliation interval expires, so cloud API calls are avoided here.
-	if mock.discoverCallCount != discoverCallsAfterFirstPass {
-		t.Errorf("expected DiscoverEndpoints not to run during health refresh, got %d calls after repeat (was %d)",
+	// A repeated reconcile still runs Phases 1-4 so managed FRR resources are
+	// repaired if they drift, including refreshing the cloud peering plan.
+	if mock.discoverCallCount <= discoverCallsAfterFirstPass {
+		t.Errorf("expected DiscoverEndpoints to run during normal reconciliation, got %d calls after repeat (was %d)",
 			mock.discoverCallCount, discoverCallsAfterFirstPass)
 	}
 	if mock.reconcileNodesCallCount != reconcileNodesCallsAfterFirstPass {

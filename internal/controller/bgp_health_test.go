@@ -12,11 +12,9 @@ package controller
 
 import (
 	"context"
-	"fmt"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -71,23 +69,6 @@ func TestObserveBGPSessionsFiltersByPeerGroupAndNode(t *testing.T) {
 	}
 	if !observed || len(got) != 1 || got[0].Node != "node-a" || got[0].Peer != "10.0.0.1" {
 		t.Fatalf("unexpected filtered sessions: observed=%t sessions=%+v", observed, got)
-	}
-}
-
-func TestSetBGPSessionConditionCapsStatusButUsesFullList(t *testing.T) {
-	config := &networkingapi.BGPCloudConfiguration{}
-	sessions := make([]networkingapi.BGPSessionStatus, 129)
-	for i := range sessions {
-		sessions[i] = networkingapi.BGPSessionStatus{Node: "node", Peer: fmt.Sprintf("10.0.0.%d", i+1), BGPStatus: "Established"}
-	}
-
-	setBGPSessionCondition(config, sessions, true, len(sessions))
-	if len(config.Status.BGPSessions) != 128 {
-		t.Fatalf("expected 128 status sessions, got %d", len(config.Status.BGPSessions))
-	}
-	condition := meta.FindStatusCondition(config.Status.Conditions, networkingapi.ConditionBGPSessionsEstablished)
-	if condition == nil || condition.Status != metav1.ConditionTrue {
-		t.Fatalf("expected established condition from full session list, got %+v", condition)
 	}
 }
 

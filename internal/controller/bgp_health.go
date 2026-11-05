@@ -27,30 +27,6 @@ import (
 	networkingapi "github.com/openshift/bgp-cloud-connector/api/v1beta1"
 )
 
-// reconcileBGPSessionHealth refreshes only the frr-k8s-owned health snapshot.
-// Keeping this separate from the main reconciliation path lets us poll often
-// without repeating cloud discovery and cloud API writes.
-func (r *BGPCloudConfigurationReconciler) reconcileBGPSessionHealth(
-	ctx context.Context,
-	config *networkingapi.BGPCloudConfiguration,
-	baseline networkingapi.BGPCloudConfigurationStatus,
-) (observed bool, err error) {
-	observed, err = r.observeBGPSessionHealth(ctx, config)
-	if err != nil {
-		// The health-only path persists the Unknown condition immediately so the
-		// next health refresh can report the observation failure.
-		return observed, r.patchConfigStatus(ctx, config, baseline, func(c *networkingapi.BGPCloudConfiguration) {
-			if c.Status.Conditions == nil {
-				c.Status.Conditions = config.Status.Conditions
-			}
-		})
-	}
-	return observed, r.patchConfigStatus(ctx, config, baseline, func(c *networkingapi.BGPCloudConfiguration) {
-		c.Status.BGPSessions = config.Status.BGPSessions
-		c.Status.Conditions = config.Status.Conditions
-	})
-}
-
 // observeBGPSessionHealth updates config.Status in memory. Callers that are
 // already persisting a larger reconciliation should leave persistence to that
 // path rather than patching status here.
@@ -84,9 +60,16 @@ func (r *BGPCloudConfigurationReconciler) observeBGPSessionHealth(ctx context.Co
 
 // observeBGPSessions reads the frr-k8s-owned session objects without making
 // the connector depend on frr-k8s Go types. This keeps the connector's API
-// compatible with the frr-k8s CRD while still surfacing the useful fields in
-// BGPCloudConfiguration.status.
-func observeBGPSessions(ctx context.Context, c client.Client, config *networkingapi.BGPCloudConfiguration) ([]networkingapi.BGPSessionStatus, bool, error) {
+// compatible with the frr-k8s CRD while still computing the aggregate health
+// condition from the useful fields.
+type observedBGPSession struct {
+	Node      string
+	Peer      string
+	BGPStatus string
+	BFDStatus string
+}
+
+func observeBGPSessions(ctx context.Context, c client.Client, config *networkingapi.BGPCloudConfiguration) ([]observedBGPSession, bool, error) {
 	sessions := &unstructured.UnstructuredList{}
 	sessions.SetGroupVersionKind(BGPSessionStateGVK)
 	if err := c.List(ctx, sessions, client.InNamespace(FRRNamespace)); err != nil {
@@ -109,7 +92,7 @@ func observeBGPSessions(ctx context.Context, c client.Client, config *networking
 		nodeLabels[nodes.Items[i].Name] = labels.Set(nodes.Items[i].Labels)
 	}
 	groups := sessionPeerGroups(config)
-	out := make([]networkingapi.BGPSessionStatus, 0, len(sessions.Items))
+	out := make([]observedBGPSession, 0, len(sessions.Items))
 	for i := range sessions.Items {
 		obj := &sessions.Items[i]
 		peer, _, err := unstructured.NestedString(obj.Object, "status", "peer")
@@ -132,7 +115,7 @@ func observeBGPSessions(ctx context.Context, c client.Client, config *networking
 		if !found || !sessionMatchesPeerGroup(peer, labelsForNode, config.Spec.RouterNodeSelector, groups) {
 			continue
 		}
-		out = append(out, networkingapi.BGPSessionStatus{
+		out = append(out, observedBGPSession{
 			Node: node, Peer: peer, BGPStatus: bgpStatus, BFDStatus: bfdStatus,
 		})
 	}
@@ -218,13 +201,7 @@ func desiredPeers(config *networkingapi.BGPCloudConfiguration) map[string]struct
 	return peers
 }
 
-func setBGPSessionCondition(config *networkingapi.BGPCloudConfiguration, sessions []networkingapi.BGPSessionStatus, observed bool, expected int) {
-	const maxStatusSessions = 128
-	statusSessions := sessions
-	if len(statusSessions) > maxStatusSessions {
-		statusSessions = statusSessions[:maxStatusSessions]
-	}
-	config.Status.BGPSessions = statusSessions
+func setBGPSessionCondition(config *networkingapi.BGPCloudConfiguration, sessions []observedBGPSession, observed bool, expected int) {
 	if !observed {
 		meta.RemoveStatusCondition(&config.Status.Conditions, networkingapi.ConditionBGPSessionsEstablished)
 		return

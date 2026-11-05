@@ -168,34 +168,6 @@ func (r *BGPCloudConfigurationReconciler) reconcileNetworkOperatorPatch(
 	return false, ctrl.Result{}, nil
 }
 
-// reconcileReadyCloudResources keeps provider-side node settings self-healing,
-// including AWS SourceDestCheck, after the initial configuration.
-func (r *BGPCloudConfigurationReconciler) reconcileReadyCloudResources(ctx context.Context, config *networkingapi.BGPCloudConfiguration) error {
-	if config.Spec.Platform == networkingapi.PlatformManual {
-		return nil
-	}
-
-	buildPlatform := r.PlatformBuilder
-	if buildPlatform == nil {
-		buildPlatform = defaultPlatformBuilder
-	}
-	cloudPlatform, err := buildPlatform(ctx, r.Client, config)
-	if err != nil {
-		return err
-	}
-	if _, err := cloudPlatform.DiscoverEndpoints(ctx); err != nil {
-		return fmt.Errorf("failed to discover cloud endpoints: %w", err)
-	}
-	routerNodes, _, err := r.listRouterNodes(ctx, config, true)
-	if err != nil {
-		return fmt.Errorf("failed to list router nodes: %w", err)
-	}
-	if err := cloudPlatform.ReconcileNodes(ctx, routerNodes); err != nil {
-		return fmt.Errorf("failed to reconcile cloud resources: %w", err)
-	}
-	return nil
-}
-
 func readyCloudResourcesDue(config *networkingapi.BGPCloudConfiguration) bool {
 	if config.Spec.Platform == networkingapi.PlatformManual {
 		return false
@@ -231,43 +203,8 @@ func (r *BGPCloudConfigurationReconciler) Reconcile(ctx context.Context, req ctr
 		}
 	}
 
-	// Once the desired configuration is Ready, keep provider-side node settings
-	// self-healing while refreshing the live BGP session health.
-	if config.Status.Phase == networkingapi.PhaseReady &&
-		config.Status.ObservedGeneration == config.Generation {
-		observed, err := r.reconcileBGPSessionHealth(ctx, config, *baselineStatus)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if readyCloudResourcesDue(config) {
-			if cloudErr := r.reconcileReadyCloudResources(ctx, config); cloudErr != nil {
-				message := fmt.Sprintf("failed to reconcile cloud resources: %v", cloudErr)
-				if statusErr := r.patchConfigStatus(ctx, config, *baselineStatus, func(c *networkingapi.BGPCloudConfiguration) {
-					setSummaryConditions(&c.Status.Phase, &c.Status.Conditions, c.Generation,
-						networkingapi.PhaseDegraded, ReasonCloudReconcileFailed, message)
-					meta.SetStatusCondition(&c.Status.Conditions, metav1.Condition{
-						Type:               networkingapi.ConditionCloudResourcesReconciled,
-						Status:             metav1.ConditionFalse,
-						Reason:             ReasonCloudReconcileFailed,
-						Message:            message,
-						ObservedGeneration: c.Generation,
-					})
-				}); statusErr != nil {
-					return ctrl.Result{}, statusErr
-				}
-				return ctrl.Result{}, cloudErr
-			}
-			now := metav1.Now()
-			config.Status.LastCloudReconcileTime = &now
-			if err := r.patchConfigStatus(ctx, config, *baselineStatus, func(c *networkingapi.BGPCloudConfiguration) {}); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
-		if observed {
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-		}
-		return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
-	}
+	wasReady := config.Status.Phase == networkingapi.PhaseReady &&
+		config.Status.ObservedGeneration == config.Generation
 
 	config.Status.Phase = networkingapi.PhaseConfiguring
 	config.Status.ObservedGeneration = config.Generation
@@ -454,7 +391,7 @@ func (r *BGPCloudConfigurationReconciler) Reconcile(ctx context.Context, req ctr
 	}
 
 	// Phase 5: Reconcile cloud resources (if configured)
-	if cloudPlatform != nil {
+	if cloudPlatform != nil && (!wasReady || readyCloudResourcesDue(config)) {
 		log.Info("Phase 5: reconciling cloud resources")
 		incomplete := incompleteNodes
 		if readyPhase {

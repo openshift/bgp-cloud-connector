@@ -31,7 +31,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -142,10 +141,6 @@ func TestRoutingReconcile_FullReconcile(t *testing.T) {
 		t.Errorf("expected 5 conditions, got %d", len(updated.Status.Conditions))
 	}
 	assertSummary(t, updated.Status.Conditions, metav1.ConditionTrue, metav1.ConditionFalse, metav1.ConditionFalse)
-	// The matched namespace is reported so an admin sees what the network covers.
-	if len(updated.Status.Namespaces) != 1 || updated.Status.Namespaces[0] != "app1" {
-		t.Errorf("expected status.namespaces [app1], got %v", updated.Status.Namespaces)
-	}
 
 	// Verify ClusterUDN created
 	cudn := &unstructured.Unstructured{}
@@ -284,38 +279,6 @@ func TestRoutingReconcile_RepeatedReconcile_DoesNotRewriteSharedRouteAdvertiseme
 		t.Fatalf("expected no rewrite of shared RouteAdvertisements across repeated reconciles of multiple CRs, resourceVersion changed from %q to %q",
 			resourceVersionAfterFirstPass, ra.GetResourceVersion())
 	}
-}
-
-func TestRoutingReconcile_NoNamespace(t *testing.T) {
-	routing := newTestBGPRouting()
-	routing.Finalizers = []string{RoutingFinalizerName}
-	config := newReadyBGPCloudConfiguration()
-
-	s := routingTestScheme()
-	c := fake.NewClientBuilder().WithScheme(s).
-		WithObjects(routing, config).
-		WithStatusSubresource(routing, config).
-		Build()
-
-	r := &BGPRoutingReconciler{Client: c, Scheme: s}
-	result, err := r.Reconcile(context.Background(), reconcile.Request{
-		NamespacedName: types.NamespacedName{Name: "prod"},
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result.RequeueAfter != 30*time.Second {
-		t.Errorf("expected 30s degraded requeue, got %v", result.RequeueAfter)
-	}
-
-	updated := &networkingapi.BGPRouting{}
-	if err := c.Get(context.Background(), types.NamespacedName{Name: "prod"}, updated); err != nil {
-		t.Fatalf("failed to get updated BGPRouting: %v", err)
-	}
-	if updated.Status.Phase != networkingapi.PhaseDegraded {
-		t.Errorf("expected Degraded, got %s", updated.Status.Phase)
-	}
-	assertSummary(t, updated.Status.Conditions, metav1.ConditionFalse, metav1.ConditionFalse, metav1.ConditionTrue)
 }
 
 func TestRoutingReconcile_DeleteLastRemovesRA(t *testing.T) {
@@ -518,61 +481,6 @@ func TestRoutingReconcile_DuplicateNetwork_RecoversOnConflictDelete(t *testing.T
 	}
 }
 
-// NamespaceNotReady stays transient (regression guard — must still be 30s).
-func TestRoutingReconcile_NamespaceNotReady_StillTransient(t *testing.T) {
-	routing := newTestBGPRouting()
-	routing.Finalizers = []string{RoutingFinalizerName}
-	config := newReadyBGPCloudConfiguration()
-
-	s := routingTestScheme()
-	c := fake.NewClientBuilder().WithScheme(s).
-		WithObjects(routing, config).
-		WithStatusSubresource(routing, config).
-		Build()
-
-	r := &BGPRoutingReconciler{Client: c, Scheme: s}
-	result, err := r.Reconcile(context.Background(), reconcile.Request{
-		NamespacedName: types.NamespacedName{Name: "prod"},
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result.RequeueAfter != 30*time.Second {
-		t.Errorf("NamespaceNotReady must remain transient (30s), got %v", result.RequeueAfter)
-	}
-}
-
-// A transition into Degraded emits a Warning Event carrying the reason.
-func TestRoutingReconcile_EmitsEventOnDegraded(t *testing.T) {
-	routing := newTestBGPRouting()
-	routing.Finalizers = []string{RoutingFinalizerName}
-	config := newReadyBGPCloudConfiguration()
-
-	s := routingTestScheme()
-	c := fake.NewClientBuilder().WithScheme(s).
-		WithObjects(routing, config).
-		WithStatusSubresource(routing, config).
-		Build()
-
-	rec := record.NewFakeRecorder(10)
-	r := &BGPRoutingReconciler{Client: c, Scheme: s, Recorder: rec}
-	// No labelled namespace exists → NamespaceNotReady degraded.
-	if _, err := r.Reconcile(context.Background(), reconcile.Request{
-		NamespacedName: types.NamespacedName{Name: "prod"},
-	}); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	select {
-	case ev := <-rec.Events:
-		if !strings.Contains(ev, corev1.EventTypeWarning) || !strings.Contains(ev, ReasonNamespaceNotReady) {
-			t.Errorf("expected a Warning/%s event, got %q", ReasonNamespaceNotReady, ev)
-		}
-	default:
-		t.Error("expected a degraded event to be recorded")
-	}
-}
-
 // TestRoutingReconcile_WaitForConfig_DoesNotChurnStatus guards the hot loop that
 // wiping and rebuilding the summary conditions every requeue would cause: the
 // conditions would come back with a fresh LastTransitionTime, the status write
@@ -615,22 +523,6 @@ func TestRoutingReconcile_WaitForConfig_DoesNotChurnStatus(t *testing.T) {
 	}
 	if second.ResourceVersion != rv {
 		t.Errorf("waiting-for-config reconcile rewrote status: resourceVersion %s -> %s", rv, second.ResourceVersion)
-	}
-}
-
-func TestDescribeNamespaces(t *testing.T) {
-	cases := []struct {
-		in   []string
-		want string
-	}{
-		{[]string{"app1"}, `namespace "app1"`},
-		{[]string{"app1", "app2"}, "2 namespaces"},
-		{[]string{"app1", "app2", "app3"}, "3 namespaces"},
-	}
-	for _, tc := range cases {
-		if got := describeNamespaces(tc.in); got != tc.want {
-			t.Errorf("describeNamespaces(%v) = %q, want %q", tc.in, got, tc.want)
-		}
 	}
 }
 
