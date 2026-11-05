@@ -699,6 +699,299 @@ check "the operator's role is the list the operator asks CCO for" \
 check "and that list was read, not empty on both sides" \
     "$(( $(grep -c . <<<"${go_permissions}") > 10 ))" "1"
 
+# The identity scripts ask for what their own calls need, so a
+# permission dropped from the list is a call left unguarded.
+for p in iam.roles.undelete iam.serviceAccounts.setIamPolicy resourcemanager.projects.setIamPolicy iam.serviceAccounts.delete; do
+    check "the identity list covers ${p}" \
+        "$(printf '%s\n' "${gcp_identity_permissions[@]}" | grep -Fxc "${p}")" "1"
+done
+
+# One service account per cluster, named from the infra id so the delete
+# finds it again from the same fact. GCP takes 6 to 30 characters,
+# [a-z][a-z0-9-]*[a-z0-9]; a CI infra id fits whole and a desk one, at
+# 25 characters, does not.
+check "a CI infra id fits whole" \
+    "$(gcp_operator_sa_name ci-op-xxg78pqd-36efb)" "bgpcc-ci-op-xxg78pqd-36efb"
+check "a longer one is cut to 30 characters" \
+    "$(gcp_operator_sa_name amcdermo-2611031326-mf2nw)" "bgpcc-amcdermo-2611031326-mf2n"
+check "and a cut never ends on a hyphen" \
+    "$(gcp_operator_sa_name abcdefghijklmnopqrstuvw-xyz)" "bgpcc-abcdefghijklmnopqrstuvw"
+
+# The role is shared by every run in a project, as ccoctl's and CCO's
+# are: a deleted custom role holds its place in the project's limit of
+# 300 for up to two weeks and its id for a month after that, and these
+# projects are shared with every other CI job. So it is created once,
+# grown when the operator needs more, and never deleted.
+#
+# Recorded and answered. The list prints "<id>\t<deleted>", as gcloud
+# does: blank for a live role, True for a deleted one.
+role_calls="${workdir}/role-calls"
+stub_roles=""
+stub_role_perms=""
+stub_role_list_rc=0
+stub_role_describe_rc=0
+stub_role_create_rc=0
+# Reached through gcp_query's and try's "$@".
+# shellcheck disable=SC2329
+gcloud() {
+    printf 'gcloud %s\n' "$*" >>"${role_calls}"
+    case "$*" in
+        "iam roles list"*)
+            (( stub_role_list_rc == 0 )) || { echo "ERROR: reauth" >&2; return 1; }
+            printf '%s' "${stub_roles}" ;;
+        "iam roles describe"*)
+            (( stub_role_describe_rc == 0 )) || { echo "ERROR: reauth" >&2; return 1; }
+            printf '%s' "${stub_role_perms}" ;;
+        "iam roles create"*)
+            (( stub_role_create_rc == 0 )) || { echo "ERROR: PERMISSION_DENIED" >&2; return 1; }
+            ;;
+    esac
+}
+role_calls_matching() { grep -c -- "$1" "${role_calls}"; }
+
+: >"${role_calls}"; stub_roles=$'otherRole\t\n'
+gcp_ensure_custom_role proj bgpRole "bgp role" a.get b.update >/dev/null 2>&1
+check "gcp_ensure_custom_role creates a role that is not there" "$?" "0"
+check "it creates it in that project, with every permission" \
+    "$(role_calls_matching 'iam roles create bgpRole --project=proj --title=bgp role --permissions=a.get,b.update')" "1"
+
+: >"${role_calls}"; stub_roles=$'bgpRole\t\n'; stub_role_perms="a.get;b.update"
+gcp_ensure_custom_role proj bgpRole "bgp role" a.get b.update >/dev/null 2>&1
+check "it adopts a role that already has every permission" "$?" "0"
+check "and changes nothing" "$(role_calls_matching 'iam roles \(create\|update\|undelete\)')" "0"
+
+: >"${role_calls}"; stub_roles=$'bgpRole\t\n'; stub_role_perms="a.get"
+gcp_ensure_custom_role proj bgpRole "bgp role" a.get b.update >/dev/null 2>&1
+check "it adds what the role lacks" \
+    "$(role_calls_matching 'iam roles update bgpRole --project=proj --add-permissions=b.update')" "1"
+
+# Removing would take a permission from a run at another head that still
+# needs it; the projects are shared and runs overlap.
+: >"${role_calls}"; stub_roles=$'bgpRole\t\n'; stub_role_perms="a.get;b.update;old.thing"
+out="$(gcp_ensure_custom_role proj bgpRole "bgp role" a.get b.update 2>&1)"
+check "it removes nothing the role holds beyond the list" \
+    "$(role_calls_matching 'remove-permissions')" "0"
+check "but says what it found" "$(grep -c 'old.thing' <<<"${out}")" "1"
+
+: >"${role_calls}"; stub_roles=$'bgpRole\tTrue\n'; stub_role_perms="a.get"
+gcp_ensure_custom_role proj bgpRole "bgp role" a.get b.update >/dev/null 2>&1
+check "it undeletes a role somebody deleted, since its id cannot be reused" \
+    "$(role_calls_matching 'iam roles undelete bgpRole --project=proj')" "1"
+check "and then brings it up to date" \
+    "$(role_calls_matching 'iam roles update bgpRole --project=proj --add-permissions=b.update')" "1"
+check "rather than trying to create it again" "$(role_calls_matching 'iam roles create')" "0"
+
+: >"${role_calls}"; stub_roles=""; stub_role_list_rc=1
+gcp_ensure_custom_role proj bgpRole "bgp role" a.get >/dev/null 2>&1
+check "it fails when it cannot tell whether the role exists" "$?" "1"
+check "and creates nothing on a guess" "$(role_calls_matching 'iam roles create')" "0"
+stub_role_list_rc=0
+
+: >"${role_calls}"; stub_roles=$'bgpRole\t\n'; stub_role_describe_rc=1
+gcp_ensure_custom_role proj bgpRole "bgp role" a.get >/dev/null 2>&1
+check "it fails when it cannot read what the role holds" "$?" "1"
+check "and updates nothing on a guess" "$(role_calls_matching 'iam roles update')" "0"
+stub_role_describe_rc=0
+
+: >"${role_calls}"; stub_roles=""; stub_role_create_rc=1
+gcp_ensure_custom_role proj bgpRole "bgp role" a.get >/dev/null 2>&1
+check "it fails when the create is refused" "$?" "1"
+stub_role_create_rc=0
+
+: >"${role_calls}"; dry_run=true
+stub_roles=""; gcp_ensure_custom_role proj bgpRole "bgp role" a.get >/dev/null 2>&1
+stub_roles=$'bgpRole\tTrue\n'; stub_role_perms=""
+gcp_ensure_custom_role proj bgpRole "bgp role" a.get >/dev/null 2>&1
+check "it changes nothing in a rehearsal" "$(role_calls_matching 'iam roles \(create\|update\|undelete\)')" "0"
+dry_run=false
+
+unset -f gcloud
+
+# The service account and its two bindings are per cluster, and go when
+# the cluster does. Existence is an exact comparison, as everywhere in
+# gcp/lib.sh, and a read that failed is never "not there".
+sa_calls="${workdir}/sa-calls"
+stub_sas=""
+stub_policy=""
+stub_sa_list_rc=0
+stub_policy_rc=0
+stub_policy_write_failures=0
+stub_policy_write_denied=0
+stub_sa_policy_notfound=0
+# Reached through gcp_query's, retry's and try's "$@".
+# shellcheck disable=SC2329
+gcloud() {
+    printf 'gcloud %s\n' "$*" >>"${sa_calls}"
+    case "$*" in
+        "iam service-accounts list"*)
+            (( stub_sa_list_rc == 0 )) || { echo "ERROR: reauth" >&2; return 1; }
+            printf '%s' "${stub_sas}" ;;
+        *get-iam-policy*)
+            (( stub_policy_rc == 0 )) || { echo "ERROR: reauth" >&2; return 1; }
+            if [[ "$*" == "iam service-accounts get-iam-policy"* ]] && (( stub_sa_policy_notfound > 0 )); then
+                stub_sa_policy_notfound=$((stub_sa_policy_notfound - 1))
+                echo "ERROR: (gcloud.iam.service-accounts.get-iam-policy) NOT_FOUND: Unknown service account." >&2
+                return 1
+            fi
+            printf '%s' "${stub_policy}" ;;
+        *add-iam-policy-binding*|*remove-iam-policy-binding*)
+            if (( stub_policy_write_denied > 0 )); then
+                echo "ERROR: (gcloud.projects.add-iam-policy-binding) PERMISSION_DENIED: Policy update access denied." >&2
+                return 1
+            fi
+            if (( stub_policy_write_failures > 0 )); then
+                stub_policy_write_failures=$((stub_policy_write_failures - 1))
+                echo "ERROR: (gcloud.projects.add-iam-policy-binding) ABORTED: There were concurrent policy changes." >&2
+                return 1
+            fi ;;
+    esac
+}
+sa_calls_matching() { grep -c -- "$1" "${sa_calls}"; }
+email="bgpcc-infra@proj.iam.gserviceaccount.com"
+
+: >"${sa_calls}"; stub_sas=$'other@proj.iam.gserviceaccount.com\n'
+gcp_ensure_service_account proj bgpcc-infra >/dev/null 2>&1
+check "gcp_ensure_service_account creates an account that is not there" \
+    "$(sa_calls_matching 'iam service-accounts create bgpcc-infra --project=proj')" "1"
+
+# A longer name sharing the prefix is somebody else's account.
+: >"${sa_calls}"; stub_sas=$'bgpcc-infra-2@proj.iam.gserviceaccount.com\n'
+gcp_ensure_service_account proj bgpcc-infra >/dev/null 2>&1
+check "an account whose name only starts the same is not this one" \
+    "$(sa_calls_matching 'iam service-accounts create bgpcc-infra --project=proj')" "1"
+
+: >"${sa_calls}"; stub_sas="${email}"$'\n'
+gcp_ensure_service_account proj bgpcc-infra >/dev/null 2>&1
+check "it adopts an account that is already there" "$(sa_calls_matching 'iam service-accounts create')" "0"
+
+: >"${sa_calls}"; stub_sa_list_rc=1
+gcp_ensure_service_account proj bgpcc-infra >/dev/null 2>&1
+check "it fails when it cannot tell whether the account exists" "$?" "1"
+check "and creates nothing on a guess" "$(sa_calls_matching 'iam service-accounts create')" "0"
+gcp_delete_service_account proj bgpcc-infra >/dev/null 2>&1
+check "the delete fails the same way" "$?" "1"
+check "and deletes nothing on a guess" "$(sa_calls_matching 'iam service-accounts delete')" "0"
+stub_sa_list_rc=0
+
+: >"${sa_calls}"; stub_sas="${email}"$'\n'
+gcp_delete_service_account proj bgpcc-infra >/dev/null 2>&1
+check "gcp_delete_service_account deletes the account" \
+    "$(sa_calls_matching "iam service-accounts delete ${email} --project=proj")" "1"
+: >"${sa_calls}"; stub_sas=""
+gcp_delete_service_account proj bgpcc-infra >/dev/null 2>&1
+check "an account already gone is success" "$?" "0"
+check "and is not deleted again" "$(sa_calls_matching 'iam service-accounts delete')" "0"
+
+# Bindings, on the project and on the account. The policy is read
+# flattened, "<role>\t<member>" per line, and the pair compared whole.
+member="serviceAccount:${email}"
+role_ref="projects/proj/roles/bgpRole"
+wi_role="roles/iam.workloadIdentityUser"
+wi_member="principal://iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/pool/subject/system:serviceaccount:ns:sa"
+
+: >"${sa_calls}"; stub_policy="roles/viewer"$'\t'"${member}"$'\n'
+gcp_ensure_project_binding proj "${role_ref}" "${member}" >/dev/null 2>&1
+check "gcp_ensure_project_binding adds a binding that is not there" \
+    "$(sa_calls_matching "projects add-iam-policy-binding proj --member=${member} --role=${role_ref} --condition=None")" "1"
+
+: >"${sa_calls}"; stub_policy="${role_ref}"$'\t'"${member}"$'\n'
+gcp_ensure_project_binding proj "${role_ref}" "${member}" >/dev/null 2>&1
+check "it adopts a binding that is already there" "$(sa_calls_matching 'add-iam-policy-binding')" "0"
+
+: >"${sa_calls}"; stub_sas="${email}"$'\n'; stub_policy=""
+gcp_ensure_sa_binding proj "${email}" "${wi_role}" "${wi_member}" >/dev/null 2>&1
+check "gcp_ensure_sa_binding binds on the account's own policy" \
+    "$(sa_calls_matching "iam service-accounts add-iam-policy-binding ${email} --project=proj --member=${wi_member} --role=${wi_role}")" "1"
+check "having read that policy, not the project's" \
+    "$(( $(sa_calls_matching "iam service-accounts get-iam-policy ${email} --project=proj") >= 1 ))" "1"
+
+# IAM is eventually consistent: an account created moments ago can be
+# listed and still answer NOT_FOUND to a read of its own policy.
+: >"${sa_calls}"; stub_sas="${email}"$'\n'; stub_policy=""; stub_sa_policy_notfound=2
+gcp_ensure_sa_binding proj "${email}" "${wi_role}" "${wi_member}" >/dev/null 2>&1
+check "it waits for a new account's policy to become readable" "$?" "0"
+check "and then binds" "$(sa_calls_matching 'iam service-accounts add-iam-policy-binding')" "1"
+stub_sa_policy_notfound=0
+
+# The list lags the create as well. Observed in openshift-gce-devel-ci-3
+# on 2026-11-06: an account created moments before was missing from the
+# list, and a run that trusted the list gave up on it.
+: >"${sa_calls}"; stub_sas=""; stub_policy=""
+gcp_ensure_sa_binding proj "${email}" "${wi_role}" "${wi_member}" >/dev/null 2>&1
+check "a new account the list does not show yet is still bound" "$?" "0"
+check "once its own policy answers" "$(sa_calls_matching 'iam service-accounts add-iam-policy-binding')" "1"
+
+: >"${sa_calls}"; stub_sas=""; stub_policy=""; stub_sa_policy_notfound=1000
+GCP_IAM_WAIT_SECS=2 gcp_ensure_sa_binding proj "${email}" "${wi_role}" "${wi_member}" >/dev/null 2>&1
+check "binding on an account that never appears fails" "$?" "1"
+check "without writing its policy" "$(sa_calls_matching 'iam service-accounts add-iam-policy-binding')" "0"
+stub_sa_policy_notfound=0
+
+# In a rehearsal the account was never created, so its policy cannot be
+# read; that is not a failure of the rehearsal.
+: >"${sa_calls}"; stub_sas=""; dry_run=true
+gcp_ensure_sa_binding proj "${email}" "${wi_role}" "${wi_member}" >/dev/null 2>&1
+check "a rehearsal binding on an account it would create succeeds" "$?" "0"
+check "without asking for the policy of an account that is not there" \
+    "$(sa_calls_matching 'iam service-accounts get-iam-policy')" "0"
+dry_run=false
+
+: >"${sa_calls}"; stub_policy_rc=1
+gcp_ensure_project_binding proj "${role_ref}" "${member}" >/dev/null 2>&1
+check "it fails when it cannot read the policy" "$?" "1"
+check "and adds nothing on a guess" "$(sa_calls_matching 'add-iam-policy-binding')" "0"
+gcp_remove_project_binding proj "${role_ref}" "${member}" >/dev/null 2>&1
+check "the removal fails the same way" "$?" "1"
+check "and removes nothing on a guess" "$(sa_calls_matching 'remove-iam-policy-binding')" "0"
+stub_policy_rc=0
+
+# Other runs, and ccoctl, write the same project policy, and GCP refuses
+# a write made against a policy that changed underneath it. A refusal
+# that will not clear is not retried.
+: >"${sa_calls}"; stub_policy=""; stub_policy_write_failures=2
+gcp_ensure_project_binding proj "${role_ref}" "${member}" >/dev/null 2>&1
+check "it keeps trying through concurrent policy changes" "$?" "0"
+check "until the write lands" "$(sa_calls_matching 'add-iam-policy-binding')" "3"
+stub_policy_write_failures=0
+: >"${sa_calls}"; stub_policy=""; stub_policy_write_denied=1
+gcp_ensure_project_binding proj "${role_ref}" "${member}" >/dev/null 2>&1
+check "a denied write fails" "$?" "1"
+check "without being tried again" "$(sa_calls_matching 'add-iam-policy-binding')" "1"
+stub_policy_write_denied=0
+
+: >"${sa_calls}"; stub_policy="${role_ref}"$'\t'"${member}"$'\n'
+gcp_remove_project_binding proj "${role_ref}" "${member}" >/dev/null 2>&1
+check "gcp_remove_project_binding removes the binding" \
+    "$(sa_calls_matching "projects remove-iam-policy-binding proj --member=${member} --role=${role_ref} --condition=None")" "1"
+: >"${sa_calls}"; stub_policy=""
+gcp_remove_project_binding proj "${role_ref}" "${member}" >/dev/null 2>&1
+check "a binding already gone is success" "$?" "0"
+check "and is not removed again, which gcloud would refuse" "$(sa_calls_matching 'remove-iam-policy-binding')" "0"
+
+# Prow logs for openshift repositories are public, and the member names
+# the project.
+: >"${sa_calls}"; stub_sas=""; stub_policy=""
+check "none of it names the project in what it prints" \
+    "$( { gcp_ensure_service_account proj bgpcc-infra
+          gcp_ensure_project_binding proj "${role_ref}" "${member}"
+          gcp_ensure_sa_binding proj "${email}" "${wi_role}" "${wi_member}"
+          stub_policy="${role_ref}"$'\t'"${member}"$'\n'
+          gcp_remove_project_binding proj "${role_ref}" "${member}"
+          stub_sas="${email}"; gcp_delete_service_account proj bgpcc-infra; } 2>&1 | grep -c 'proj\b' )" "0"
+
+: >"${sa_calls}"; dry_run=true; stub_sas=""; stub_policy=""
+gcp_ensure_service_account proj bgpcc-infra >/dev/null 2>&1
+gcp_ensure_project_binding proj "${role_ref}" "${member}" >/dev/null 2>&1
+gcp_ensure_sa_binding proj "${email}" "${wi_role}" "${wi_member}" >/dev/null 2>&1
+stub_sas="${email}"; stub_policy="${role_ref}"$'\t'"${member}"$'\n'
+gcp_remove_project_binding proj "${role_ref}" "${member}" >/dev/null 2>&1
+gcp_delete_service_account proj bgpcc-infra >/dev/null 2>&1
+check "none of it changes anything in a rehearsal" \
+    "$(sa_calls_matching '\(service-accounts \(create\|delete\)\|add-iam-policy-binding\|remove-iam-policy-binding\)')" "0"
+dry_run=false
+
+unset -f gcloud
+
 ######################################################################
 echo "--- lib/retry.sh ---"
 #
