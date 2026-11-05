@@ -35,6 +35,7 @@ The operator is **cloud platform aware**. When platform configuration is provide
 | [Custom resources](docs/custom-resources.md) | `BGPCloudConfiguration` and `BGPRouting` reference, field tables, and operator-generated resources. |
 | [Controller reconciliation](docs/reconciliation.md) | Reconciliation phases, status conditions, watches, and drift recovery. |
 | [Development and deployment](docs/deployment.md) | Build, deploy, and test the operator; OLM bundle install; OLM packaging. |
+| [Releasing](docs/releasing.md) | Product minor setup, then the version, stage, and production release steps. |
 | [Test strategy](docs/test-strategy.md) | Test layers, make targets, and per-area test plans. |
 | [KubeVirt VM testing](docs/kubevirt-testing.md) | UDN binding requirements for VMs and MTV migration testing. |
 
