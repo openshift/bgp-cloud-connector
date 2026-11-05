@@ -76,7 +76,7 @@ info ""
 # Reported in full on the way past, so a green run says what it was
 # allowed to do rather than leaving it to be inferred from not failing.
 info "permissions:"
-gcp_require_permissions "${project}" "${gcp_estate_permissions[@]}"
+gcp_require_permissions "build the GCP estate" "${project}" "${gcp_estate_permissions[@]}"
 info ""
 
 # The network and the worker subnet, read from a worker; see

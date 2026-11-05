@@ -275,14 +275,18 @@ gcp_permissions_held() {
 }
 
 # gcp_require_permissions says what this credential can and cannot do,
-# and stops before anything is built unless it can do all of it.
+# and stops before anything is built unless it can do all of it:
+#
+#   gcp_require_permissions <purpose> <project> <permission>...
+#
+# The purpose finishes "this credential cannot ..." in the refusal.
 #
 # The whole list every time, and reported whether or not it passes. A
 # role learned one PERMISSION_DENIED per CI run costs a cluster install
 # per permission, and the run that found networkconnectivity.hubs.create
 # missing could say nothing about whether anything else was.
 gcp_require_permissions() {
-    local project="$1"; shift
+    local purpose="$1" project="$2"; shift 2
 
     local held
     held="$(gcp_permissions_held "${project}" "$@")" \
@@ -300,7 +304,7 @@ gcp_require_permissions() {
     done
 
     (( ${#missing[@]} == 0 )) || die \
-        "this credential cannot build the GCP estate" \
+        "this credential cannot ${purpose}" \
         "Denied: ${missing[*]}" \
         "Nothing was created."
 }

@@ -637,17 +637,19 @@ check "no token means no answer" "$?" "1"
 gcloud() { printf 'ya29.a0-fake-token'; }
 # shellcheck disable=SC2329
 curl() { printf '{"permissions":["compute.routers.list"]}'; }
-perm_report="$( (gcp_require_permissions proj \
+perm_report="$( (gcp_require_permissions "build the GCP estate" proj \
     compute.routers.list compute.routers.create networkconnectivity.hubs.create) 2>&1 )"
 check "the report names every denied permission" \
     "$(printf '%s' "${perm_report}" | grep -c 'DENIED')" "2"
 check "the report names the granted ones too" \
     "$(printf '%s' "${perm_report}" | grep -c 'granted')" "1"
-(gcp_require_permissions proj compute.routers.list compute.routers.create) >/dev/null 2>&1
+check "the refusal says what the credential cannot do" \
+    "$(printf '%s' "${perm_report}" | grep -c '^this credential cannot build the GCP estate$')" "1"
+(gcp_require_permissions "build the GCP estate" proj compute.routers.list compute.routers.create) >/dev/null 2>&1
 check "a credential missing a permission does not get to build" "$?" "1"
 # shellcheck disable=SC2329
 curl() { printf '{"permissions":["compute.routers.list","compute.routers.create"]}'; }
-(gcp_require_permissions proj compute.routers.list compute.routers.create) >/dev/null 2>&1
+(gcp_require_permissions "build the GCP estate" proj compute.routers.list compute.routers.create) >/dev/null 2>&1
 check "a credential holding all of them proceeds" "$?" "0"
 
 unset -f curl
