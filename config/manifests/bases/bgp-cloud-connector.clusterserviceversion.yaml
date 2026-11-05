@@ -56,7 +56,7 @@ metadata:
     operatorframework.io/arch.amd64: supported
     operatorframework.io/arch.arm64: supported
     operatorframework.io/os.linux: supported
-  name: bgp-cloud-connector.v1.1.0
+  name: bgp-cloud-connector.v1.1.1
   namespace: placeholder
 spec:
   apiservicedefinitions: {}
@@ -110,4 +110,4 @@ spec:
   relatedImages:
   - image: controller:latest
     name: bgp-cloud-connector
-  version: 1.1.0
+  version: 1.1.1
