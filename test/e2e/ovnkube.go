@@ -29,24 +29,12 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// OVN-Kubernetes can leave a worker advertising a layer2 primary
-// network over BGP while dropping traffic for its pods: without the
-// br-ex flows for the network, without the port joining its switch to
-// the transit router, or with the gateway router's subnet SNAT in its
-// non-advertised form. Restarting the worker's ovnkube-node pod repairs
-// all three. Until the fixes in openshift/ovn-kubernetes#3513 ship, the
-// data-plane specs restart ovnkube-node once when their probe fails and
-// report that they did.
-
 const (
-	ovnNamespace       = "openshift-ovn-kubernetes"
-	ovnkubeNodeApp     = "ovnkube-node"
-	ovnkubeNodeTimeout = 10 * time.Minute
+	ovnNamespace   = "openshift-ovn-kubernetes"
+	ovnkubeNodeApp = "ovnkube-node"
 
 	operatorNamespace  = "openshift-bgp-cloud-connector"
 	operatorDeployment = "openshift-bgp-cloud-connector-controller-manager"
@@ -125,84 +113,20 @@ var frrCommands = []struct {
 	{"frr-routes.txt", []string{"vtysh", "-c", "show ip route vrf all"}},
 }
 
-// ProbeAllowingOVNKubeRestart runs check until it passes or timeout
-// expires. If it never passes, it records the network state, restarts
-// ovnkube-node on every worker, and runs check again for up to timeout;
-// only a failure then fails the spec. A restart that was needed is added
-// as a report entry, which Ginkgo prints whether or not the spec passes.
-//
-// The network state is recorded whatever happens: after a first-time
-// pass, before a restart, and after the probe that follows it, each in
-// its own directory under ${ARTIFACT_DIR}, so a run that needed the
-// restart can be compared with one that did not.
-func ProbeAllowingOVNKubeRestart(ctx context.Context, c client.Client, workers []string,
+// ProbeRecordingNetworkState runs check until it passes or timeout
+// expires, records the network state under ${ARTIFACT_DIR}, and fails the
+// spec if check never passed.
+func ProbeRecordingNetworkState(ctx context.Context, c client.Client, workers []string,
 	timeout, polling time.Duration, check func(gomega.Gomega)) {
-	first := gomega.InterceptGomegaFailure(func() {
+	failure := gomega.InterceptGomegaFailure(func() {
 		gomega.Eventually(check).WithTimeout(timeout).WithPolling(polling).Should(gomega.Succeed())
 	})
-	if first == nil {
+	if failure == nil {
 		recordNetworkState(ctx, c, workers, "network-state-probe-passed")
 		return
 	}
-	ginkgo.GinkgoWriter.Printf("probe failed before any ovnkube-node restart:\n%v\n", first)
-
-	before := recordNetworkState(ctx, c, workers, "network-state-before-ovnkube-restart")
-
-	ginkgo.By("restarting ovnkube-node on every worker, then probing again")
-	gomega.Expect(restartOVNKubeNode(ctx, c, workers)).To(gomega.Succeed())
-	second := gomega.InterceptGomegaFailure(func() {
-		gomega.Eventually(check).WithTimeout(timeout).WithPolling(polling).Should(gomega.Succeed())
-	})
-	after := recordNetworkState(ctx, c, workers, "network-state-after-ovnkube-restart")
-	if second != nil {
-		ginkgo.Fail(fmt.Sprintf("the probe failed again after ovnkube-node was restarted on every worker; "+
-			"network state before the restart is in %s, after it in %s:\n%v", before, after, second))
-	}
-
-	ginkgo.AddReportEntry("ovnkube-node restart needed",
-		fmt.Sprintf("the probe failed for %s and passed after ovnkube-node was restarted "+
-			"on every worker; network state before the restart is in %s, after it in %s",
-			timeout, before, after))
-}
-
-// restartOVNKubeNode deletes the ovnkube-node pod on each worker and
-// waits until every worker has a ready replacement.
-func restartOVNKubeNode(ctx context.Context, c client.Client, workers []string) error {
-	old, err := ovnkubeNodePods(ctx, c)
-	if err != nil {
-		return err
-	}
-	for _, node := range workers {
-		pod, ok := old[node]
-		if !ok {
-			return fmt.Errorf("no ovnkube-node pod on worker %s", node)
-		}
-		if err := c.Delete(ctx, pod); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("deleting %s on %s: %w", pod.Name, node, err)
-		}
-		ginkgo.GinkgoWriter.Printf("deleted %s on %s\n", pod.Name, node)
-	}
-
-	var waiting string
-	err = wait.PollUntilContextTimeout(ctx, 10*time.Second, ovnkubeNodeTimeout, true,
-		func(ctx context.Context) (bool, error) {
-			current, err := ovnkubeNodePods(ctx, c)
-			if err != nil {
-				return false, err
-			}
-			for _, node := range workers {
-				pod, ok := current[node]
-				if !ok || pod.UID == old[node].UID || !podReady(pod) {
-					waiting = node
-					return false, nil
-				}
-			}
-			return true, nil
-		})
-	if err != nil {
-		return fmt.Errorf("waiting for a ready ovnkube-node pod on %s: %w", waiting, err)
-	}
-	return nil
+	dir := recordNetworkState(ctx, c, workers, "network-state-probe-failed")
+	ginkgo.Fail(fmt.Sprintf("the probe failed; network state is in %s:\n%v", dir, failure))
 }
 
 // ovnkubeNodePods maps each node to its ovnkube-node pod, leaving out
