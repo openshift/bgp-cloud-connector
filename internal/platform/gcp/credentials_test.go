@@ -79,9 +79,12 @@ const serviceAccountJSON = `{
 }`
 
 // noAmbient stands in for a pod, where the default chain finds nothing
-// because the metadata server is unreachable.
+// because the metadata server is unreachable, and whose Subscription
+// names no workload identity whatever the shell running the tests has
+// exported.
 func noAmbient(t *testing.T) {
 	t.Helper()
+	withWorkloadIdentityEnv(t, nil)
 	previous := ambientCredentials
 	ambientCredentials = func(context.Context) ([]byte, error) {
 		return nil, errors.New("no ambient credentials")
