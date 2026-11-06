@@ -80,7 +80,7 @@ info "client:   ${name}"
 info ""
 
 info "permissions:"
-gcp_require_permissions "${project}" "${gcp_estate_permissions[@]}"
+gcp_require_permissions "build the GCP estate" "${project}" "${gcp_estate_permissions[@]}"
 info ""
 
 worker_network="$(gcp_worker_network)" \

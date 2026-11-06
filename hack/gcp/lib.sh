@@ -74,6 +74,23 @@ gcp_spoke_prefix()  { printf '%s-bgp-spoke' "$1"; }
 gcp_client_name()          { printf '%s-e2e-client' "$1"; }
 gcp_client_firewall_name() { printf '%s-e2e-client' "$1"; }
 
+# The project custom role a test run grants the operator, shared by
+# every cluster in the project; see gcp_ensure_custom_role. Its own id
+# rather than the bgpCloudConnector docs/gcp-authentication.md suggests,
+# so that a test run never changes a role an administrator made.
+gcp_operator_role_id() { printf 'bgpCloudConnectorE2E'; }
+
+# The service account the operator impersonates on a workload identity
+# cluster. GCP takes 6 to 30 characters, [a-z][a-z0-9-]*[a-z0-9], and
+# an infra id from a desk install is long enough to overrun that, so the
+# name is cut to fit, and never left ending on a hyphen.
+gcp_operator_sa_name() {
+    local name="bgpcc-$1"
+    name="${name:0:30}"
+    while [[ "${name}" == *- ]]; do name="${name%-}"; done
+    printf '%s' "${name}"
+}
+
 # A short fingerprint of a project id: the first 8 hex digits of its
 # sha256. CI masks the project id in job logs, which are public, and a
 # run has to say which project it leased without naming it; anyone who
@@ -228,6 +245,279 @@ gcp_estate_permissions=(
     networkconnectivity.spokes.list       # delete-cloud-router.sh, before the hub goes; the suite
 )
 
+# The permissions create-operator-identity.sh and
+# delete-operator-identity.sh need, as gcp_estate_permissions is for the
+# estate: the CI cluster profile's account in a job and yours at a desk,
+# not the operator's.
+#
+# Consumed by the scripts that source this, not here.
+# shellcheck disable=SC2034
+gcp_identity_permissions=(
+    iam.roles.create                       # gcp_ensure_custom_role, the first run in a project
+    iam.roles.get                          # gcp_ensure_custom_role, what the role holds
+    iam.roles.list                         # gcp_ensure_custom_role, whether it exists
+    iam.roles.undelete                     # gcp_ensure_custom_role, a role somebody deleted
+    iam.roles.update                       # gcp_ensure_custom_role, what the operator newly needs
+    iam.serviceAccounts.create             # gcp_ensure_service_account
+    iam.serviceAccounts.delete             # delete-operator-identity.sh
+    iam.serviceAccounts.getIamPolicy       # gcp_ensure_sa_binding, reading before writing
+    iam.serviceAccounts.list               # gcp_sa_exists
+    iam.serviceAccounts.setIamPolicy       # gcp_ensure_sa_binding, the workloadIdentityUser binding
+    resourcemanager.projects.get           # the project number the pool's principal names
+    resourcemanager.projects.getIamPolicy  # gcp_ensure_project_binding, reading before writing
+    resourcemanager.projects.setIamPolicy  # the role binding on the project, added and removed
+)
+
+# The operator's own permissions, for the role a workload identity
+# cluster grants the service account it impersonates. CCO cannot mint on
+# such a cluster, so somebody has to make that role, and in a test run
+# that is create-operator-identity.sh.
+#
+# A copy of the list in internal/platform/gcp/credentials.go, which is
+# what the operator asks CCO for. The operator writes that request only
+# once a BGPCloudConfiguration exists, after the identity has to be in
+# place, so the list cannot be read from the cluster; hack/lib-test.sh
+# fails if the two differ.
+#
+# Consumed by the scripts that source this, not here.
+# shellcheck disable=SC2034
+gcp_operator_permissions=(
+    compute.routers.get
+    compute.routers.update
+    compute.networks.updatePolicy
+    compute.networks.get
+    compute.instances.get
+    compute.instances.update
+    compute.zoneOperations.get
+    compute.regionOperations.get
+    networkconnectivity.operations.get
+    networkconnectivity.hubs.get
+    networkconnectivity.spokes.get
+    networkconnectivity.spokes.list
+    networkconnectivity.spokes.create
+    networkconnectivity.spokes.update
+    networkconnectivity.spokes.delete
+)
+
+# gcp_ensure_custom_role makes sure a project custom role exists and
+# holds at least the named permissions:
+#
+#   gcp_ensure_custom_role <project> <role id> <title> <permission>...
+#
+# The role is shared by every cluster in the project and never deleted,
+# the way ccoctl's per-project roles and CCO's minted ones are. A
+# deleted custom role keeps its place in the project's limit of 300 for
+# up to two weeks and its id for a month after that, and the CI projects
+# are shared with every other job, so a role per run would spend a limit
+# that is not ours.
+#
+# Missing permissions are added and extra ones left, with a warning.
+# Runs at different heads overlap in one project, and removing what this
+# head no longer lists would take it from a run that still needs it. A
+# role somebody deleted is undeleted, because its id cannot be created
+# again until GCP has purged it.
+gcp_ensure_custom_role() {
+    local project="$1" role="$2" title="$3"; shift 3
+    local roles id deleted found=false was_deleted=false
+    roles="$(gcp_query "list custom roles" \
+        gcloud iam roles list --project="${project}" --show-deleted \
+        --format='value(name.basename(),deleted)')" || return 1
+    while IFS=$'\t' read -r id deleted; do
+        if [[ "${id}" == "${role}" ]]; then
+            found=true
+            [[ "${deleted}" == True ]] && was_deleted=true
+        fi
+    done <<<"${roles}"
+
+    local perms
+    printf -v perms '%s,' "$@"
+    perms="${perms%,}"
+
+    if [[ "${found}" == false ]]; then
+        info "  creating role ${role}"
+        try gcloud iam roles create "${role}" --project="${project}" \
+            --title="${title}" --permissions="${perms}"
+        return
+    fi
+    if [[ "${was_deleted}" == true ]]; then
+        info "  undeleting role ${role}"
+        try gcloud iam roles undelete "${role}" --project="${project}" || return 1
+    fi
+
+    local held
+    held="$(gcp_query "read role ${role}" \
+        gcloud iam roles describe "${role}" --project="${project}" \
+        --format='value(includedPermissions)')" || return 1
+    held="$(tr ';' '\n' <<<"${held}")"
+
+    local p missing=() extra=()
+    for p in "$@"; do
+        grep -Fxq -- "${p}" <<<"${held}" || missing+=("${p}")
+    done
+    while IFS= read -r p; do
+        [[ -n "${p}" ]] || continue
+        printf '%s\n' "$@" | grep -Fxq -- "${p}" || extra+=("${p}")
+    done <<<"${held}"
+    (( ${#extra[@]} == 0 )) \
+        || warn "  role ${role} also holds ${extra[*]}; left in place"
+
+    if (( ${#missing[@]} == 0 )); then
+        info "  adopting role ${role}"
+        return 0
+    fi
+    printf -v perms '%s,' "${missing[@]}"
+    info "  adding ${missing[*]} to role ${role}"
+    try gcloud iam roles update "${role}" --project="${project}" \
+        --add-permissions="${perms%,}"
+}
+
+# The per-cluster half of a workload identity: the service account the
+# operator impersonates and its two bindings. They go when the cluster
+# does, unlike the role.
+#
+# Only the account's name is printed, never its email or a binding's
+# member: both carry the project id, and prow logs for openshift
+# repositories are public.
+
+gcp_sa_email() { printf '%s@%s.iam.gserviceaccount.com' "$1" "$2"; }
+
+gcp_sa_exists() {
+    gcp_name_exists "$(gcp_sa_email "$2" "$1")" "list service accounts" \
+        gcloud iam service-accounts list --project="$1" --format='value(email)'
+}
+
+gcp_ensure_service_account() {
+    local project="$1" name="$2" rc=0
+    gcp_sa_exists "${project}" "${name}" || rc=$?
+    case "${rc}" in
+        0) info "  adopting service account ${name}" ;;
+        1) info "  creating service account ${name}"
+           try gcloud iam service-accounts create "${name}" --project="${project}" \
+               --display-name="${name}" ;;
+        *) return 1 ;;
+    esac
+}
+
+gcp_delete_service_account() {
+    local project="$1" name="$2" rc=0
+    gcp_sa_exists "${project}" "${name}" || rc=$?
+    case "${rc}" in
+        0) info "  deleting service account ${name}"
+           try gcloud iam service-accounts delete "$(gcp_sa_email "${name}" "${project}")" \
+               --project="${project}" --quiet ;;
+        1) info "  service account ${name} already gone" ;;
+        *) return 1 ;;
+    esac
+}
+
+# Whether a policy binds this member to this role: 0 yes, 1 no, 2 the
+# policy could not be read. The policy comes from the command given,
+# flattened to "<role>\t<member>" lines and compared whole.
+_gcp_policy_binds() {
+    local role="$1" member="$2"; shift 2
+    local out
+    out="$(gcp_query "read an IAM policy" "$@" \
+        --flatten='bindings[].members' \
+        --format='value(bindings.role,bindings.members)')" || return 2
+    grep -Fxq -- "${role}"$'\t'"${member}" <<<"${out}"
+}
+
+# A policy write, retried only for what clears on its own: another
+# writer changing the policy underneath this one -- other runs and
+# ccoctl write the same project policy -- and a service account created
+# moments ago that IAM cannot see yet. A denial fails at once.
+_gcp_policy_write() {
+    local attempt err rc
+    err="$(mktemp)"
+    for attempt in 1 2 3 4 5 6; do
+        rc=0
+        try "$@" 2>"${err}" || rc=$?
+        if (( rc == 0 )); then
+            rm -f "${err}"
+            return 0
+        fi
+        if ! grep -Eq 'concurrent policy changes|ABORTED|does not exist' "${err}" || (( attempt == 6 )); then
+            local line
+            while IFS= read -r line; do warn "  ${line}"; done <"${err}"
+            rm -f "${err}"
+            return 1
+        fi
+        sleep "${RETRY_INTERVAL_SECS:-10}"
+    done
+}
+
+# Binds one member to one role, or removes the binding, on whichever
+# policy the read and write commands name:
+#
+#   _gcp_binding ensure|remove <what> <role> <member> <read...> -- <write...>
+#
+# A binding already in the state asked for is left alone. For a removal
+# that matters beyond tidiness: gcloud refuses to remove a binding that
+# is not in the policy.
+_gcp_binding() {
+    local mode="$1" what="$2" role="$3" member="$4" rc=0; shift 4
+    local -a read=()
+    while [[ "$1" != -- ]]; do read+=("$1"); shift; done; shift
+    _gcp_policy_binds "${role}" "${member}" "${read[@]}" || rc=$?
+    case "${mode}:${rc}" in
+        ensure:0) info "  adopting ${what}" ;;
+        ensure:1) info "  binding ${what}"; _gcp_policy_write "$@" ;;
+        remove:0) info "  removing ${what}"; _gcp_policy_write "$@" ;;
+        remove:1) info "  ${what} already gone" ;;
+        *) return 1 ;;
+    esac
+}
+
+# --condition=None because a project policy holding conditional bindings
+# makes gcloud ask which condition is meant, and nothing here can answer.
+gcp_ensure_project_binding() {
+    local project="$1" role="$2" member="$3"
+    _gcp_binding ensure "${role##*/} on the project" "${role}" "${member}" \
+        gcloud projects get-iam-policy "${project}" -- \
+        gcloud projects add-iam-policy-binding "${project}" \
+        --member="${member}" --role="${role}" --condition=None
+}
+
+gcp_remove_project_binding() {
+    local project="$1" role="$2" member="$3"
+    _gcp_binding remove "${role##*/} on the project" "${role}" "${member}" \
+        gcloud projects get-iam-policy "${project}" -- \
+        gcloud projects remove-iam-policy-binding "${project}" \
+        --member="${member}" --role="${role}" --condition=None
+}
+
+# The account has to exist and its policy has to be readable. A
+# rehearsal never created it, so it says what it would bind and stops
+# there. A real run may come straight from creating it, and IAM is
+# eventually consistent: in openshift-gce-devel-ci-3 the list did not
+# show an account created moments before, and elsewhere a listed
+# account has answered NOT_FOUND to a read of its own policy. So a real
+# run trusts neither and waits for the policy itself to answer, for up
+# to GCP_IAM_WAIT_SECS.
+_gcp_sa_policy_readable() {
+    gcloud iam service-accounts get-iam-policy "$1" --project="$2" --format=none >/dev/null 2>&1
+}
+
+gcp_ensure_sa_binding() {
+    local project="$1" email="$2" role="$3" member="$4" rc=0
+    if [[ "${dry_run}" == true ]]; then
+        gcp_sa_exists "${project}" "${email%%@*}" || rc=$?
+        case "${rc}" in
+            0) ;;
+            1) info "  would bind ${role##*/} on ${email%%@*}"; return 0 ;;
+            *) return 1 ;;
+        esac
+    else
+        wait_until "${GCP_IAM_WAIT_SECS:-120}" "${RETRY_INTERVAL_SECS:-5}" \
+            "IAM to see service account ${email%%@*}" \
+            _gcp_sa_policy_readable "${email}" "${project}" || return 1
+    fi
+    _gcp_binding ensure "${role##*/} on ${email%%@*}" "${role}" "${member}" \
+        gcloud iam service-accounts get-iam-policy "${email}" --project="${project}" -- \
+        gcloud iam service-accounts add-iam-policy-binding "${email}" --project="${project}" \
+        --member="${member}" --role="${role}"
+}
+
 # gcp_permissions_held prints which of the named permissions this
 # credential actually holds on the project, one per line.
 #
@@ -275,14 +565,18 @@ gcp_permissions_held() {
 }
 
 # gcp_require_permissions says what this credential can and cannot do,
-# and stops before anything is built unless it can do all of it.
+# and stops before anything is built unless it can do all of it:
+#
+#   gcp_require_permissions <purpose> <project> <permission>...
+#
+# The purpose finishes "this credential cannot ..." in the refusal.
 #
 # The whole list every time, and reported whether or not it passes. A
 # role learned one PERMISSION_DENIED per CI run costs a cluster install
 # per permission, and the run that found networkconnectivity.hubs.create
 # missing could say nothing about whether anything else was.
 gcp_require_permissions() {
-    local project="$1"; shift
+    local purpose="$1" project="$2"; shift 2
 
     local held
     held="$(gcp_permissions_held "${project}" "$@")" \
@@ -300,7 +594,7 @@ gcp_require_permissions() {
     done
 
     (( ${#missing[@]} == 0 )) || die \
-        "this credential cannot build the GCP estate" \
+        "this credential cannot ${purpose}" \
         "Denied: ${missing[*]}" \
         "Nothing was created."
 }
