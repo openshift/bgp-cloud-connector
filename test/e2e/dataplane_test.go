@@ -228,3 +228,43 @@ func TestNetexecPodsSkipsTerminatingPods(t *testing.T) {
 		})
 	}
 }
+
+// OSD's infra nodes carry the worker role and a NoSchedule taint for
+// it, so the DaemonSet never puts a pod there. Counting them as workers
+// would leave the data-plane check waiting for a pod that cannot exist.
+func TestNetexecPodsLeavesOutInfraNodes(t *testing.T) {
+	worker := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+		Name:   "worker-a",
+		Labels: map[string]string{WorkerRoleLabel: ""},
+	}}
+	infra := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "infra-a",
+			Labels: map[string]string{WorkerRoleLabel: "", InfraRoleLabel: ""},
+		},
+		Spec: corev1.NodeSpec{Taints: []corev1.Taint{{Key: InfraRoleLabel, Effect: corev1.TaintEffectNoSchedule}}},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "netexec-a",
+			Namespace: "prod",
+			Labels:    map[string]string{"app": netexecName},
+			Annotations: map[string]string{"k8s.ovn.org/pod-networks": `{"prod/cluster-udn-prod":` +
+				`{"ip_addresses":["10.100.0.3/16"],"role":"primary"}}`},
+		},
+		Spec:   corev1.PodSpec{NodeName: worker.Name},
+		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
+	}
+	c := fake.NewClientBuilder().WithScheme(clientgoscheme.Scheme).WithObjects(worker, infra, pod).Build()
+
+	nodes, addresses, err := NetexecPods(context.Background(), c, "prod")
+	if err != nil {
+		t.Fatalf("NetexecPods: %v", err)
+	}
+	if len(nodes) != 1 || nodes[0].Name != worker.Name {
+		t.Errorf("nodes = %v, want only %s", nodes, worker.Name)
+	}
+	if _, ok := addresses[infra.Name]; ok {
+		t.Errorf("an address was reported for infra node %s", infra.Name)
+	}
+}
