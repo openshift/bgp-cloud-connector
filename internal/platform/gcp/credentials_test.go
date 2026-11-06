@@ -117,9 +117,11 @@ func TestResolveCredentials_CreatesRequestAndWaits(t *testing.T) {
 	}
 }
 
-// TestResolveCredentials_RequestsOnlyThePermissionsItUses guards against a
-// request quietly widening: every permission asked for should be one the
-// operator actually calls.
+// The permission list is the operator's whole cloud surface, so it is
+// asserted exactly, as on Azure. The request is built from the same
+// slice the operator keeps, so checking one against the other cannot
+// fail; a literal list here means a widened request changes this test
+// too, in the same diff a reviewer reads.
 func TestResolveCredentials_RequestsOnlyThePermissionsItUses(t *testing.T) {
 	noAmbient(t)
 	c := fake.NewClientBuilder().WithScheme(credentialsTestScheme(t)).Build()
@@ -133,13 +135,27 @@ func TestResolveCredentials_RequestsOnlyThePermissionsItUses(t *testing.T) {
 		t.Fatalf("the request was not raised: %v", err)
 	}
 	got, _, _ := unstructured.NestedStringSlice(cr.Object, "spec", "providerSpec", "permissions")
-	if len(got) == 0 {
-		t.Fatal("the request asked for no permissions")
+	want := []string{
+		"compute.routers.get",
+		"compute.routers.update",
+		"compute.networks.updatePolicy",
+		"compute.networks.get",
+		"compute.instances.get",
+		"compute.instances.update",
+		"compute.zoneOperations.get",
+		"compute.regionOperations.get",
+		"networkconnectivity.operations.get",
+		"networkconnectivity.hubs.get",
+		"networkconnectivity.spokes.get",
+		"networkconnectivity.spokes.list",
+		"networkconnectivity.spokes.create",
+		"networkconnectivity.spokes.update",
+		"networkconnectivity.spokes.delete",
 	}
-	for _, p := range got {
-		if !slices.Contains(permissions, p) {
-			t.Errorf("requested %q, which is not in the operator's own list", p)
-		}
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("permissions:\n got  %v\n want %v", got, want)
 	}
 }
 
