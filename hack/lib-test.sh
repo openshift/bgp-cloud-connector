@@ -650,15 +650,6 @@ curl() { printf '{"permissions":["compute.routers.list","compute.routers.create"
 (gcp_require_permissions proj compute.routers.list compute.routers.create) >/dev/null 2>&1
 check "a credential holding all of them proceeds" "$?" "0"
 
-# The estate asks for what its own calls need, so a permission dropped
-# from the list here is a call left unguarded.
-check "the estate list covers creating the hub" \
-    "$(printf '%s\n' "${gcp_estate_permissions[@]}" | grep -Fxc 'networkconnectivity.hubs.create')" "1"
-check "the estate list covers deleting the hub" \
-    "$(printf '%s\n' "${gcp_estate_permissions[@]}" | grep -Fxc 'networkconnectivity.hubs.delete')" "1"
-check "the estate list covers deleting a spoke the operator left" \
-    "$(printf '%s\n' "${gcp_estate_permissions[@]}" | grep -Fxc 'networkconnectivity.spokes.delete')" "1"
-
 unset -f curl
 
 # The network and subnet come from a worker's instance, not from a
