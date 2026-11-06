@@ -145,9 +145,18 @@ func TestResolveCredentials_RequestsOnlyThePermissionsItUses(t *testing.T) {
 
 // TestResolveCredentials_UsesTheMintedServiceAccount pins that a secret
 // written by the cloud credential operator is used in preference to
-// anything else.
+// anything else. The ambient credential is there and would work, as the
+// node's service account does on a GCP pod, so a lookup that reached it
+// first would pass unnoticed if the test only checked for a result.
 func TestResolveCredentials_UsesTheMintedServiceAccount(t *testing.T) {
-	noAmbient(t)
+	withWorkloadIdentityEnv(t, nil)
+	ambientCalled := false
+	previous := ambientCredentials
+	ambientCredentials = func(context.Context) ([]byte, error) {
+		ambientCalled = true
+		return []byte(serviceAccountJSON), nil
+	}
+	t.Cleanup(func() { ambientCredentials = previous })
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: CredentialsSecretName, Namespace: testNamespace},
 		Data:       map[string][]byte{secretServiceAccountKey: []byte(serviceAccountJSON)},
@@ -160,6 +169,9 @@ func TestResolveCredentials_UsesTheMintedServiceAccount(t *testing.T) {
 	}
 	if len(got) == 0 {
 		t.Fatal("no client options returned")
+	}
+	if ambientCalled {
+		t.Error("the ambient credential was consulted although the secret exists")
 	}
 }
 
