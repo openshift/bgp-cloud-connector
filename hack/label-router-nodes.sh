@@ -14,6 +14,9 @@
 #
 # Workers only. The router nodes are where pod traffic lands, and
 # peering from a master would put BGP on a node that carries none.
+# Not OSD's infra nodes either: they carry the worker role, take no
+# pods but their own, and OSD's admission webhook refuses a label on
+# them.
 #
 # NON_ROUTER_WORKERS=<n> leaves the last n workers, in name order,
 # unlabelled, and takes the label off them if a previous run put it
@@ -45,7 +48,7 @@ done
 require_cmd oc
 require_cluster
 
-nodes="$(oc get nodes -l node-role.kubernetes.io/worker -o name)" \
+nodes="$(oc get nodes -l 'node-role.kubernetes.io/worker,!node-role.kubernetes.io/infra' -o name)" \
     || die "cannot list worker nodes"
 [[ -n "${nodes}" ]] || die "no nodes with the worker role" \
     "The operator peers from workers; a cluster with none has nothing to label."
