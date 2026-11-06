@@ -123,6 +123,9 @@ var (
 	FRRConfigurationGVK = schema.GroupVersionKind{
 		Group: "frrk8s.metallb.io", Version: "v1beta1", Kind: "FRRConfiguration",
 	}
+	BGPSessionStateGVK = schema.GroupVersionKind{
+		Group: "frrk8s.metallb.io", Version: "v1beta1", Kind: "BGPSessionState",
+	}
 	ClusterUDNGVK = schema.GroupVersionKind{
 		Group: "k8s.ovn.org", Version: "v1", Kind: "ClusterUserDefinedNetwork",
 	}

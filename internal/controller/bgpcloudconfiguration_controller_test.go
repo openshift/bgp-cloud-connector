@@ -106,9 +106,10 @@ func TestConfigReconcile_FullReconcile(t *testing.T) {
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
+	node := newRouterNode("node-1", "10.0.1.10", "", "")
 
 	c := fake.NewClientBuilder().WithScheme(s).
-		WithObjects(config, network, frrNS, frrPod).
+		WithObjects(config, network, frrNS, frrPod, node).
 		WithStatusSubresource(config).
 		Build()
 
@@ -126,8 +127,8 @@ func TestConfigReconcile_FullReconcile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconcile error: %v", err)
 	}
-	if result.RequeueAfter != 5*time.Minute {
-		t.Errorf("expected 5m resync requeue, got %v", result.RequeueAfter)
+	if result.RequeueAfter != 30*time.Second {
+		t.Errorf("expected 30s BGP health resync, got %v", result.RequeueAfter)
 	}
 
 	updated := &networkingapi.BGPCloudConfiguration{}
@@ -138,9 +139,9 @@ func TestConfigReconcile_FullReconcile(t *testing.T) {
 		t.Errorf("expected phase Ready, got %s", updated.Status.Phase)
 	}
 
-	// 3 per-step conditions + the 3 aggregate summary conditions.
-	if len(updated.Status.Conditions) != 6 {
-		t.Errorf("expected 6 conditions, got %d", len(updated.Status.Conditions))
+	// 4 per-step/health conditions + the 3 aggregate summary conditions.
+	if len(updated.Status.Conditions) != 8 {
+		t.Errorf("expected 8 conditions, got %d", len(updated.Status.Conditions))
 	}
 	assertSummary(t, updated.Status.Conditions, metav1.ConditionTrue, metav1.ConditionFalse, metav1.ConditionFalse)
 
@@ -423,8 +424,8 @@ func TestConfigReconcile_AWSFullReconcile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconcile error: %v", err)
 	}
-	if result.RequeueAfter != 5*time.Minute {
-		t.Errorf("expected 5m resync, got %v", result.RequeueAfter)
+	if result.RequeueAfter != 30*time.Second {
+		t.Errorf("expected 30s BGP health resync, got %v", result.RequeueAfter)
 	}
 	if !mock.discoverCalled {
 		t.Fatal("expected DiscoverEndpoints to be called")
@@ -439,8 +440,8 @@ func TestConfigReconcile_AWSFullReconcile(t *testing.T) {
 		t.Errorf("expected Ready, got %s", updated.Status.Phase)
 	}
 	// 6 per-step conditions + the 3 aggregate summary conditions.
-	if len(updated.Status.Conditions) != 9 {
-		t.Errorf("expected 9 conditions, got %d", len(updated.Status.Conditions))
+	if len(updated.Status.Conditions) != 10 {
+		t.Errorf("expected 10 conditions, got %d", len(updated.Status.Conditions))
 	}
 	assertSummary(t, updated.Status.Conditions, metav1.ConditionTrue, metav1.ConditionFalse, metav1.ConditionFalse)
 	// The discovered plan is reported cloud-neutrally: what FRR was told to
@@ -527,35 +528,48 @@ func TestConfigReconcile_RepeatedReconcile_DoesNotRewriteFRRConfiguration(t *tes
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "bgp-cc-1", Namespace: FRRNamespace}, frrConfig); err != nil {
 		t.Fatalf("FRRConfiguration not created from discovery: %v", err)
 	}
-	resourceVersionAfterFirstPass := frrConfig.GetResourceVersion()
 	discoverCallsAfterFirstPass := mock.discoverCallCount
 	reconcileNodesCallsAfterFirstPass := mock.reconcileNodesCallCount
 
-	// Reconcile again with no external state changed. This is the scenario
-	// that used to loop forever: the FRRConfiguration watch re-enqueues this
-	// same request every time createOrUpdate rewrites the object.
+	// Simulate drift of a managed dependent object. A normal reconcile must
+	// repair it even while the BGPCloudConfiguration is already Ready.
+	if err := c.Delete(context.Background(), frrConfig); err != nil {
+		t.Fatalf("delete FRRConfiguration to simulate drift: %v", err)
+	}
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
-		t.Fatalf("second reconcile error: %v", err)
+		t.Fatalf("reconcile after FRRConfiguration drift: %v", err)
 	}
 
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "bgp-cc-1", Namespace: FRRNamespace}, frrConfig); err != nil {
-		t.Fatalf("get FRRConfiguration after repeat reconcile: %v", err)
+		t.Fatalf("get repaired FRRConfiguration: %v", err)
 	}
-	if frrConfig.GetResourceVersion() != resourceVersionAfterFirstPass {
-		t.Fatalf("expected no rewrite of FRRConfiguration on repeated reconcile, resourceVersion changed from %q to %q",
-			resourceVersionAfterFirstPass, frrConfig.GetResourceVersion())
-	}
-
-	// AWS discovery and node reconciliation are expected to run on every
-	// pass (they are not gated by equality) — only the object write should
-	// stop. Assert this explicitly so the test's intent can't be misread.
-	if mock.discoverCallCount != discoverCallsAfterFirstPass+1 {
-		t.Errorf("expected DiscoverEndpoints to still run every reconcile, got %d calls after repeat (was %d)",
+	// A repeated reconcile repairs managed FRR resources without rebuilding the
+	// provider plan while the cloud reconciliation deadline is still fresh.
+	if mock.discoverCallCount != discoverCallsAfterFirstPass {
+		t.Errorf("expected DiscoverEndpoints to remain throttled, got %d calls after repeat (was %d)",
 			mock.discoverCallCount, discoverCallsAfterFirstPass)
 	}
-	if mock.reconcileNodesCallCount != reconcileNodesCallsAfterFirstPass+1 {
-		t.Errorf("expected ReconcileNodes to still run every reconcile, got %d calls after repeat (was %d)",
+	if mock.reconcileNodesCallCount != reconcileNodesCallsAfterFirstPass {
+		t.Errorf("expected ReconcileNodes not to run for unchanged inventory, got %d calls after repeat (was %d)",
 			mock.reconcileNodesCallCount, reconcileNodesCallsAfterFirstPass)
+	}
+
+	// A router inventory change bypasses the cloud deadline so provider-side
+	// settings converge promptly after a node event.
+	updatedNode := &corev1.Node{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "node-1"}, updatedNode); err != nil {
+		t.Fatalf("get router node: %v", err)
+	}
+	updatedNode.Status.Addresses = []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.1.99"}}
+	if err := c.Status().Update(context.Background(), updatedNode); err != nil {
+		t.Fatalf("update router node: %v", err)
+	}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile after router inventory change: %v", err)
+	}
+	if mock.reconcileNodesCallCount != reconcileNodesCallsAfterFirstPass+1 {
+		t.Errorf("expected inventory change to reconcile nodes, got %d calls (want %d)",
+			mock.reconcileNodesCallCount, reconcileNodesCallsAfterFirstPass+1)
 	}
 }
 
@@ -1257,8 +1271,7 @@ func TestConfigReconcile_ManualSkipsPlatform(t *testing.T) {
 	_ = c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, updated)
 	for _, cond := range updated.Status.Conditions {
 		if cond.Type == networkingapi.ConditionCloudEndpointsDiscovered ||
-			cond.Type == networkingapi.ConditionCloudResourcesReconciled ||
-			cond.Type == networkingapi.ConditionCompleteNodeInventory {
+			cond.Type == networkingapi.ConditionCloudResourcesReconciled {
 			t.Errorf("Manual must not report %s", cond.Type)
 		}
 	}
@@ -1314,8 +1327,7 @@ func TestConfigReconcile_ManualClearsStaleCloudStatus(t *testing.T) {
 	}
 	for _, cond := range updated.Status.Conditions {
 		if cond.Type == networkingapi.ConditionCloudEndpointsDiscovered ||
-			cond.Type == networkingapi.ConditionCloudResourcesReconciled ||
-			cond.Type == networkingapi.ConditionCompleteNodeInventory {
+			cond.Type == networkingapi.ConditionCloudResourcesReconciled {
 			t.Errorf("expected stale %s removed", cond.Type)
 		}
 	}
