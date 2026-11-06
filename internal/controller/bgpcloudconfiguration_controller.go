@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -26,6 +27,7 @@ import (
 	"unicode/utf8"
 
 	"reflect"
+	"sort"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -261,6 +263,12 @@ func (r *BGPCloudConfigurationReconciler) Reconcile(ctx context.Context, req ctr
 			ReasonCheckFailed, fmt.Sprintf("failed to list router nodes: %v", err))
 	}
 	readyPhase := len(incompleteNodes) == 0
+	inventoryHash := ""
+	if cloudNodeMetadata {
+		inventoryHash = routerInventoryHash(routerNodes, incompleteNodes)
+	}
+	cloudReconcileDue := !wasReady || readyCloudResourcesDue(config) ||
+		(cloudNodeMetadata && config.Status.LastCloudReconciledInventoryHash != inventoryHash)
 	if readyPhase {
 		meta.SetStatusCondition(&config.Status.Conditions, metav1.Condition{
 			Type:               networkingapi.ConditionCompleteNodeInventory,
@@ -284,6 +292,13 @@ func (r *BGPCloudConfigurationReconciler) Reconcile(ctx context.Context, req ctr
 		})
 	}
 
+	previousPeerGroups := config.Status.PeerGroups
+	// Refresh health from the last known peering plan before cloud discovery.
+	// This keeps the health snapshot independent from provider errors and from
+	// the cloud reconciliation deadline.
+	if _, err := r.observeBGPSessionHealth(ctx, config); err != nil {
+		log.Info("BGP session health observation failed; continuing reconciliation", "error", err)
+	}
 	config.Status.PeerGroups = nil
 	if config.Spec.Platform == networkingapi.PlatformManual {
 		meta.RemoveStatusCondition(&config.Status.Conditions, networkingapi.ConditionCloudEndpointsDiscovered)
@@ -294,75 +309,80 @@ func (r *BGPCloudConfigurationReconciler) Reconcile(ctx context.Context, req ctr
 	var cloudPlatform platform.CloudPlatform
 	var discoveryResult *platform.DiscoveryResult
 	if config.Spec.Platform != networkingapi.PlatformManual {
-		buildPlatform := r.PlatformBuilder
-		if buildPlatform == nil {
-			buildPlatform = defaultPlatformBuilder
-		}
-		p, err := buildPlatform(ctx, r.Client, config)
-		if err != nil {
-			// We will not reach Phase 5, so drop stale cloud-resource conditions from
-			// a previous reconcile; leaving True here would contradict the degraded
-			// cloud condition. This path returns before completeReconcile, so the
-			// NodesIncomplete timer is unaffected.
-			meta.RemoveStatusCondition(&config.Status.Conditions, networkingapi.ConditionCompleteNodeInventory)
-			meta.RemoveStatusCondition(&config.Status.Conditions, networkingapi.ConditionCloudResourcesReconciled)
-			// Asking the cluster to mint credentials and waiting for it
-			// is not a fault, and is reported like Phase 2's wait rather
-			// than through setDegraded.
-			if errors.Is(err, platform.ErrCredentialsPending) {
-				if err := r.patchConfigStatus(ctx, config, *baselineStatus, func(c *networkingapi.BGPCloudConfiguration) {
-					c.Status.ObservedGeneration = c.Generation
-					setSummaryConditions(&c.Status.Phase, &c.Status.Conditions, c.Generation,
-						networkingapi.PhaseConfiguring, ReasonWaitingForCloudCredentials, capitalise(err.Error()))
-					meta.SetStatusCondition(&c.Status.Conditions, metav1.Condition{
-						Type:   networkingapi.ConditionCloudEndpointsDiscovered,
-						Status: metav1.ConditionFalse,
-						Reason: ReasonWaitingForCloudCredentials,
-						// What the resolver said, not a fixed sentence:
-						// on a cluster that federates this wait does not
-						// end by itself, and this is the only place that
-						// is reported.
-						Message:            capitalise(err.Error()),
-						ObservedGeneration: c.Generation,
-					})
-				}); err != nil {
-					return ctrl.Result{}, err
+		if wasReady && !cloudReconcileDue {
+			config.Status.PeerGroups = previousPeerGroups
+			discoveryResult = peerGroupsFromStatus(previousPeerGroups)
+		} else {
+			buildPlatform := r.PlatformBuilder
+			if buildPlatform == nil {
+				buildPlatform = defaultPlatformBuilder
+			}
+			p, err := buildPlatform(ctx, r.Client, config)
+			if err != nil {
+				// We will not reach Phase 5, so drop stale cloud-resource conditions from
+				// a previous reconcile; leaving True here would contradict the degraded
+				// cloud condition. This path returns before completeReconcile, so the
+				// NodesIncomplete timer is unaffected.
+				meta.RemoveStatusCondition(&config.Status.Conditions, networkingapi.ConditionCompleteNodeInventory)
+				meta.RemoveStatusCondition(&config.Status.Conditions, networkingapi.ConditionCloudResourcesReconciled)
+				// Asking the cluster to mint credentials and waiting for it
+				// is not a fault, and is reported like Phase 2's wait rather
+				// than through setDegraded.
+				if errors.Is(err, platform.ErrCredentialsPending) {
+					if err := r.patchConfigStatus(ctx, config, *baselineStatus, func(c *networkingapi.BGPCloudConfiguration) {
+						c.Status.ObservedGeneration = c.Generation
+						setSummaryConditions(&c.Status.Phase, &c.Status.Conditions, c.Generation,
+							networkingapi.PhaseConfiguring, ReasonWaitingForCloudCredentials, capitalise(err.Error()))
+						meta.SetStatusCondition(&c.Status.Conditions, metav1.Condition{
+							Type:   networkingapi.ConditionCloudEndpointsDiscovered,
+							Status: metav1.ConditionFalse,
+							Reason: ReasonWaitingForCloudCredentials,
+							// What the resolver said, not a fixed sentence:
+							// on a cluster that federates this wait does not
+							// end by itself, and this is the only place that
+							// is reported.
+							Message:            capitalise(err.Error()),
+							ObservedGeneration: c.Generation,
+						})
+					}); err != nil {
+						return ctrl.Result{}, err
+					}
+					log.Info("cloud credentials not available yet, requeueing")
+					return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 				}
-				log.Info("cloud credentials not available yet, requeueing")
-				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
-			}
-			var credErr *platform.CredentialError
-			if errors.As(err, &credErr) {
+				var credErr *platform.CredentialError
+				if errors.As(err, &credErr) {
+					return r.setDegraded(ctx, config, *baselineStatus, networkingapi.ConditionCloudEndpointsDiscovered,
+						ReasonCloudCredentialsInvalid, credErr.Error())
+				}
 				return r.setDegraded(ctx, config, *baselineStatus, networkingapi.ConditionCloudEndpointsDiscovered,
-					ReasonCloudCredentialsInvalid, credErr.Error())
+					ReasonCloudDiscoveryFailed, fmt.Sprintf("failed to build the cloud platform: %v", err))
 			}
-			return r.setDegraded(ctx, config, *baselineStatus, networkingapi.ConditionCloudEndpointsDiscovered,
-				ReasonCloudDiscoveryFailed, fmt.Sprintf("failed to build the cloud platform: %v", err))
-		}
-		cloudPlatform = p
+			cloudPlatform = p
 
-		// Phase 3: Discover the cloud's BGP endpoints
-		log.Info("Phase 3: discovering cloud BGP endpoints")
-		discoveryResult, err = cloudPlatform.DiscoverEndpoints(ctx)
-		if err != nil {
-			meta.RemoveStatusCondition(&config.Status.Conditions, networkingapi.ConditionCompleteNodeInventory)
-			meta.RemoveStatusCondition(&config.Status.Conditions, networkingapi.ConditionCloudResourcesReconciled)
-			var notFoundErr *awsplatform.RouteServerNotFoundError
-			if errors.As(err, &notFoundErr) {
+			// Phase 3: Discover the cloud's BGP endpoints
+			log.Info("Phase 3: discovering cloud BGP endpoints")
+			discoveryResult, err = cloudPlatform.DiscoverEndpoints(ctx)
+			if err != nil {
+				meta.RemoveStatusCondition(&config.Status.Conditions, networkingapi.ConditionCompleteNodeInventory)
+				meta.RemoveStatusCondition(&config.Status.Conditions, networkingapi.ConditionCloudResourcesReconciled)
+				var notFoundErr *awsplatform.RouteServerNotFoundError
+				if errors.As(err, &notFoundErr) {
+					return r.setDegraded(ctx, config, *baselineStatus, networkingapi.ConditionCloudEndpointsDiscovered,
+						ReasonRouteServerNotFound, notFoundErr.Error())
+				}
 				return r.setDegraded(ctx, config, *baselineStatus, networkingapi.ConditionCloudEndpointsDiscovered,
-					ReasonRouteServerNotFound, notFoundErr.Error())
+					ReasonCloudDiscoveryFailed, fmt.Sprintf("failed to discover cloud BGP endpoints: %v", err))
 			}
-			return r.setDegraded(ctx, config, *baselineStatus, networkingapi.ConditionCloudEndpointsDiscovered,
-				ReasonCloudDiscoveryFailed, fmt.Sprintf("failed to discover cloud BGP endpoints: %v", err))
+			config.Status.PeerGroups = peerGroupsToStatus(discoveryResult.PeerGroups)
+			meta.SetStatusCondition(&config.Status.Conditions, metav1.Condition{
+				Type:               networkingapi.ConditionCloudEndpointsDiscovered,
+				Status:             metav1.ConditionTrue,
+				Reason:             ReasonDiscovered,
+				Message:            fmt.Sprintf("Discovered %d peer group(s)", len(discoveryResult.PeerGroups)),
+				ObservedGeneration: config.Generation,
+			})
 		}
-		config.Status.PeerGroups = peerGroupsToStatus(discoveryResult.PeerGroups)
-		meta.SetStatusCondition(&config.Status.Conditions, metav1.Condition{
-			Type:               networkingapi.ConditionCloudEndpointsDiscovered,
-			Status:             metav1.ConditionTrue,
-			Reason:             ReasonDiscovered,
-			Message:            fmt.Sprintf("Discovered %d peer group(s)", len(discoveryResult.PeerGroups)),
-			ObservedGeneration: config.Generation,
-		})
 	}
 
 	// Phase 4: Apply FRR Configuration per peer group
@@ -386,12 +406,8 @@ func (r *BGPCloudConfigurationReconciler) Reconcile(ctx context.Context, req ctr
 		ObservedGeneration: config.Generation,
 	})
 
-	if _, err := r.observeBGPSessionHealth(ctx, config); err != nil {
-		log.Info("BGP session health observation failed; continuing reconciliation", "error", err)
-	}
-
 	// Phase 5: Reconcile cloud resources (if configured)
-	if cloudPlatform != nil && (!wasReady || readyCloudResourcesDue(config)) {
+	if cloudPlatform != nil && cloudReconcileDue {
 		log.Info("Phase 5: reconciling cloud resources")
 		incomplete := incompleteNodes
 		if readyPhase {
@@ -419,6 +435,7 @@ func (r *BGPCloudConfigurationReconciler) Reconcile(ctx context.Context, req ctr
 		}
 		now := metav1.Now()
 		config.Status.LastCloudReconcileTime = &now
+		config.Status.LastCloudReconciledInventoryHash = inventoryHash
 		if readyPhase {
 			meta.SetStatusCondition(&config.Status.Conditions, metav1.Condition{
 				Type:               networkingapi.ConditionCloudResourcesReconciled,
@@ -495,7 +512,7 @@ func (r *BGPCloudConfigurationReconciler) completeReconcile(
 	if !readyPhase {
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
-	if sessionCondition := meta.FindStatusCondition(config.Status.Conditions, networkingapi.ConditionBGPSessionsEstablished); sessionCondition != nil && sessionCondition.Status != metav1.ConditionTrue {
+	if sessionCondition := meta.FindStatusCondition(config.Status.Conditions, networkingapi.ConditionBGPSessionsEstablished); sessionCondition != nil {
 		// BGPSessionState is owned by frr-k8s and is not watched directly: its
 		// CRD is created by the FRR operator after this controller starts. Keep
 		// the health snapshot fresh while sessions converge without making the
@@ -503,6 +520,30 @@ func (r *BGPCloudConfigurationReconciler) completeReconcile(
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+}
+
+func peerGroupsFromStatus(groups []networkingapi.PeerGroupStatus) *platform.DiscoveryResult {
+	result := &platform.DiscoveryResult{PeerGroups: make([]platform.PeerGroup, 0, len(groups))}
+	for _, group := range groups {
+		converted := platform.PeerGroup{Key: group.Key, NodeSelector: group.NodeSelector, RawFRRConfig: group.RawFRRConfig}
+		for _, neighbor := range group.Neighbors {
+			converted.Neighbors = append(converted.Neighbors, platform.DiscoveredNeighbor{
+				Address: neighbor.Address, ASN: neighbor.RemoteASN, EBGPMultiHop: neighbor.EBGPMultiHop,
+			})
+		}
+		result.PeerGroups = append(result.PeerGroups, converted)
+	}
+	return result
+}
+
+func routerInventoryHash(complete, incomplete []platform.RouterNode) string {
+	nodes := append(append([]platform.RouterNode(nil), complete...), incomplete...)
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Name < nodes[j].Name })
+	hash := sha256.New()
+	for _, node := range nodes {
+		_, _ = fmt.Fprintf(hash, "%s\x00%s\x00%s\x00%s\x00", node.Name, node.PrivateIP, node.Zone, node.ProviderID)
+	}
+	return fmt.Sprintf("%x", hash.Sum(nil))
 }
 
 // peerGroupsToStatus reports the peering plan, which is what FRR was told to
@@ -516,6 +557,7 @@ func peerGroupsToStatus(groups []platform.PeerGroup) []networkingapi.PeerGroupSt
 		pg := networkingapi.PeerGroupStatus{
 			Key:          g.Key,
 			NodeSelector: g.NodeSelector,
+			RawFRRConfig: g.RawFRRConfig,
 		}
 		for _, n := range g.Neighbors {
 			pg.Neighbors = append(pg.Neighbors, networkingapi.BGPNeighbor{

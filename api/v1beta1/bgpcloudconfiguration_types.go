@@ -226,6 +226,10 @@ type PeerGroupStatus struct {
 	// +listType=atomic
 	// +kubebuilder:validation:MaxItems=8
 	Neighbors []BGPNeighbor `json:"neighbors,omitempty"`
+	// rawFRRConfig preserves provider-specific FRR directives while the cached
+	// peering plan is reused between cloud reconciliations.
+	// +optional
+	RawFRRConfig string `json:"rawFRRConfig,omitempty"`
 }
 
 // BGPConfig holds the BGP speaker configuration and optional peer groups.
@@ -304,6 +308,10 @@ type BGPCloudConfigurationStatus struct {
 	// provider-side cloud resources by the Ready path.
 	// +optional
 	LastCloudReconcileTime *metav1.Time `json:"lastCloudReconcileTime,omitempty"`
+	// LastCloudReconciledInventoryHash identifies the router inventory included
+	// in the last successful provider-side reconciliation.
+	// +optional
+	LastCloudReconciledInventoryHash string `json:"lastCloudReconciledInventoryHash,omitempty"`
 	// FRRProviderOwnership records whether this controller may revert the FRR
 	// provider patch on Network/cluster additionalRoutingCapabilities.providers.
 	// Empty until the first Phase 1 reconcile completes.

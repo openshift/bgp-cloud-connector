@@ -65,6 +65,7 @@ func (r *BGPCloudConfigurationReconciler) observeBGPSessionHealth(ctx context.Co
 type observedBGPSession struct {
 	Node      string
 	Peer      string
+	VRF       string
 	BGPStatus string
 	BFDStatus string
 }
@@ -111,12 +112,19 @@ func observeBGPSessions(ctx context.Context, c client.Client, config *networking
 		if err != nil {
 			return nil, false, fmt.Errorf("BGPSessionState %q has invalid status.bfdStatus: %w", obj.GetName(), err)
 		}
+		vrf, _, err := unstructured.NestedString(obj.Object, "status", "vrf")
+		if err != nil {
+			return nil, false, fmt.Errorf("BGPSessionState %q has invalid status.vrf: %w", obj.GetName(), err)
+		}
+		if vrf != "" {
+			continue
+		}
 		labelsForNode, found := nodeLabels[node]
 		if !found || !sessionMatchesPeerGroup(peer, labelsForNode, config.Spec.RouterNodeSelector, groups) {
 			continue
 		}
 		out = append(out, observedBGPSession{
-			Node: node, Peer: peer, BGPStatus: bgpStatus, BFDStatus: bfdStatus,
+			Node: node, Peer: peer, VRF: vrf, BGPStatus: bgpStatus, BFDStatus: bfdStatus,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -136,7 +144,7 @@ func expectedBGPSessionCount(ctx context.Context, c client.Client, config *netwo
 		return 0, err
 	}
 
-	count := 0
+	counted := make(map[string]struct{})
 	groups := sessionPeerGroups(config)
 	for i := range nodes.Items {
 		nodeLabels := nodes.Items[i].Labels
@@ -144,10 +152,12 @@ func expectedBGPSessionCount(ctx context.Context, c client.Client, config *netwo
 			if !sessionNodeMatchesGroup(labels.Set(nodeLabels), config.Spec.RouterNodeSelector, group.NodeSelector) {
 				continue
 			}
-			count += len(group.Neighbors)
+			for _, neighbor := range group.Neighbors {
+				counted[nodes.Items[i].Name+"\x00"+neighbor.Address] = struct{}{}
+			}
 		}
 	}
-	return count, nil
+	return len(counted), nil
 }
 
 func sessionPeerGroups(config *networkingapi.BGPCloudConfiguration) []networkingapi.PeerGroupStatus {

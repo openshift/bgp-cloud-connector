@@ -390,6 +390,11 @@ spec:
                   provider-side cloud resources by the Ready path.
                 format: date-time
                 type: string
+              lastCloudReconciledInventoryHash:
+                description: |-
+                  LastCloudReconciledInventoryHash identifies the router inventory included
+                  in the last successful provider-side reconciliation.
+                type: string
               observedGeneration:
                 description: observedGeneration is the most recent generation observed
                   by the controller.
@@ -463,6 +468,11 @@ spec:
                         nodeSelector narrows spec.routerNodeSelector to this group. Empty means
                         every router node.
                       type: object
+                    rawFRRConfig:
+                      description: |-
+                        rawFRRConfig preserves provider-specific FRR directives while the cached
+                        peering plan is reused between cloud reconciliations.
+                      type: string
                   required:
                   - key
                   type: object

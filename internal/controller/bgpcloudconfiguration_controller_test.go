@@ -543,15 +543,33 @@ func TestConfigReconcile_RepeatedReconcile_DoesNotRewriteFRRConfiguration(t *tes
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "bgp-cc-1", Namespace: FRRNamespace}, frrConfig); err != nil {
 		t.Fatalf("get repaired FRRConfiguration: %v", err)
 	}
-	// A repeated reconcile still runs Phases 1-4 so managed FRR resources are
-	// repaired if they drift, including refreshing the cloud peering plan.
-	if mock.discoverCallCount <= discoverCallsAfterFirstPass {
-		t.Errorf("expected DiscoverEndpoints to run during normal reconciliation, got %d calls after repeat (was %d)",
+	// A repeated reconcile repairs managed FRR resources without rebuilding the
+	// provider plan while the cloud reconciliation deadline is still fresh.
+	if mock.discoverCallCount != discoverCallsAfterFirstPass {
+		t.Errorf("expected DiscoverEndpoints to remain throttled, got %d calls after repeat (was %d)",
 			mock.discoverCallCount, discoverCallsAfterFirstPass)
 	}
 	if mock.reconcileNodesCallCount != reconcileNodesCallsAfterFirstPass {
-		t.Errorf("expected ReconcileNodes not to run during health refresh, got %d calls after repeat (was %d)",
+		t.Errorf("expected ReconcileNodes not to run for unchanged inventory, got %d calls after repeat (was %d)",
 			mock.reconcileNodesCallCount, reconcileNodesCallsAfterFirstPass)
+	}
+
+	// A router inventory change bypasses the cloud deadline so provider-side
+	// settings converge promptly after a node event.
+	updatedNode := &corev1.Node{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "node-1"}, updatedNode); err != nil {
+		t.Fatalf("get router node: %v", err)
+	}
+	updatedNode.Status.Addresses = []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.1.99"}}
+	if err := c.Status().Update(context.Background(), updatedNode); err != nil {
+		t.Fatalf("update router node: %v", err)
+	}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile after router inventory change: %v", err)
+	}
+	if mock.reconcileNodesCallCount != reconcileNodesCallsAfterFirstPass+1 {
+		t.Errorf("expected inventory change to reconcile nodes, got %d calls (want %d)",
+			mock.reconcileNodesCallCount, reconcileNodesCallsAfterFirstPass+1)
 	}
 }
 
