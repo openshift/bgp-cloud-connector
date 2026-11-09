@@ -205,8 +205,9 @@ func (r *BGPCloudConfigurationReconciler) Reconcile(ctx context.Context, req ctr
 		}
 	}
 
-	wasReady := config.Status.Phase == networkingapi.PhaseReady &&
-		config.Status.ObservedGeneration == config.Generation
+	// Use the status read at the start of reconciliation to distinguish a spec
+	// change from a Configuring phase caused by incomplete router inventory.
+	specChanged := baselineStatus.ObservedGeneration != config.Generation
 
 	config.Status.Phase = networkingapi.PhaseConfiguring
 	config.Status.ObservedGeneration = config.Generation
@@ -267,8 +268,6 @@ func (r *BGPCloudConfigurationReconciler) Reconcile(ctx context.Context, req ctr
 	if cloudNodeMetadata {
 		inventoryHash = routerInventoryHash(routerNodes, incompleteNodes)
 	}
-	cloudReconcileDue := !wasReady || readyCloudResourcesDue(config) ||
-		(cloudNodeMetadata && config.Status.LastCloudReconciledInventoryHash != inventoryHash)
 	if readyPhase {
 		meta.SetStatusCondition(&config.Status.Conditions, metav1.Condition{
 			Type:               networkingapi.ConditionCompleteNodeInventory,
@@ -293,6 +292,14 @@ func (r *BGPCloudConfigurationReconciler) Reconcile(ctx context.Context, req ctr
 	}
 
 	previousPeerGroups := config.Status.PeerGroups
+	endpointsKnown := meta.IsStatusConditionTrue(
+		baselineStatus.Conditions,
+		networkingapi.ConditionCloudEndpointsDiscovered,
+	)
+	haveCachedPlan := len(previousPeerGroups) > 0
+	cloudReconcileDue := specChanged || !endpointsKnown || !haveCachedPlan ||
+		readyCloudResourcesDue(config) ||
+		(cloudNodeMetadata && baselineStatus.LastCloudReconciledInventoryHash != inventoryHash)
 	// Refresh health from the last known peering plan before cloud discovery.
 	// This keeps the health snapshot independent from provider errors and from
 	// the cloud reconciliation deadline.
@@ -309,7 +316,7 @@ func (r *BGPCloudConfigurationReconciler) Reconcile(ctx context.Context, req ctr
 	var cloudPlatform platform.CloudPlatform
 	var discoveryResult *platform.DiscoveryResult
 	if config.Spec.Platform != networkingapi.PlatformManual {
-		if wasReady && !cloudReconcileDue {
+		if !cloudReconcileDue {
 			config.Status.PeerGroups = previousPeerGroups
 			discoveryResult = peerGroupsFromStatus(previousPeerGroups)
 		} else {

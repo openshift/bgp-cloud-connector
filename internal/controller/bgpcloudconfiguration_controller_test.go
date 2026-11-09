@@ -940,6 +940,15 @@ func TestConfigReconcile_AWSNodeFiltering(t *testing.T) {
 	if !mock.reconcileNodesCalled {
 		t.Fatal("expected ReconcileNodes to be called")
 	}
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}}); err != nil {
+		t.Fatalf("second reconcile error: %v", err)
+	}
+	if mock.discoverCallCount != 1 {
+		t.Errorf("expected incomplete inventory retry to avoid cloud discovery, got %d calls", mock.discoverCallCount)
+	}
+	if mock.reconcileNodesCallCount != 1 {
+		t.Errorf("expected incomplete inventory retry to avoid cloud reconciliation, got %d calls", mock.reconcileNodesCallCount)
+	}
 	if len(mock.reconcileNodesArgs) != 3 {
 		t.Errorf("expected 3 nodes passed to ReconcileNodes, got %d", len(mock.reconcileNodesArgs))
 	}
