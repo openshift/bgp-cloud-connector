@@ -482,6 +482,61 @@ func TestConfigReconcile_AWSFullReconcile(t *testing.T) {
 	}
 }
 
+func TestConfigReconcile_RetriesCloudFailureAfterSpecChange(t *testing.T) {
+	config := newTestBGPCloudConfigurationWithAWS()
+	config.Finalizers = []string{ConfigFinalizerName}
+	config.Generation = 1
+	node := newRouterNode("node-1", "10.0.1.10", "us-east-1a", "aws:///us-east-1a/i-001")
+	mock := &mockPlatform{}
+	scheme := configTestScheme()
+	objects := append([]client.Object{config, newEmptyNetwork(), node}, newRunningFRRCluster()...)
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(objects...).
+		WithStatusSubresource(config).
+		Build()
+	r := &BGPCloudConfigurationReconciler{
+		Client: c, Scheme: scheme,
+		PlatformBuilder: func(context.Context, client.Client, *networkingapi.BGPCloudConfiguration) (platform.CloudPlatform, error) {
+			return mock, nil
+		},
+	}
+	reconcileConfig := func() *networkingapi.BGPCloudConfiguration {
+		t.Helper()
+		if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: config.Name}}); err != nil {
+			t.Fatal(err)
+		}
+		current := &networkingapi.BGPCloudConfiguration{}
+		if err := c.Get(context.Background(), client.ObjectKeyFromObject(config), current); err != nil {
+			t.Fatal(err)
+		}
+		return current
+	}
+
+	ready := reconcileConfig()
+	if ready.Status.Phase != networkingapi.PhaseReady || mock.reconcileNodesCallCount != 1 {
+		t.Fatalf("initial state: phase=%s cloud attempts=%d", ready.Status.Phase, mock.reconcileNodesCallCount)
+	}
+	ready.Spec.BGP.LocalASN++
+	ready.Generation++
+	if err := c.Update(context.Background(), ready); err != nil {
+		t.Fatal(err)
+	}
+	mock.reconcileNodesErr = fmt.Errorf("transient cloud API failure")
+	failed := reconcileConfig()
+	if failed.Status.Phase != networkingapi.PhaseDegraded || mock.reconcileNodesCallCount != 2 {
+		t.Fatalf("failed spec reconcile: phase=%s cloud attempts=%d", failed.Status.Phase, mock.reconcileNodesCallCount)
+	}
+
+	mock.reconcileNodesErr = nil
+	retried := reconcileConfig()
+	condition := meta.FindStatusCondition(retried.Status.Conditions, networkingapi.ConditionCloudResourcesReconciled)
+	if mock.reconcileNodesCallCount != 3 || retried.Status.Phase != networkingapi.PhaseReady ||
+		condition == nil || condition.Status != metav1.ConditionTrue {
+		t.Fatalf("expected successful cloud retry: phase=%s cloud attempts=%d condition=%+v",
+			retried.Status.Phase, mock.reconcileNodesCallCount, condition)
+	}
+}
+
 func TestConfigReconcile_RepeatedReconcile_DoesNotRewriteFRRConfiguration(t *testing.T) {
 	mock := &mockPlatform{}
 	config := newTestBGPCloudConfigurationWithAWS()

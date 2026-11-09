@@ -297,9 +297,14 @@ func (r *BGPCloudConfigurationReconciler) Reconcile(ctx context.Context, req ctr
 		networkingapi.ConditionCloudEndpointsDiscovered,
 	)
 	haveCachedPlan := len(previousPeerGroups) > 0
+	cloudReconcileFailed := false
+	if condition := meta.FindStatusCondition(baselineStatus.Conditions, networkingapi.ConditionCloudResourcesReconciled); condition != nil {
+		cloudReconcileFailed = condition.Status == metav1.ConditionFalse && condition.Reason == ReasonCloudReconcileFailed
+	}
 	cloudReconcileDue := specChanged || !endpointsKnown || !haveCachedPlan ||
 		readyCloudResourcesDue(config) ||
-		(cloudNodeMetadata && baselineStatus.LastCloudReconciledInventoryHash != inventoryHash)
+		(cloudNodeMetadata && baselineStatus.LastCloudReconciledInventoryHash != inventoryHash) ||
+		cloudReconcileFailed
 	// Refresh health from the last known peering plan before cloud discovery.
 	// This keeps the health snapshot independent from provider errors and from
 	// the cloud reconciliation deadline.
