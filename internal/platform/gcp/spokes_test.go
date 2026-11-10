@@ -1,6 +1,12 @@
 package gcp
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"fmt"
+	"slices"
+	"testing"
+)
 
 // TestChunkRouterNodes covers the sort and the split at the NCC instance
 // limit.
@@ -36,5 +42,51 @@ func TestChunkRouterNodes(t *testing.T) {
 	}
 	if chunks[1][0].Name != "9" {
 		t.Errorf("overflow node = %q, want %q", chunks[1][0].Name, "9")
+	}
+}
+
+// mismatchedNCC reports a site-to-site mismatch on one spoke, after
+// patching its instances, and reconciles every other spoke.
+type mismatchedNCC struct {
+	recordingNCC
+	mismatched string
+}
+
+func (n *mismatchedNCC) ReconcileSpoke(ctx context.Context, spokeName, hubName string, nodes []RouterNode, siteToSite bool) (bool, error) {
+	if _, err := n.recordingNCC.ReconcileSpoke(ctx, spokeName, hubName, nodes, siteToSite); err != nil {
+		return false, err
+	}
+	if spokeName == n.mismatched {
+		return true, fmt.Errorf("NCC spoke %s: %w", spokeName, errSiteToSiteFixed)
+	}
+	return true, nil
+}
+
+// A site-to-site mismatch is reported by one spoke but says nothing
+// about the others, so the spokes after it are still reconciled, a
+// surplus spoke is still deleted, and the mismatch is returned at the
+// end with every change counted.
+func TestReconcileNCCSpokesCarriesOnPastASiteToSiteMismatch(t *testing.T) {
+	ncc := &mismatchedNCC{
+		recordingNCC: recordingNCC{existing: []string{"spoke-0", "spoke-1", "spoke-2"}},
+		mismatched:   "spoke-0",
+	}
+	nodes := make([]RouterNode, NCCMaxInstancesPerSpoke+1)
+	for i := range nodes {
+		nodes[i] = RouterNode{Name: fmt.Sprintf("worker-%02d", i)}
+	}
+
+	changes, err := ReconcileNCCSpokes(context.Background(), ncc, "hub", "spoke", false, nodes)
+	if !errors.Is(err, errSiteToSiteFixed) {
+		t.Errorf("ReconcileNCCSpokes error = %v, want the site-to-site mismatch", err)
+	}
+	if want := []string{"spoke-0", "spoke-1"}; !slices.Equal(ncc.updated, want) {
+		t.Errorf("reconciled spokes %v, want %v", ncc.updated, want)
+	}
+	if want := []string{"spoke-2"}; !slices.Equal(ncc.deleted, want) {
+		t.Errorf("deleted spokes %v, want %v", ncc.deleted, want)
+	}
+	if changes != 3 {
+		t.Errorf("changes = %d, want 3: two spokes patched and one deleted", changes)
 	}
 }

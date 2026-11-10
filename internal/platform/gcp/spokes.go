@@ -2,6 +2,7 @@ package gcp
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strconv"
 )
@@ -39,13 +40,18 @@ func ReconcileNCCSpokes(ctx context.Context, ncc NCCClient, hubName, prefix stri
 		desiredSet[id] = struct{}{}
 	}
 	changes := 0
+	var mismatches []error
 	for i, id := range desiredIDs {
 		changed, err := ncc.ReconcileSpoke(ctx, id, hubName, chunks[i], siteToSite)
-		if err != nil {
-			return changes, err
-		}
 		if changed {
 			changes++
+		}
+		if errors.Is(err, errSiteToSiteFixed) {
+			mismatches = append(mismatches, err)
+			continue
+		}
+		if err != nil {
+			return changes, err
 		}
 	}
 	existing, err := ncc.ListSpokesByPrefix(ctx, hubName, prefix)
@@ -64,5 +70,5 @@ func ReconcileNCCSpokes(ctx context.Context, ncc NCCClient, hubName, prefix stri
 			changes++
 		}
 	}
-	return changes, nil
+	return changes, errors.Join(mismatches...)
 }

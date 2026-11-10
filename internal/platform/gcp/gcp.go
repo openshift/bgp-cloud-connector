@@ -2,6 +2,7 @@ package gcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -143,9 +144,15 @@ func (p *Platform) ReconcileNodes(ctx context.Context, nodes []platform.RouterNo
 	}
 
 	// A VM cannot peer with a Cloud Router until it belongs to a router
-	// appliance spoke, so the spokes come before the peers.
+	// appliance spoke, so the spokes come before the peers. A site-to-site
+	// mismatch leaves the spokes' instances reconciled, so the peers are
+	// still brought into line before it is returned.
 	spokeChanges, err := ReconcileNCCSpokes(ctx, p.ncc, p.cfg.NCCHubName, p.cfg.NCCSpokePrefix, p.cfg.SiteToSite, routerNodes)
-	if err != nil {
+	var mismatch error
+	switch {
+	case errors.Is(err, errSiteToSiteFixed):
+		mismatch = fmt.Errorf("reconciling NCC spokes: %w", err)
+	case err != nil:
 		platform.RecordCloudAPIError(platform.PlatformGCP, platform.OpNCC)
 		return fmt.Errorf("reconciling NCC spokes: %w", err)
 	}
@@ -172,7 +179,7 @@ func (p *Platform) ReconcileNodes(ctx context.Context, nodes []platform.RouterNo
 	if changed {
 		logger.Info("Cloud Router peers updated", "router", p.cfg.CloudRouterName, "nodes", len(routerNodes))
 	}
-	return nil
+	return mismatch
 }
 
 // Cleanup releases the Cloud Router peers and NCC spokes this platform made.
