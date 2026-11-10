@@ -292,6 +292,26 @@ func spokesOnHub(spokes []*networkconnectivity.Spoke, hubName string) []*network
 	return out
 }
 
+// spokeInstanceNames lists the instances linked to the given spokes by
+// name. A spoke names each one by URL, full or relative, so only the
+// part after /instances/ is kept.
+func spokeInstanceNames(spokes []*networkconnectivity.Spoke) []string {
+	var out []string
+	for _, s := range spokes {
+		if s.LinkedRouterApplianceInstances == nil {
+			continue
+		}
+		for _, inst := range s.LinkedRouterApplianceInstances.Instances {
+			vm := inst.VirtualMachine
+			if i := strings.LastIndex(vm, "/instances/"); i >= 0 {
+				vm = vm[i+len("/instances/"):]
+			}
+			out = append(out, vm)
+		}
+	}
+	return out
+}
+
 // cleanupE2EObjects removes everything the suite creates and treats "not
 // there" as success, so it is safe on a clean cluster and safe twice.
 //
