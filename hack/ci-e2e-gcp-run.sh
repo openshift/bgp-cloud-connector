@@ -71,7 +71,7 @@ info "gcloud: $(gcloud version 2>/dev/null | head -1)"
 
 "${here}/gcp/create-client-vm.sh"
 
-# One worker is left out of the router set, so E2E-GCP-05 has a pod on a
+# One worker is left out of the router set, so E2E-GCP-06 has a pod on a
 # node that is not a BGP speaker as well as pods on nodes that are.
 # Without one the suite cannot see the reply path
 # openshift/bgp-cloud-connector#121 describes, which GCP shares with
@@ -101,7 +101,7 @@ E2E_MANIFEST_DIR="${profile_dir}" make -C "${repo_root}" test-e2e-gcp || suite_r
 
 # Whatever the suite's outcome, and never allowed to change it. A worker
 # missing the br-ex flows for the advertised network still advertises it
-# and does not answer, which is what E2E-GCP-05 sees. E2E-GCP-04 deletes
+# and does not answer, which is what E2E-GCP-06 sees. E2E-GCP-05 deletes
 # the BGPRouting, so after a run that reached it the flows are expected
 # to be gone; a failure before it skips it, the container being Ordered,
 # and the flows are as the failing spec found them.

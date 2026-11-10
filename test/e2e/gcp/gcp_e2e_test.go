@@ -292,12 +292,12 @@ var _ = Describe("GCP E2E", Ordered, func() {
 	})
 
 	// ---------------------------------------------------------------
-	// E2E-GCP-05: traffic from outside the cluster
+	// E2E-GCP-06: traffic from outside the cluster
 	//
-	// Before E2E-GCP-04, which removes everything this needs. The
+	// Before E2E-GCP-05, which removes everything this needs. The
 	// container is Ordered, so position is what decides.
 	// ---------------------------------------------------------------
-	Context("E2E-GCP-05: Traffic from outside the cluster", func() {
+	Context("E2E-GCP-06: Traffic from outside the cluster", func() {
 		It("should reach a pod on every worker whose instance forwards, "+
 			"from the client VM's own address, and no other", func(ctx context.Context) {
 			namespace := bgpRouting.Spec.Network.Name
@@ -352,9 +352,9 @@ var _ = Describe("GCP E2E", Ordered, func() {
 	})
 
 	// ---------------------------------------------------------------
-	// E2E-GCP-04: deletion order and cleanup
+	// E2E-GCP-05: deletion order and cleanup
 	// ---------------------------------------------------------------
-	Context("E2E-GCP-04: Deletion cleanup", func() {
+	Context("E2E-GCP-05: Deletion cleanup", func() {
 		It("should block config deletion while routing exists, then remove peers and spoke", func(ctx context.Context) {
 			By("attempting to delete the config CR while the routing CR still exists")
 			Expect(k8sClient.Delete(ctx, configCR)).To(Succeed())
