@@ -2,6 +2,7 @@ package gcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"sort"
@@ -60,44 +61,57 @@ func (n *nccClient) ReconcileSpoke(ctx context.Context, spokeName, hubName strin
 		return false, err
 	}
 
-	if spokeMatches(spoke, nodes, siteToSite) {
-		return false, nil
+	// GCP fixes site-to-site data transfer when a spoke is created and
+	// refuses any patch whose mask names it, even with the value
+	// unchanged. So the mask names only the instances, and a spec that
+	// asks for a different setting is reported rather than patched.
+	current := spoke.LinkedRouterApplianceInstances != nil &&
+		spoke.LinkedRouterApplianceInstances.SiteToSiteDataTransfer
+
+	changed := false
+	if !spokeMatches(spoke, nodes) {
+		spoke.LinkedRouterApplianceInstances = &networkconnectivity.LinkedRouterApplianceInstances{
+			SiteToSiteDataTransfer: current,
+			Instances:              applianceInstancesFromNodes(nodes),
+		}
+		op, err := n.svc.Projects.Locations.Spokes.Patch(name, spoke).
+			UpdateMask("linkedRouterApplianceInstances.instances").
+			Context(ctx).
+			Do()
+		if err != nil {
+			return false, err
+		}
+		if err := n.waitLRO(ctx, op); err != nil {
+			return false, err
+		}
+		changed = true
 	}
 
-	insts := applianceInstancesFromNodes(nodes)
-	spoke.LinkedRouterApplianceInstances = &networkconnectivity.LinkedRouterApplianceInstances{
-		SiteToSiteDataTransfer: siteToSite,
-		Instances:              insts,
+	if current != siteToSite {
+		return changed, fmt.Errorf("NCC spoke %s has siteToSiteDataTransfer %t and the spec asks for %t: %w",
+			spokeName, current, siteToSite, errSiteToSiteFixed)
 	}
-	op, err := n.svc.Projects.Locations.Spokes.Patch(name, spoke).
-		UpdateMask("linkedRouterApplianceInstances.instances,linkedRouterApplianceInstances.siteToSiteDataTransfer").
-		Context(ctx).
-		Do()
-	if err != nil {
-		return false, err
-	}
-	if err := n.waitLRO(ctx, op); err != nil {
-		return false, err
-	}
-	return true, nil
+	return changed, nil
 }
 
-// spokeMatches reports whether the spoke already describes what is wanted of
-// it, so that a pass with nothing to do sends no patch.
+// errSiteToSiteFixed marks a spoke whose site-to-site data transfer
+// differs from the spec. It is the one ReconcileSpoke error that leaves
+// the spoke otherwise reconciled, so callers carry on past it.
+var errSiteToSiteFixed = errors.New("GCP accepts that setting only when the spoke is created, " +
+	"so delete the BGPCloudConfiguration and create it again to change it")
+
+// spokeMatches reports whether the spoke's instances are already the ones
+// wanted, so that a pass with nothing to do sends no patch.
 //
-// All three of the things a spoke carries are compared: which instances belong
-// to it, the address each is reached on, and whether site-to-site data
-// transfer is on. Comparing the instances alone left the other two unchecked,
-// so a node keeping its instance while changing address, and
-// spec.gcp.ncc.siteToSiteDataTransfer being flipped, both read as nothing to
-// do and were never applied.
-func spokeMatches(spoke *networkconnectivity.Spoke, nodes []RouterNode, siteToSite bool) bool {
+// Both the instances and the address each is reached on are compared:
+// comparing the instances alone let a node keeping its instance while
+// changing address read as nothing to do. Site-to-site data transfer is
+// not compared here, since no patch can change it; ReconcileSpoke reports
+// a mismatch instead.
+func spokeMatches(spoke *networkconnectivity.Spoke, nodes []RouterNode) bool {
 	linked := spoke.LinkedRouterApplianceInstances
 	if linked == nil {
-		return len(nodes) == 0 && !siteToSite
-	}
-	if linked.SiteToSiteDataTransfer != siteToSite {
-		return false
+		return len(nodes) == 0
 	}
 
 	current := make(map[string]string, len(linked.Instances))

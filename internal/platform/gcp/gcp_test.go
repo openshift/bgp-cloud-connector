@@ -2,6 +2,7 @@ package gcp
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/openshift/bgp-cloud-connector/internal/platform"
@@ -128,5 +129,22 @@ func TestReconcileNodes_ShrunkNodeListStillReconciles(t *testing.T) {
 	}
 	if len(ncc.deleted) != 1 || ncc.deleted[0] != "cluster-bgp-spoke-1" {
 		t.Errorf("deleted spokes %v, want [cluster-bgp-spoke-1]: the second spoke is now surplus", ncc.deleted)
+	}
+}
+
+// TestReconcileNodes_SiteToSiteMismatchStillReconcilesPeers covers a
+// router node joining while the spec asks for a site-to-site setting
+// the spoke cannot take. The node joins the spoke regardless, so it
+// still needs its Cloud Router peers; the mismatch is returned after.
+func TestReconcileNodes_SiteToSiteMismatchStillReconcilesPeers(t *testing.T) {
+	compute := &recordingCompute{topology: testTopology()}
+	ncc := &mismatchedNCC{mismatched: "cluster-bgp-spoke-0"}
+
+	err := testPlatform(compute, ncc).ReconcileNodes(context.Background(), testMetricsNodes())
+	if !errors.Is(err, errSiteToSiteFixed) {
+		t.Errorf("ReconcileNodes error = %v, want the site-to-site mismatch", err)
+	}
+	if compute.reconcilePeers != 1 {
+		t.Errorf("ReconcilePeers called %d times, want 1", compute.reconcilePeers)
 	}
 }
