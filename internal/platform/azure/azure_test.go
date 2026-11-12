@@ -422,6 +422,34 @@ func TestReconcileNodes_EmptyNodeListLeavesPeeringsAlone(t *testing.T) {
 	}
 }
 
+func TestReconcileNodes_ForwardingOnlyLeavesPeeringsAlone(t *testing.T) {
+	vm, err := ParseProviderID(testProviderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rs := &fakeRS{current: []ObservedPeer{
+		{Peer: Peer{Name: peeringName("cluster", "10.0.128.4"), PeerIP: "10.0.128.4", PeerASN: 65001}},
+	}}
+	nics := &fakeNICs{nics: []NIC{{Name: "nic-1", ResourceGroup: vm.ResourceGroup, VMID: vm.ID}}}
+	p := &Platform{cfg: Config{ClusterID: "cluster", LocalASN: 65001}, rs: rs, nics: nics}
+	nodes := []platform.RouterNode{{
+		Name:           "worker",
+		PrivateIP:      "10.0.128.9",
+		ProviderID:     testProviderID,
+		ForwardingOnly: true,
+	}}
+
+	if err := p.ReconcileNodes(context.Background(), nodes); err != nil {
+		t.Fatalf("ReconcileNodes: %v", err)
+	}
+	if rs.desired != nil {
+		t.Errorf("peering reconciliation ran: %v", rs.desired)
+	}
+	if len(nics.enabled) != 1 || nics.enabled[0] != "nic-1" {
+		t.Errorf("enabled = %v, want [nic-1]", nics.enabled)
+	}
+}
+
 // TestReconcileNodes_ShrunkNodeListStillReconciles guards the early return
 // from swallowing the case it must not: a node list that has shrunk but is
 // not empty must still reach the Route Server, or a removed node keeps its
