@@ -93,6 +93,7 @@ const (
 	ConditionFRRConfigurationApplied  = "FRRConfigurationApplied"
 	ConditionCloudResourcesReconciled = "CloudResourcesReconciled"
 	ConditionCompleteNodeInventory    = "CompleteNodeInventory"
+	ConditionBGPSessionsEstablished   = "BGPSessionsEstablished"
 )
 
 // BGPNeighbor identifies a single BGP peer by its IP address and AS number.
@@ -225,6 +226,10 @@ type PeerGroupStatus struct {
 	// +listType=atomic
 	// +kubebuilder:validation:MaxItems=8
 	Neighbors []BGPNeighbor `json:"neighbors,omitempty"`
+	// rawFRRConfig preserves provider-specific FRR directives while the cached
+	// peering plan is reused between cloud reconciliations.
+	// +optional
+	RawFRRConfig string `json:"rawFRRConfig,omitempty"`
 }
 
 // BGPConfig holds the BGP speaker configuration and optional peer groups.
@@ -299,7 +304,15 @@ type BGPCloudConfigurationStatus struct {
 	// +listType=atomic
 	// +kubebuilder:validation:MaxItems=16
 	PeerGroups []PeerGroupStatus `json:"peerGroups,omitempty"`
-	// frrProviderOwnership records whether this controller may revert the FRR
+	// LastCloudReconcileTime records the last successful reconciliation of
+	// provider-side cloud resources by the Ready path.
+	// +optional
+	LastCloudReconcileTime *metav1.Time `json:"lastCloudReconcileTime,omitempty"`
+	// LastCloudReconciledInventoryHash identifies the router inventory included
+	// in the last successful provider-side reconciliation.
+	// +optional
+	LastCloudReconciledInventoryHash string `json:"lastCloudReconciledInventoryHash,omitempty"`
+	// FRRProviderOwnership records whether this controller may revert the FRR
 	// provider patch on Network/cluster additionalRoutingCapabilities.providers.
 	// Empty until the first Phase 1 reconcile completes.
 	// Owned: this controller enabled FRR and may revert it on BGPCloudConfiguration deletion.

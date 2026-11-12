@@ -61,14 +61,6 @@ type BGPRoutingStatus struct {
 	// ObservedGeneration is the most recent generation observed by the controller.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
-	// Namespaces are the namespaces currently selected into this network by
-	// their labels, and therefore the namespaces whose pods are advertised via
-	// BGP. It is reported so an administrator can confirm the network covers
-	// what they intended without re-running the label query. Empty while the
-	// network is not Ready.
-	// +optional
-	// +listType=atomic
-	Namespaces []string `json:"namespaces,omitempty"`
 }
 
 // +kubebuilder:object:root=true
