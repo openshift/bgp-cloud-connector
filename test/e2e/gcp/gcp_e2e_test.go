@@ -292,12 +292,93 @@ var _ = Describe("GCP E2E", Ordered, func() {
 	})
 
 	// ---------------------------------------------------------------
-	// E2E-GCP-05: traffic from outside the cluster
+	// E2E-GCP-04: a router node leaves the selector and comes back
 	//
-	// Before E2E-GCP-04, which removes everything this needs. The
+	// The first configuration only ever creates spokes. A change in
+	// the router node set is what patches one, so this is the spec
+	// that exercises the spoke update and the peer update behind it.
+	// ---------------------------------------------------------------
+	Context("E2E-GCP-04: Router node leaves and rejoins the selector", func() {
+		It("should drop a departing router node from the spoke and the Cloud Router, "+
+			"and restore it when the node returns", func(ctx context.Context) {
+			nodes, err := routerNodes(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			// Below two, taking one away empties the selector, and the
+			// operator reads an empty node list as a selector glitch
+			// rather than a request to release the estate. The spec
+			// would then pass with the operator having done nothing.
+			Expect(len(nodes)).To(BeNumerically(">=", 2),
+				"this spec needs at least two router nodes, so that removing one still leaves a router")
+
+			victim := nodes[0]
+			victimVM, err := gcpplatform.ParseProviderID(victim.Spec.ProviderID)
+			Expect(err).NotTo(HaveOccurred())
+			victimPeers := nodePeerNames(&victim)
+
+			survivorVMs := make([]string, 0, len(nodes)-1)
+			var survivorPeers []string
+			for i := range nodes[1:] {
+				vm, vmErr := gcpplatform.ParseProviderID(nodes[1:][i].Spec.ProviderID)
+				Expect(vmErr).NotTo(HaveOccurred())
+				survivorVMs = append(survivorVMs, vm.Name)
+				survivorPeers = append(survivorPeers, nodePeerNames(&nodes[1:][i])...)
+			}
+
+			By("removing the router labels from " + victim.Name)
+			unlabelRouterNode(ctx, victim.Name)
+			// Put back whatever happens below, so a failure here leaves
+			// the cluster as the cleanup spec and the next run expect to
+			// find it rather than one node short.
+			DeferCleanup(func(ctx context.Context) {
+				labelRouterNode(ctx, victim.Name)
+			})
+
+			By("waiting for its instance and peers to go, and for the others to stay")
+			Eventually(func(g Gomega) {
+				spokes, listErr := hubSpokes(ctx)
+				g.Expect(listErr).NotTo(HaveOccurred())
+				linked := spokeInstanceNames(spokes)
+				g.Expect(linked).NotTo(ContainElement(victimVM.Name),
+					"a spoke still links %s, which is no longer a router node", victim.Name)
+				g.Expect(linked).To(ContainElements(survivorVMs),
+					"unlabelling one node took other instances out of the spokes")
+
+				names, peerErr := managedPeerNames(ctx)
+				g.Expect(peerErr).NotTo(HaveOccurred())
+				g.Expect(names).NotTo(ContainElements(victimPeers),
+					"the Cloud Router still peers %s, which is no longer a router node", victim.Name)
+				g.Expect(names).To(ContainElements(survivorPeers),
+					"unlabelling one node took other nodes' peers with it")
+			}).WithTimeout(reconcileTimeout).WithPolling(pollInterval).Should(Succeed())
+
+			By("putting the router labels back on " + victim.Name)
+			labelRouterNode(ctx, victim.Name)
+
+			By("waiting for its instance and peers to come back")
+			Eventually(func(g Gomega) {
+				spokes, listErr := hubSpokes(ctx)
+				g.Expect(listErr).NotTo(HaveOccurred())
+				g.Expect(spokeInstanceNames(spokes)).To(ContainElement(victimVM.Name),
+					"no spoke links %s again", victim.Name)
+
+				names, peerErr := managedPeerNames(ctx)
+				g.Expect(peerErr).NotTo(HaveOccurred())
+				g.Expect(names).To(ContainElements(victimPeers),
+					"the Cloud Router has not peered %s again", victim.Name)
+			}).WithTimeout(reconcileTimeout).WithPolling(pollInterval).Should(Succeed())
+
+			By("waiting for every router node to be Established again")
+			assertBGPEstablished(ctx)
+		})
+	})
+
+	// ---------------------------------------------------------------
+	// E2E-GCP-06: traffic from outside the cluster
+	//
+	// Before E2E-GCP-05, which removes everything this needs. The
 	// container is Ordered, so position is what decides.
 	// ---------------------------------------------------------------
-	Context("E2E-GCP-05: Traffic from outside the cluster", func() {
+	Context("E2E-GCP-06: Traffic from outside the cluster", func() {
 		It("should reach a pod on every worker whose instance forwards, "+
 			"from the client VM's own address, and no other", func(ctx context.Context) {
 			namespace := bgpRouting.Spec.Network.Name
@@ -352,9 +433,9 @@ var _ = Describe("GCP E2E", Ordered, func() {
 	})
 
 	// ---------------------------------------------------------------
-	// E2E-GCP-04: deletion order and cleanup
+	// E2E-GCP-05: deletion order and cleanup
 	// ---------------------------------------------------------------
-	Context("E2E-GCP-04: Deletion cleanup", func() {
+	Context("E2E-GCP-05: Deletion cleanup", func() {
 		It("should block config deletion while routing exists, then remove peers and spoke", func(ctx context.Context) {
 			By("attempting to delete the config CR while the routing CR still exists")
 			Expect(k8sClient.Delete(ctx, configCR)).To(Succeed())
@@ -435,6 +516,56 @@ func removePeer(ctx context.Context, name string) error {
 		return err
 	}
 	return waitRegionOp(ctx, op)
+}
+
+// labelRouterNode and unlabelRouterNode move one node into and out of
+// the set the operator peers, by writing every label in the
+// configuration's router node selector.
+func labelRouterNode(ctx context.Context, name string) {
+	patchRouterLabels(ctx, name, false)
+}
+
+func unlabelRouterNode(ctx context.Context, name string) {
+	patchRouterLabels(ctx, name, true)
+}
+
+func patchRouterLabels(ctx context.Context, name string, remove bool) {
+	node := &corev1.Node{}
+	Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name}, node)).To(Succeed())
+	patch := client.MergeFrom(node.DeepCopy())
+	for k, v := range bgpConfig.Spec.RouterNodeSelector {
+		if remove {
+			delete(node.Labels, k)
+		} else {
+			node.Labels[k] = v
+		}
+	}
+	Expect(k8sClient.Patch(ctx, node, patch)).To(Succeed())
+}
+
+// nodePeerNames is the pair of Cloud Router peers the operator names
+// for a node, one per interface.
+func nodePeerNames(node *corev1.Node) []string {
+	ip := nodeInternalIP(node)
+	Expect(ip).NotTo(BeEmpty(), "node %s has no internal address", node.Name)
+	return []string{
+		gcpplatform.PeerName(clusterID, ip, 0),
+		gcpplatform.PeerName(clusterID, ip, 1),
+	}
+}
+
+// managedPeerNames lists the names of this cluster's peers on the Cloud
+// Router.
+func managedPeerNames(ctx context.Context) ([]string, error) {
+	peers, err := managedPeers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(peers))
+	for _, p := range peers {
+		names = append(names, p.Name)
+	}
+	return names, nil
 }
 
 // setCanIPForward rewrites the flag on a node's instance, so a spec can
