@@ -378,6 +378,621 @@ check "endpoint_peers skips the dead states and nothing else" \
 unset -f aws
 
 ######################################################################
+echo "--- gcp/lib.sh ---"
+#
+# Same rule as the AWS reads: a failed query is not an answer. gcloud
+# writes deprecation notices and property chatter to stderr on calls it
+# answers with 0, so folding stderr in would leave that text inside a
+# router name, which then goes back to GCP as --router.
+
+# shellcheck source=hack/gcp/lib.sh
+source "${here}/gcp/lib.sh"
+
+# shellcheck disable=SC2329
+gcloud() {
+    echo "WARNING: the following filter keys were not present" >&2
+    printf '%s' "${stub_gcloud_out}"
+}
+stub_gcloud_out="amcdermo-cudn-cr"
+check "gcp_query keeps stderr out of the value" \
+    "$(gcp_query "list routers" gcloud compute routers list 2>/dev/null)" "amcdermo-cudn-cr"
+
+# shellcheck disable=SC2329
+gcloud() { echo "ERROR: (gcloud.compute.routers.list) reauth" >&2; return 1; }
+(gcp_query "list routers" gcloud compute routers list) >/dev/null 2>&1
+check "gcp_query fails rather than reporting nothing" "$?" "1"
+check "gcp_query says why" \
+    "$( (gcp_query "list routers" gcloud compute routers list) 2>&1 >/dev/null | grep -c 'cannot list routers')" "1"
+
+# CI masks the project id in its logs, so runs print a fingerprint that
+# tells projects apart without naming one. The expected value is
+# sha256("openshift-qe") computed independently; a fingerprint that
+# hashed a trailing newline would differ.
+check "gcp_project_fingerprint is the first 8 hex of the id's sha256" \
+    "$(gcp_project_fingerprint openshift-qe)" "4d6cb5a3"
+check "gcp_project_fingerprint tells projects apart" \
+    "$(gcp_project_fingerprint openshift-gce-devel-ci-2)" "015269ed"
+
+# The existence checks return 2 when they could not ask, which is
+# neither present nor absent: a create that read 2 as absent would build
+# a second estate, and a delete would report success over the first.
+# shellcheck disable=SC2329
+gcloud() { echo "ERROR: reauth" >&2; return 1; }
+gcp_router_exists cr us-east1 proj >/dev/null 2>&1
+check "gcp_router_exists reports a failed question as 2" "$?" "2"
+gcp_hub_exists hub proj >/dev/null 2>&1
+check "gcp_hub_exists reports a failed question as 2" "$?" "2"
+
+# shellcheck disable=SC2329
+gcloud() { printf ''; }
+gcp_router_exists cr us-east1 proj >/dev/null 2>&1
+check "gcp_router_exists reports absent as 1" "$?" "1"
+# shellcheck disable=SC2329
+gcloud() { printf 'cr'; }
+gcp_router_exists cr us-east1 proj >/dev/null 2>&1
+check "gcp_router_exists reports present as 0" "$?" "0"
+
+# The names every estate resource is derived from, so two clusters in
+# one project never collide.
+check "hub name is keyed on the infra id" "$(gcp_hub_name amcdermo-x)" "amcdermo-x-ncc-hub"
+check "router name is keyed on the infra id" "$(gcp_router_name amcdermo-x)" "amcdermo-x-cudn-cr"
+check "spoke prefix is keyed on the infra id" "$(gcp_spoke_prefix amcdermo-x)" "amcdermo-x-bgp-spoke"
+
+# The cluster reads, which must not fold stderr into the value either.
+# shellcheck disable=SC2329
+oc() {
+    echo "Warning: apps.openshift.io/v1 DeploymentConfig is deprecated" >&2
+    case "$*" in
+        *infrastructureName*) printf 'amcdermo-x' ;;
+        *gcp.projectID*)      printf 'openshift-qe' ;;
+        *gcp.region*)         printf 'us-east1' ;;
+    esac
+}
+check "gcp_cluster_facts keeps stderr out of the infrastructure name" \
+    "$( (gcp_cluster_facts 2>/dev/null; printf '%s' "${infra}") )" "amcdermo-x"
+check "gcp_cluster_facts keeps stderr out of the project" \
+    "$( (gcp_cluster_facts 2>/dev/null; printf '%s' "${project}") )" "openshift-qe"
+check "gcp_cluster_facts keeps stderr out of the region" \
+    "$( (gcp_cluster_facts 2>/dev/null; printf '%s' "${region}") )" "us-east1"
+
+# gcloud's --filter is not an identity test and is not consistent about
+# what it is, so the comparison is exact and in shell instead. Measured
+# against one cluster: firewall rules match by prefix, so
+# name=<infra>-bgp matched <infra>-bgp-worker-subnet and a rule that did
+# not exist read as present, which would leave nothing opening tcp:179.
+# shellcheck disable=SC2329
+gcloud() { printf 'amcdermo-bgp-worker-subnet\n'; }
+gcp_firewall_exists amcdermo-bgp proj >/dev/null 2>&1
+check "a prefix is not a match" "$?" "1"
+gcp_firewall_exists amcdermo-bgp-worker-subnet proj >/dev/null 2>&1
+check "the exact name is a match" "$?" "0"
+
+# A listing larger than a pipe buffer with the wanted name early is
+# still an answer. grep -q stops reading at the first match, so a
+# pipeline feeding it could take SIGPIPE, which pipefail reports as
+# 141 and the scripts would read as "could not tell".
+# shellcheck disable=SC2329
+gcloud() { printf 'big-hub\n'; printf 'filler-hub-%s\n' {1..20000}; }
+gcp_hub_exists big-hub proj >/dev/null 2>&1
+check "a name early in a large listing is found" "$?" "0"
+
+# shellcheck disable=SC2329
+gcloud() { printf 'hub-a\nhub-b\n'; }
+gcp_hub_exists hub-a proj >/dev/null 2>&1
+check "gcp_hub_exists finds a hub among several" "$?" "0"
+gcp_hub_exists hub-c proj >/dev/null 2>&1
+check "gcp_hub_exists reports a missing hub as absent" "$?" "1"
+
+# A teardown deletes the spokes still on its hub, so it must see only
+# that hub's: other clusters in a shared project have spokes of their
+# own, and a hub whose name extends ours is not ours. It needs each
+# spoke's location to delete it, since gcloud shortens the name. A list
+# that failed is not an empty one.
+# shellcheck disable=SC2329
+gcloud() {
+    printf 'spoke-a\thub-a\tus-east1\n'
+    printf 'spoke-g\thub-a\tglobal\n'
+    printf 'spoke-b\thub-a-2\tus-east1\n'
+    printf 'spoke-c\thub-b\tus-east1\n'
+}
+check "gcp_hub_spokes lists only the spokes on that hub, with their locations" \
+    "$(gcp_hub_spokes hub-a proj 2>/dev/null | tr '\t\n' ': ')" "spoke-a:us-east1 spoke-g:global "
+# shellcheck disable=SC2329
+gcloud() { echo "ERROR: reauth" >&2; return 1; }
+(gcp_hub_spokes hub-a proj) >/dev/null 2>&1
+check "gcp_hub_spokes fails rather than reporting none" "$?" "1"
+
+# GCP names instances per zone, not per project, so a client looked for
+# in one zone can exist in another. The lookup is project-wide, exact in
+# shell, and reports every zone the name is in.
+# shellcheck disable=SC2329
+gcloud() {
+    printf 'amcdermo-e2e-client\tus-east1-c\n'
+    printf 'amcdermo-e2e-client-old\tus-east1-b\n'
+    printf 'other\tus-east1-d\n'
+}
+check "gcp_instance_zones finds the instance in whichever zone it is" \
+    "$(gcp_instance_zones amcdermo-e2e-client proj | tr '\n' ' ')" "us-east1-c "
+check "gcp_instance_zones reports nothing for a name that is not there" \
+    "$(gcp_instance_zones amcdermo-e2e-clien proj | tr '\n' ' ')" ""
+# shellcheck disable=SC2329
+gcloud() {
+    printf 'amcdermo-e2e-client\tus-east1-b\n'
+    printf 'amcdermo-e2e-client\tus-east1-c\n'
+}
+check "gcp_instance_zones reports every zone the name is in" \
+    "$(gcp_instance_zones amcdermo-e2e-client proj | tr '\n' ' ')" "us-east1-b us-east1-c "
+# shellcheck disable=SC2329
+gcloud() { echo "ERROR: reauth" >&2; return 1; }
+(gcp_instance_zones amcdermo-e2e-client proj) >/dev/null 2>&1
+check "gcp_instance_zones fails rather than reporting none" "$?" "1"
+
+# Interface addresses arrive as one semicolon-separated value, each
+# carrying the mask it was allocated with. A BGP neighbour address is
+# neither.
+# shellcheck disable=SC2329
+gcloud() { printf '10.0.128.5/17;10.0.128.6/17'; }
+check "interface addresses are split and stripped" \
+    "$(gcp_router_interface_addresses cr us-east1 proj | tr '\n' ' ')" "10.0.128.5 10.0.128.6 "
+# A router with no interfaces answers with nothing. That is an answer,
+# not a failed read, so the caller can say so rather than reporting
+# that it could not ask.
+# shellcheck disable=SC2329
+gcloud() { printf ''; }
+check "a router with no interfaces has no addresses" \
+    "$(gcp_router_interface_addresses cr us-east1 proj | tr '\n' ' ')" ""
+gcp_router_interface_addresses cr us-east1 proj >/dev/null 2>&1
+check "a router with no interfaces is not a failed read" "$?" "0"
+# shellcheck disable=SC2329
+gcloud() { echo "ERROR: reauth" >&2; return 1; }
+(gcp_router_interface_addresses cr us-east1 proj) >/dev/null 2>&1
+check "gcp_router_interface_addresses fails when it could not ask" "$?" "1"
+
+# A run stopped between creating the router and adding its interfaces
+# leaves a router with none, which a rerun must notice rather than
+# adopt. The names arrive as one semicolon-separated value, like the
+# addresses, and a router with none answers with nothing.
+# shellcheck disable=SC2329
+gcloud() { printf 'amcdermo-cr-if-0;amcdermo-cr-if-1'; }
+check "interface names are split one per line" \
+    "$(gcp_router_interface_names cr us-east1 proj | tr '\n' ' ')" "amcdermo-cr-if-0 amcdermo-cr-if-1 "
+# shellcheck disable=SC2329
+gcloud() { printf ''; }
+check "a router with no interfaces has no names" \
+    "$(gcp_router_interface_names cr us-east1 proj | tr '\n' ' ')" ""
+gcp_router_interface_names cr us-east1 proj >/dev/null 2>&1
+check "a router with no interfaces is not a failure" "$?" "0"
+# shellcheck disable=SC2329
+gcloud() { echo "ERROR: reauth" >&2; return 1; }
+(gcp_router_interface_names cr us-east1 proj) >/dev/null 2>&1
+check "gcp_router_interface_names fails rather than reporting none" "$?" "1"
+
+# What this credential can actually do, asked of GCP rather than worked
+# out from which call failed first. In CI the estate died on a single
+# PERMISSION_DENIED for networkconnectivity.hubs.create and said nothing
+# about the rest of the role, so the whole list is asked at once.
+# shellcheck disable=SC2329
+gcloud() { printf 'ya29.a0-fake-token'; }
+# shellcheck disable=SC2329
+curl() { printf '{"permissions":["compute.routers.list","networkconnectivity.hubs.list"]}'; }
+check "held permissions come back one per line" \
+    "$(gcp_permissions_held proj compute.routers.list networkconnectivity.hubs.list | tr '\n' ' ')" \
+    "compute.routers.list networkconnectivity.hubs.list "
+check "a permission the answer omits is not reported as held" \
+    "$(gcp_permissions_held proj compute.routers.list networkconnectivity.hubs.create | tr '\n' ' ')" \
+    "compute.routers.list "
+
+# The access token stays out of curl's arguments, which any local user
+# can read from the process list while the request runs. It reaches
+# curl as a header read from a file descriptor instead.
+# shellcheck disable=SC2329
+gcloud() { printf 'ya29.a0-secret-token'; }
+# shellcheck disable=SC2329
+curl() {
+    printf '%s\n' "$*" >"${workdir}/curl-args"
+    : >"${workdir}/curl-headers"
+    local arg
+    for arg in "$@"; do
+        case "${arg}" in @*) cat "${arg#@}" >>"${workdir}/curl-headers" ;; esac
+    done
+    printf '{"permissions":["compute.routers.list"]}'
+}
+gcp_permissions_held proj compute.routers.list >/dev/null
+check "the access token is not in curl's arguments" \
+    "$(grep -c 'ya29.a0-secret-token' "${workdir}/curl-args")" "0"
+check "the access token reaches curl as a header" \
+    "$(grep -c '^Authorization: Bearer ya29.a0-secret-token$' "${workdir}/curl-headers")" "1"
+
+# The answer is a set of exact names, compared the way gcp_name_exists
+# compares: compute.routers.get must not read as held because
+# compute.routers.getIamPolicy is.
+# shellcheck disable=SC2329
+curl() { printf '{"permissions":["compute.routers.getIamPolicy","compute.firewalls.list"]}'; }
+check "a longer permission does not satisfy a shorter one" \
+    "$(gcp_permissions_held proj compute.routers.get compute.firewalls.list | tr '\n' ' ')" \
+    "compute.firewalls.list "
+
+# Holding none of them is an answer. Not being able to ask is not, and
+# the two must not arrive looking the same -- the rule the whole of
+# gcp/lib.sh is built around.
+# shellcheck disable=SC2329
+curl() { printf '{}'; }
+gcp_permissions_held proj compute.routers.get >/dev/null 2>&1
+check "holding nothing is still an answer" "$?" "0"
+# shellcheck disable=SC2329
+curl() { echo "curl: (22) The requested URL returned error: 403" >&2; return 22; }
+gcp_permissions_held proj compute.routers.get >/dev/null 2>&1
+check "a question that could not be asked fails" "$?" "1"
+# shellcheck disable=SC2329
+curl() { printf '{"permissions":[]}'; }
+# shellcheck disable=SC2329
+gcloud() { echo "ERROR: reauth" >&2; return 1; }
+gcp_permissions_held proj compute.routers.get >/dev/null 2>&1
+check "no token means no answer" "$?" "1"
+
+# Every denial is named, not just the one that would have failed first.
+# Learning a role one PERMISSION_DENIED per CI run is the cost this
+# exists to remove.
+# shellcheck disable=SC2329
+gcloud() { printf 'ya29.a0-fake-token'; }
+# shellcheck disable=SC2329
+curl() { printf '{"permissions":["compute.routers.list"]}'; }
+perm_report="$( (gcp_require_permissions "build the GCP estate" proj \
+    compute.routers.list compute.routers.create networkconnectivity.hubs.create) 2>&1 )"
+check "the report names every denied permission" \
+    "$(printf '%s' "${perm_report}" | grep -c 'DENIED')" "2"
+check "the report names the granted ones too" \
+    "$(printf '%s' "${perm_report}" | grep -c 'granted')" "1"
+check "the refusal says what the credential cannot do" \
+    "$(printf '%s' "${perm_report}" | grep -c '^this credential cannot build the GCP estate$')" "1"
+(gcp_require_permissions "build the GCP estate" proj compute.routers.list compute.routers.create) >/dev/null 2>&1
+check "a credential missing a permission does not get to build" "$?" "1"
+# shellcheck disable=SC2329
+curl() { printf '{"permissions":["compute.routers.list","compute.routers.create"]}'; }
+(gcp_require_permissions "build the GCP estate" proj compute.routers.list compute.routers.create) >/dev/null 2>&1
+check "a credential holding all of them proceeds" "$?" "0"
+
+unset -f curl
+
+# The network and subnet come from a worker's instance, not from a
+# name. A cluster installed into a network it was given has names that
+# need not contain the infra id, and filtering on it found nothing.
+# shellcheck disable=SC2329
+oc() {
+    printf '%s\n' \
+        'given-w-b gce://proj/us-east1-c/given-w-b' \
+        'given-w-a gce://proj/us-east1-b/given-w-a'
+}
+# shellcheck disable=SC2329
+gcloud() {
+    printf '%s\n' "$*" >"${workdir}/gcloud-args"
+    printf 'customer-net\tcustomer-workers\n'
+}
+check "the network and subnet are read from a worker" \
+    "$(gcp_worker_network 2>/dev/null)" "$(printf 'customer-net\tcustomer-workers')"
+check "the worker read is the first by name, in its own zone and project" \
+    "$(grep -o 'describe given-w-a --project=proj --zone=us-east1-b' "${workdir}/gcloud-args")" \
+    "describe given-w-a --project=proj --zone=us-east1-b"
+# shellcheck disable=SC2329
+gcloud() { echo "ERROR: reauth" >&2; return 1; }
+(gcp_worker_network) >/dev/null 2>&1
+check "a failed instance read is not an answer" "$?" "1"
+# shellcheck disable=SC2329
+oc() { printf ''; }
+(gcp_worker_network) >/dev/null 2>&1
+check "no worker is not an answer" "$?" "1"
+
+unset -f gcloud oc
+
+######################################################################
+echo "--- gcp/lib.sh: the operator's workload identity ---"
+
+# The role a workload identity run grants the operator is the list the
+# operator asks CCO for. That list is Go, in credentials.go, and the
+# operator writes its request only once a BGPCloudConfiguration exists,
+# which is after the identity has to be in place; so the shell carries a
+# copy, and this is what keeps the copy honest.
+go_permissions="$(awk '/^var permissions = \[\]string\{/{p=1; next} p && /^\}/{exit} p' \
+    "${here}/../internal/platform/gcp/credentials.go" | grep -o '"[^"]*"' | tr -d '"' | sort)"
+check "the operator's role is the list the operator asks CCO for" \
+    "$(printf '%s\n' "${gcp_operator_permissions[@]}" | sort)" "${go_permissions}"
+check "and that list was read, not empty on both sides" \
+    "$(( $(grep -c . <<<"${go_permissions}") > 10 ))" "1"
+
+# The identity scripts ask for what their own calls need, so a
+# permission dropped from the list is a call left unguarded.
+for p in iam.roles.undelete iam.serviceAccounts.setIamPolicy resourcemanager.projects.setIamPolicy iam.serviceAccounts.delete; do
+    check "the identity list covers ${p}" \
+        "$(printf '%s\n' "${gcp_identity_permissions[@]}" | grep -Fxc "${p}")" "1"
+done
+
+# One service account per cluster, named from the infra id so the delete
+# finds it again from the same fact. GCP takes 6 to 30 characters,
+# [a-z][a-z0-9-]*[a-z0-9]; a CI infra id fits whole and a desk one, at
+# 25 characters, does not.
+check "a CI infra id fits whole" \
+    "$(gcp_operator_sa_name ci-op-xxg78pqd-36efb)" "bgpcc-ci-op-xxg78pqd-36efb"
+check "a longer one is cut to 30 characters" \
+    "$(gcp_operator_sa_name amcdermo-2611031326-mf2nw)" "bgpcc-amcdermo-2611031326-mf2n"
+check "and a cut never ends on a hyphen" \
+    "$(gcp_operator_sa_name abcdefghijklmnopqrstuvw-xyz)" "bgpcc-abcdefghijklmnopqrstuvw"
+
+# The role is shared by every run in a project, as ccoctl's and CCO's
+# are: a deleted custom role holds its place in the project's limit of
+# 300 for up to two weeks and its id for a month after that, and these
+# projects are shared with every other CI job. So it is created once,
+# grown when the operator needs more, and never deleted.
+#
+# Recorded and answered. The list prints "<id>\t<deleted>", as gcloud
+# does: blank for a live role, True for a deleted one.
+role_calls="${workdir}/role-calls"
+stub_roles=""
+stub_role_perms=""
+stub_role_list_rc=0
+stub_role_describe_rc=0
+stub_role_create_rc=0
+# Reached through gcp_query's and try's "$@".
+# shellcheck disable=SC2329
+gcloud() {
+    printf 'gcloud %s\n' "$*" >>"${role_calls}"
+    case "$*" in
+        "iam roles list"*)
+            (( stub_role_list_rc == 0 )) || { echo "ERROR: reauth" >&2; return 1; }
+            printf '%s' "${stub_roles}" ;;
+        "iam roles describe"*)
+            (( stub_role_describe_rc == 0 )) || { echo "ERROR: reauth" >&2; return 1; }
+            printf '%s' "${stub_role_perms}" ;;
+        "iam roles create"*)
+            (( stub_role_create_rc == 0 )) || { echo "ERROR: PERMISSION_DENIED" >&2; return 1; }
+            ;;
+    esac
+}
+role_calls_matching() { grep -c -- "$1" "${role_calls}"; }
+
+: >"${role_calls}"; stub_roles=$'otherRole\t\n'
+gcp_ensure_custom_role proj bgpRole "bgp role" a.get b.update >/dev/null 2>&1
+check "gcp_ensure_custom_role creates a role that is not there" "$?" "0"
+check "it creates it in that project, with every permission" \
+    "$(role_calls_matching 'iam roles create bgpRole --project=proj --title=bgp role --permissions=a.get,b.update')" "1"
+
+: >"${role_calls}"; stub_roles=$'bgpRole\t\n'; stub_role_perms="a.get;b.update"
+gcp_ensure_custom_role proj bgpRole "bgp role" a.get b.update >/dev/null 2>&1
+check "it adopts a role that already has every permission" "$?" "0"
+check "and changes nothing" "$(role_calls_matching 'iam roles \(create\|update\|undelete\)')" "0"
+
+: >"${role_calls}"; stub_roles=$'bgpRole\t\n'; stub_role_perms="a.get"
+gcp_ensure_custom_role proj bgpRole "bgp role" a.get b.update >/dev/null 2>&1
+check "it adds what the role lacks" \
+    "$(role_calls_matching 'iam roles update bgpRole --project=proj --add-permissions=b.update')" "1"
+
+# Removing would take a permission from a run at another head that still
+# needs it; the projects are shared and runs overlap.
+: >"${role_calls}"; stub_roles=$'bgpRole\t\n'; stub_role_perms="a.get;b.update;old.thing"
+out="$(gcp_ensure_custom_role proj bgpRole "bgp role" a.get b.update 2>&1)"
+check "it removes nothing the role holds beyond the list" \
+    "$(role_calls_matching 'remove-permissions')" "0"
+check "but says what it found" "$(grep -c 'old.thing' <<<"${out}")" "1"
+
+: >"${role_calls}"; stub_roles=$'bgpRole\tTrue\n'; stub_role_perms="a.get"
+gcp_ensure_custom_role proj bgpRole "bgp role" a.get b.update >/dev/null 2>&1
+check "it undeletes a role somebody deleted, since its id cannot be reused" \
+    "$(role_calls_matching 'iam roles undelete bgpRole --project=proj')" "1"
+check "and then brings it up to date" \
+    "$(role_calls_matching 'iam roles update bgpRole --project=proj --add-permissions=b.update')" "1"
+check "rather than trying to create it again" "$(role_calls_matching 'iam roles create')" "0"
+
+: >"${role_calls}"; stub_roles=""; stub_role_list_rc=1
+gcp_ensure_custom_role proj bgpRole "bgp role" a.get >/dev/null 2>&1
+check "it fails when it cannot tell whether the role exists" "$?" "1"
+check "and creates nothing on a guess" "$(role_calls_matching 'iam roles create')" "0"
+stub_role_list_rc=0
+
+: >"${role_calls}"; stub_roles=$'bgpRole\t\n'; stub_role_describe_rc=1
+gcp_ensure_custom_role proj bgpRole "bgp role" a.get >/dev/null 2>&1
+check "it fails when it cannot read what the role holds" "$?" "1"
+check "and updates nothing on a guess" "$(role_calls_matching 'iam roles update')" "0"
+stub_role_describe_rc=0
+
+: >"${role_calls}"; stub_roles=""; stub_role_create_rc=1
+gcp_ensure_custom_role proj bgpRole "bgp role" a.get >/dev/null 2>&1
+check "it fails when the create is refused" "$?" "1"
+stub_role_create_rc=0
+
+: >"${role_calls}"; dry_run=true
+stub_roles=""; gcp_ensure_custom_role proj bgpRole "bgp role" a.get >/dev/null 2>&1
+stub_roles=$'bgpRole\tTrue\n'; stub_role_perms=""
+gcp_ensure_custom_role proj bgpRole "bgp role" a.get >/dev/null 2>&1
+check "it changes nothing in a rehearsal" "$(role_calls_matching 'iam roles \(create\|update\|undelete\)')" "0"
+dry_run=false
+
+unset -f gcloud
+
+# The service account and its two bindings are per cluster, and go when
+# the cluster does. Existence is an exact comparison, as everywhere in
+# gcp/lib.sh, and a read that failed is never "not there".
+sa_calls="${workdir}/sa-calls"
+stub_sas=""
+stub_policy=""
+stub_sa_list_rc=0
+stub_policy_rc=0
+stub_policy_write_failures=0
+stub_policy_write_denied=0
+stub_sa_policy_notfound=0
+# Reached through gcp_query's, retry's and try's "$@".
+# shellcheck disable=SC2329
+gcloud() {
+    printf 'gcloud %s\n' "$*" >>"${sa_calls}"
+    case "$*" in
+        "iam service-accounts list"*)
+            (( stub_sa_list_rc == 0 )) || { echo "ERROR: reauth" >&2; return 1; }
+            printf '%s' "${stub_sas}" ;;
+        *get-iam-policy*)
+            (( stub_policy_rc == 0 )) || { echo "ERROR: reauth" >&2; return 1; }
+            if [[ "$*" == "iam service-accounts get-iam-policy"* ]] && (( stub_sa_policy_notfound > 0 )); then
+                stub_sa_policy_notfound=$((stub_sa_policy_notfound - 1))
+                echo "ERROR: (gcloud.iam.service-accounts.get-iam-policy) NOT_FOUND: Unknown service account." >&2
+                return 1
+            fi
+            printf '%s' "${stub_policy}" ;;
+        *add-iam-policy-binding*|*remove-iam-policy-binding*)
+            if (( stub_policy_write_denied > 0 )); then
+                echo "ERROR: (gcloud.projects.add-iam-policy-binding) PERMISSION_DENIED: Policy update access denied." >&2
+                return 1
+            fi
+            if (( stub_policy_write_failures > 0 )); then
+                stub_policy_write_failures=$((stub_policy_write_failures - 1))
+                echo "ERROR: (gcloud.projects.add-iam-policy-binding) ABORTED: There were concurrent policy changes." >&2
+                return 1
+            fi ;;
+    esac
+}
+sa_calls_matching() { grep -c -- "$1" "${sa_calls}"; }
+email="bgpcc-infra@proj.iam.gserviceaccount.com"
+
+: >"${sa_calls}"; stub_sas=$'other@proj.iam.gserviceaccount.com\n'
+gcp_ensure_service_account proj bgpcc-infra >/dev/null 2>&1
+check "gcp_ensure_service_account creates an account that is not there" \
+    "$(sa_calls_matching 'iam service-accounts create bgpcc-infra --project=proj')" "1"
+
+# A longer name sharing the prefix is somebody else's account.
+: >"${sa_calls}"; stub_sas=$'bgpcc-infra-2@proj.iam.gserviceaccount.com\n'
+gcp_ensure_service_account proj bgpcc-infra >/dev/null 2>&1
+check "an account whose name only starts the same is not this one" \
+    "$(sa_calls_matching 'iam service-accounts create bgpcc-infra --project=proj')" "1"
+
+: >"${sa_calls}"; stub_sas="${email}"$'\n'
+gcp_ensure_service_account proj bgpcc-infra >/dev/null 2>&1
+check "it adopts an account that is already there" "$(sa_calls_matching 'iam service-accounts create')" "0"
+
+: >"${sa_calls}"; stub_sa_list_rc=1
+gcp_ensure_service_account proj bgpcc-infra >/dev/null 2>&1
+check "it fails when it cannot tell whether the account exists" "$?" "1"
+check "and creates nothing on a guess" "$(sa_calls_matching 'iam service-accounts create')" "0"
+gcp_delete_service_account proj bgpcc-infra >/dev/null 2>&1
+check "the delete fails the same way" "$?" "1"
+check "and deletes nothing on a guess" "$(sa_calls_matching 'iam service-accounts delete')" "0"
+stub_sa_list_rc=0
+
+: >"${sa_calls}"; stub_sas="${email}"$'\n'
+gcp_delete_service_account proj bgpcc-infra >/dev/null 2>&1
+check "gcp_delete_service_account deletes the account" \
+    "$(sa_calls_matching "iam service-accounts delete ${email} --project=proj")" "1"
+: >"${sa_calls}"; stub_sas=""
+gcp_delete_service_account proj bgpcc-infra >/dev/null 2>&1
+check "an account already gone is success" "$?" "0"
+check "and is not deleted again" "$(sa_calls_matching 'iam service-accounts delete')" "0"
+
+# Bindings, on the project and on the account. The policy is read
+# flattened, "<role>\t<member>" per line, and the pair compared whole.
+member="serviceAccount:${email}"
+role_ref="projects/proj/roles/bgpRole"
+wi_role="roles/iam.workloadIdentityUser"
+wi_member="principal://iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/pool/subject/system:serviceaccount:ns:sa"
+
+: >"${sa_calls}"; stub_policy="roles/viewer"$'\t'"${member}"$'\n'
+gcp_ensure_project_binding proj "${role_ref}" "${member}" >/dev/null 2>&1
+check "gcp_ensure_project_binding adds a binding that is not there" \
+    "$(sa_calls_matching "projects add-iam-policy-binding proj --member=${member} --role=${role_ref} --condition=None")" "1"
+
+: >"${sa_calls}"; stub_policy="${role_ref}"$'\t'"${member}"$'\n'
+gcp_ensure_project_binding proj "${role_ref}" "${member}" >/dev/null 2>&1
+check "it adopts a binding that is already there" "$(sa_calls_matching 'add-iam-policy-binding')" "0"
+
+: >"${sa_calls}"; stub_sas="${email}"$'\n'; stub_policy=""
+gcp_ensure_sa_binding proj "${email}" "${wi_role}" "${wi_member}" >/dev/null 2>&1
+check "gcp_ensure_sa_binding binds on the account's own policy" \
+    "$(sa_calls_matching "iam service-accounts add-iam-policy-binding ${email} --project=proj --member=${wi_member} --role=${wi_role}")" "1"
+check "having read that policy, not the project's" \
+    "$(( $(sa_calls_matching "iam service-accounts get-iam-policy ${email} --project=proj") >= 1 ))" "1"
+
+# IAM is eventually consistent: an account created moments ago can be
+# listed and still answer NOT_FOUND to a read of its own policy.
+: >"${sa_calls}"; stub_sas="${email}"$'\n'; stub_policy=""; stub_sa_policy_notfound=2
+gcp_ensure_sa_binding proj "${email}" "${wi_role}" "${wi_member}" >/dev/null 2>&1
+check "it waits for a new account's policy to become readable" "$?" "0"
+check "and then binds" "$(sa_calls_matching 'iam service-accounts add-iam-policy-binding')" "1"
+stub_sa_policy_notfound=0
+
+# The list lags the create as well. Observed in openshift-gce-devel-ci-3
+# on 2026-11-06: an account created moments before was missing from the
+# list, and a run that trusted the list gave up on it.
+: >"${sa_calls}"; stub_sas=""; stub_policy=""
+gcp_ensure_sa_binding proj "${email}" "${wi_role}" "${wi_member}" >/dev/null 2>&1
+check "a new account the list does not show yet is still bound" "$?" "0"
+check "once its own policy answers" "$(sa_calls_matching 'iam service-accounts add-iam-policy-binding')" "1"
+
+: >"${sa_calls}"; stub_sas=""; stub_policy=""; stub_sa_policy_notfound=1000
+GCP_IAM_WAIT_SECS=2 gcp_ensure_sa_binding proj "${email}" "${wi_role}" "${wi_member}" >/dev/null 2>&1
+check "binding on an account that never appears fails" "$?" "1"
+check "without writing its policy" "$(sa_calls_matching 'iam service-accounts add-iam-policy-binding')" "0"
+stub_sa_policy_notfound=0
+
+# In a rehearsal the account was never created, so its policy cannot be
+# read; that is not a failure of the rehearsal.
+: >"${sa_calls}"; stub_sas=""; dry_run=true
+gcp_ensure_sa_binding proj "${email}" "${wi_role}" "${wi_member}" >/dev/null 2>&1
+check "a rehearsal binding on an account it would create succeeds" "$?" "0"
+check "without asking for the policy of an account that is not there" \
+    "$(sa_calls_matching 'iam service-accounts get-iam-policy')" "0"
+dry_run=false
+
+: >"${sa_calls}"; stub_policy_rc=1
+gcp_ensure_project_binding proj "${role_ref}" "${member}" >/dev/null 2>&1
+check "it fails when it cannot read the policy" "$?" "1"
+check "and adds nothing on a guess" "$(sa_calls_matching 'add-iam-policy-binding')" "0"
+gcp_remove_project_binding proj "${role_ref}" "${member}" >/dev/null 2>&1
+check "the removal fails the same way" "$?" "1"
+check "and removes nothing on a guess" "$(sa_calls_matching 'remove-iam-policy-binding')" "0"
+stub_policy_rc=0
+
+# Other runs, and ccoctl, write the same project policy, and GCP refuses
+# a write made against a policy that changed underneath it. A refusal
+# that will not clear is not retried.
+: >"${sa_calls}"; stub_policy=""; stub_policy_write_failures=2
+gcp_ensure_project_binding proj "${role_ref}" "${member}" >/dev/null 2>&1
+check "it keeps trying through concurrent policy changes" "$?" "0"
+check "until the write lands" "$(sa_calls_matching 'add-iam-policy-binding')" "3"
+stub_policy_write_failures=0
+: >"${sa_calls}"; stub_policy=""; stub_policy_write_denied=1
+gcp_ensure_project_binding proj "${role_ref}" "${member}" >/dev/null 2>&1
+check "a denied write fails" "$?" "1"
+check "without being tried again" "$(sa_calls_matching 'add-iam-policy-binding')" "1"
+stub_policy_write_denied=0
+
+: >"${sa_calls}"; stub_policy="${role_ref}"$'\t'"${member}"$'\n'
+gcp_remove_project_binding proj "${role_ref}" "${member}" >/dev/null 2>&1
+check "gcp_remove_project_binding removes the binding" \
+    "$(sa_calls_matching "projects remove-iam-policy-binding proj --member=${member} --role=${role_ref} --condition=None")" "1"
+: >"${sa_calls}"; stub_policy=""
+gcp_remove_project_binding proj "${role_ref}" "${member}" >/dev/null 2>&1
+check "a binding already gone is success" "$?" "0"
+check "and is not removed again, which gcloud would refuse" "$(sa_calls_matching 'remove-iam-policy-binding')" "0"
+
+# Prow logs for openshift repositories are public, and the member names
+# the project.
+: >"${sa_calls}"; stub_sas=""; stub_policy=""
+check "none of it names the project in what it prints" \
+    "$( { gcp_ensure_service_account proj bgpcc-infra
+          gcp_ensure_project_binding proj "${role_ref}" "${member}"
+          gcp_ensure_sa_binding proj "${email}" "${wi_role}" "${wi_member}"
+          stub_policy="${role_ref}"$'\t'"${member}"$'\n'
+          gcp_remove_project_binding proj "${role_ref}" "${member}"
+          stub_sas="${email}"; gcp_delete_service_account proj bgpcc-infra; } 2>&1 | grep -c 'proj\b' )" "0"
+
+: >"${sa_calls}"; dry_run=true; stub_sas=""; stub_policy=""
+gcp_ensure_service_account proj bgpcc-infra >/dev/null 2>&1
+gcp_ensure_project_binding proj "${role_ref}" "${member}" >/dev/null 2>&1
+gcp_ensure_sa_binding proj "${email}" "${wi_role}" "${wi_member}" >/dev/null 2>&1
+stub_sas="${email}"; stub_policy="${role_ref}"$'\t'"${member}"$'\n'
+gcp_remove_project_binding proj "${role_ref}" "${member}" >/dev/null 2>&1
+gcp_delete_service_account proj bgpcc-infra >/dev/null 2>&1
+check "none of it changes anything in a rehearsal" \
+    "$(sa_calls_matching '\(service-accounts \(create\|delete\)\|add-iam-policy-binding\|remove-iam-policy-binding\)')" "0"
+dry_run=false
+
+unset -f gcloud
+
+######################################################################
 echo "--- lib/retry.sh ---"
 #
 # The teardown has two claims behind it. That AWS answers "not ready

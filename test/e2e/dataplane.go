@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -55,6 +56,11 @@ const (
 
 	// WorkerRoleLabel is carried by every worker and no control-plane node.
 	WorkerRoleLabel = "node-role.kubernetes.io/worker"
+
+	// InfraRoleLabel marks OSD's infra nodes. They carry the worker
+	// role too, with a NoSchedule taint, and OSD refuses changes to
+	// them, so they are neither destinations nor router nodes.
+	InfraRoleLabel = "node-role.kubernetes.io/infra"
 )
 
 // Destination is one worker and the pod on it, with whether the worker's
@@ -127,6 +133,10 @@ func NetexecPods(ctx context.Context, c client.Client, namespace string) ([]core
 	if err := c.List(ctx, workers, client.HasLabels{WorkerRoleLabel}); err != nil {
 		return nil, nil, err
 	}
+	workers.Items = slices.DeleteFunc(workers.Items, func(n corev1.Node) bool {
+		_, infra := n.Labels[InfraRoleLabel]
+		return infra
+	})
 	pods := &corev1.PodList{}
 	if err := c.List(ctx, pods, client.InNamespace(namespace),
 		client.MatchingLabels{"app": netexecName}); err != nil {
