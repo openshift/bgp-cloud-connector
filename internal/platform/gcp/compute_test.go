@@ -1,6 +1,8 @@
 package gcp
 
 import (
+	"context"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -226,5 +228,308 @@ func TestPeerName_DistinguishesAddresses(t *testing.T) {
 			t.Errorf("%q and %q both produce peer name %q", other, address, name)
 		}
 		seen[name] = address
+	}
+}
+
+// fakeComputeAPI substitutes the live GCE service at the computeAPI seam so the
+// reconcile logic on computeClient can be driven without reaching Google. It
+// records every write so a test can assert what would have been sent.
+type fakeComputeAPI struct {
+	instances map[string]*compute.Instance // keyed by "zone/name"
+	router    *compute.Router
+
+	updateInstanceCalls []updateInstanceCall
+	patchCalls          []*compute.Router
+	updateCalls         []*compute.Router
+}
+
+type updateInstanceCall struct {
+	zone, name           string
+	inst                 *compute.Instance
+	mostDisruptiveAction string
+}
+
+func (f *fakeComputeAPI) GetInstance(_ context.Context, zone, name string) (*compute.Instance, error) {
+	inst, ok := f.instances[zone+"/"+name]
+	if !ok {
+		return nil, fmt.Errorf("instance %s/%s not found", zone, name)
+	}
+	return inst, nil
+}
+
+func (f *fakeComputeAPI) UpdateInstance(_ context.Context, zone, name string, inst *compute.Instance, action string) (*compute.Operation, error) {
+	f.updateInstanceCalls = append(f.updateInstanceCalls, updateInstanceCall{
+		zone: zone, name: name, inst: inst, mostDisruptiveAction: action,
+	})
+	return &compute.Operation{Name: "op"}, nil
+}
+
+func (f *fakeComputeAPI) GetRouter(context.Context, string) (*compute.Router, error) {
+	return f.router, nil
+}
+
+func (f *fakeComputeAPI) PatchRouter(_ context.Context, _ string, patch *compute.Router) (*compute.Operation, error) {
+	f.patchCalls = append(f.patchCalls, patch)
+	return &compute.Operation{Name: "op"}, nil
+}
+
+func (f *fakeComputeAPI) UpdateRouter(_ context.Context, _ string, r *compute.Router) (*compute.Operation, error) {
+	f.updateCalls = append(f.updateCalls, r)
+	return &compute.Operation{Name: "op"}, nil
+}
+
+func (f *fakeComputeAPI) WaitZoneOp(context.Context, string, *compute.Operation) error { return nil }
+func (f *fakeComputeAPI) WaitRegionOp(context.Context, *compute.Operation) error       { return nil }
+
+// TestReconcilePeers_NoOpWhenRouterAlreadyMatches is the idempotency guard: a
+// second reconcile of an unchanged node set must send no patch. A Cloud Router
+// patch replaces the whole peer list, so a needless write churns every session.
+func TestReconcilePeers_NoOpWhenRouterAlreadyMatches(t *testing.T) {
+	top := topology()
+	n := nodes("10.0.1.4")
+	api := &fakeComputeAPI{router: &compute.Router{BgpPeers: desiredPeers("cluster", n, top, 65001)}}
+	c := &computeClient{api: api}
+
+	changed, err := c.ReconcilePeers(context.Background(), "cr", "cluster", n, top, 65001)
+	if err != nil {
+		t.Fatalf("ReconcilePeers: %v", err)
+	}
+	if changed {
+		t.Errorf("reported a change when the router already carried the desired peers")
+	}
+	if len(api.patchCalls) != 0 {
+		t.Errorf("sent %d patches for an unchanged router, want 0", len(api.patchCalls))
+	}
+}
+
+// TestReconcilePeers_PatchesWhenInterfaceDriftsUnderStablePeerNames is the
+// subtle correctness property of the whole method: peer names are keyed on the
+// node address and interface index, so a Cloud Router interface re-addressed
+// under the same index leaves every name unchanged. If ReconcilePeers compared
+// names alone it would send no patch and leave every peer pointing at an
+// interface IP that no longer exists — the session would never come back up.
+func TestReconcilePeers_PatchesWhenInterfaceDriftsUnderStablePeerNames(t *testing.T) {
+	n := nodes("10.0.1.4")
+	oldTop := topology()
+	existing := desiredPeers("cluster", n, oldTop, 65001)
+
+	newTop := &CloudRouterTopology{
+		CloudRouterASN: oldTop.CloudRouterASN,
+		InterfaceNames: oldTop.InterfaceNames,
+		InterfaceIPs:   []string{"10.0.0.8", "10.0.0.9"}, // interfaces re-addressed
+	}
+	// The test only means something if the names really are unchanged.
+	want := desiredPeers("cluster", n, newTop, 65001)
+	for i := range existing {
+		if existing[i].Name != want[i].Name {
+			t.Fatalf("peer names differ (%q vs %q); this test is meaningless unless they match",
+				existing[i].Name, want[i].Name)
+		}
+	}
+
+	api := &fakeComputeAPI{router: &compute.Router{BgpPeers: existing}}
+	c := &computeClient{api: api}
+
+	changed, err := c.ReconcilePeers(context.Background(), "cr", "cluster", n, newTop, 65001)
+	if err != nil {
+		t.Fatalf("ReconcilePeers: %v", err)
+	}
+	if !changed {
+		t.Fatalf("sent no patch when a Cloud Router interface was re-addressed under a stable peer name")
+	}
+	if len(api.patchCalls) != 1 {
+		t.Fatalf("sent %d patches, want 1", len(api.patchCalls))
+	}
+	for _, p := range api.patchCalls[0].BgpPeers {
+		if isOurPeer(p.Name, "cluster") && p.IpAddress != "10.0.0.8" && p.IpAddress != "10.0.0.9" {
+			t.Errorf("patched peer %q still points at the old interface IP %q", p.Name, p.IpAddress)
+		}
+	}
+}
+
+// TestClearPeers_RemovesOnlyOurs covers Cleanup on a shared router: our peers
+// go, everyone else's stay.
+func TestClearPeers_RemovesOnlyOurs(t *testing.T) {
+	top := topology()
+	foreign := &compute.RouterBgpPeer{Name: "other-bgp-10-9-9-9-0", PeerIpAddress: "10.9.9.9"}
+	all := append([]*compute.RouterBgpPeer{foreign}, desiredPeers("cluster", nodes("10.0.1.4"), top, 65001)...)
+	api := &fakeComputeAPI{router: &compute.Router{BgpPeers: all}}
+	c := &computeClient{api: api}
+
+	changed, err := c.ClearPeers(context.Background(), "cr", "cluster")
+	if err != nil {
+		t.Fatalf("ClearPeers: %v", err)
+	}
+	if !changed {
+		t.Fatalf("reported no change when our peers had to be removed")
+	}
+	if len(api.updateCalls) != 1 {
+		t.Fatalf("sent %d updates, want 1", len(api.updateCalls))
+	}
+	kept := api.updateCalls[0].BgpPeers
+	if len(kept) != 1 || kept[0].Name != foreign.Name {
+		t.Errorf("kept %v, want only the foreign peer %q", kept, foreign.Name)
+	}
+}
+
+// TestClearPeers_NoOpWhenNoneOurs guards against an empty write, which would be
+// a needless router update, when there is nothing of ours to remove.
+func TestClearPeers_NoOpWhenNoneOurs(t *testing.T) {
+	foreign := &compute.RouterBgpPeer{Name: "other-bgp-10-9-9-9-0", PeerIpAddress: "10.9.9.9"}
+	api := &fakeComputeAPI{router: &compute.Router{BgpPeers: []*compute.RouterBgpPeer{foreign}}}
+	c := &computeClient{api: api}
+
+	changed, err := c.ClearPeers(context.Background(), "cr", "cluster")
+	if err != nil {
+		t.Fatalf("ClearPeers: %v", err)
+	}
+	if changed {
+		t.Errorf("reported a change when no owned peers existed")
+	}
+	if len(api.updateCalls) != 0 {
+		t.Errorf("updated the router with nothing of ours to remove")
+	}
+}
+
+// TestEnsureCanIPForward_EnablesWhenOff pins the field written and the disruption
+// level: enabling IP forwarding is a REFRESH, never a restart.
+func TestEnsureCanIPForward_EnablesWhenOff(t *testing.T) {
+	api := &fakeComputeAPI{instances: map[string]*compute.Instance{
+		"us-east1-b/worker-a": {CanIpForward: false},
+	}}
+	c := &computeClient{api: api}
+
+	changed, err := c.EnsureCanIPForward(context.Background(), routerNode("worker-a", "10.0.1.4"))
+	if err != nil {
+		t.Fatalf("EnsureCanIPForward: %v", err)
+	}
+	if !changed {
+		t.Fatalf("reported no change when forwarding was off")
+	}
+	if len(api.updateInstanceCalls) != 1 {
+		t.Fatalf("sent %d instance updates, want 1", len(api.updateInstanceCalls))
+	}
+	call := api.updateInstanceCalls[0]
+	if !call.inst.CanIpForward {
+		t.Errorf("updated instance still has canIpForward off")
+	}
+	if call.mostDisruptiveAction != "REFRESH" {
+		t.Errorf("disruption level = %q, want REFRESH", call.mostDisruptiveAction)
+	}
+}
+
+// TestEnsureNestedVirtualization_InitializesAdvancedFeatures covers the nil
+// AdvancedMachineFeatures case: the method has to allocate the struct before
+// setting the flag, and this field demands a RESTART.
+func TestEnsureNestedVirtualization_InitializesAdvancedFeatures(t *testing.T) {
+	api := &fakeComputeAPI{instances: map[string]*compute.Instance{
+		"us-east1-b/worker-a": {AdvancedMachineFeatures: nil},
+	}}
+	c := &computeClient{api: api}
+
+	changed, err := c.EnsureNestedVirtualization(context.Background(), routerNode("worker-a", "10.0.1.4"))
+	if err != nil {
+		t.Fatalf("EnsureNestedVirtualization: %v", err)
+	}
+	if !changed {
+		t.Fatalf("reported no change when nested virtualization was off")
+	}
+	call := api.updateInstanceCalls[0]
+	if call.inst.AdvancedMachineFeatures == nil || !call.inst.AdvancedMachineFeatures.EnableNestedVirtualization {
+		t.Errorf("nested virtualization was not enabled on the updated instance")
+	}
+	if call.mostDisruptiveAction != "RESTART" {
+		t.Errorf("disruption level = %q, want RESTART", call.mostDisruptiveAction)
+	}
+}
+
+// TestEnsureNestedVirtualization_NoOpWhenAlreadyEnabled matters because this
+// field's update is a RESTART: a needless write reboots a router node and drops
+// its BGP sessions, so an instance already correct must not be touched.
+func TestEnsureNestedVirtualization_NoOpWhenAlreadyEnabled(t *testing.T) {
+	api := &fakeComputeAPI{instances: map[string]*compute.Instance{
+		"us-east1-b/worker-a": {AdvancedMachineFeatures: &compute.AdvancedMachineFeatures{EnableNestedVirtualization: true}},
+	}}
+	c := &computeClient{api: api}
+
+	changed, err := c.EnsureNestedVirtualization(context.Background(), routerNode("worker-a", "10.0.1.4"))
+	if err != nil {
+		t.Fatalf("EnsureNestedVirtualization: %v", err)
+	}
+	if changed {
+		t.Errorf("reported a change when nested virtualization was already on")
+	}
+	if len(api.updateInstanceCalls) != 0 {
+		t.Errorf("restarted an instance that already had nested virtualization on")
+	}
+}
+
+// TestGetRouterTopology_StripsCIDRAndReadsASN pins the two things the topology
+// read has to get right: the peer address is the interface IP with any CIDR
+// suffix removed, and the Cloud Router ASN comes off the Bgp block.
+func TestGetRouterTopology_StripsCIDRAndReadsASN(t *testing.T) {
+	api := &fakeComputeAPI{router: &compute.Router{
+		Bgp: &compute.RouterBgp{Asn: 65000},
+		Interfaces: []*compute.RouterInterface{
+			{Name: "if0", IpRange: "10.0.0.2/30"},
+			{Name: "if1", IpRange: "10.0.0.6"},
+		},
+	}}
+	c := &computeClient{api: api}
+
+	top, err := c.GetRouterTopology(context.Background(), "cr")
+	if err != nil {
+		t.Fatalf("GetRouterTopology: %v", err)
+	}
+	if top.CloudRouterASN != 65000 {
+		t.Errorf("ASN = %d, want 65000", top.CloudRouterASN)
+	}
+	wantIPs := []string{"10.0.0.2", "10.0.0.6"}
+	if len(top.InterfaceIPs) != len(wantIPs) {
+		t.Fatalf("interface IPs = %v, want %v", top.InterfaceIPs, wantIPs)
+	}
+	for i, ip := range wantIPs {
+		if top.InterfaceIPs[i] != ip {
+			t.Errorf("interface IP %d = %q, want %q (CIDR suffix not stripped?)", i, top.InterfaceIPs[i], ip)
+		}
+	}
+}
+
+// TestComputeOpDone covers the operation terminal-state check the WaitZoneOp and
+// WaitRegionOp poll loops both stop on: an operation still running keeps them
+// polling, a DONE operation stops them, and a DONE operation carrying an error
+// surfaces that error rather than reporting success. This is the one bit of
+// logic in those loops, and it sits behind an unmockable time.After, so it is
+// tested here in isolation.
+func TestComputeOpDone(t *testing.T) {
+	if done, err := computeOpDone(&compute.Operation{Status: "RUNNING"}); done || err != nil {
+		t.Errorf("computeOpDone(RUNNING) = (%v, %v), want (false, nil)", done, err)
+	}
+	if done, err := computeOpDone(&compute.Operation{Status: "DONE"}); !done || err != nil {
+		t.Errorf("computeOpDone(DONE) = (%v, %v), want (true, nil)", done, err)
+	}
+	done, err := computeOpDone(&compute.Operation{
+		Status: "DONE",
+		Error:  &compute.OperationError{},
+	})
+	if !done || err == nil {
+		t.Errorf("computeOpDone(DONE with error) = (%v, %v), want (true, non-nil)", done, err)
+	}
+}
+
+// TestGetRouterTopology_NilBgpYieldsZeroASN covers a Cloud Router with no BGP
+// block, which the read has to tolerate rather than dereference.
+func TestGetRouterTopology_NilBgpYieldsZeroASN(t *testing.T) {
+	api := &fakeComputeAPI{router: &compute.Router{
+		Interfaces: []*compute.RouterInterface{{Name: "if0", IpRange: "10.0.0.2/30"}},
+	}}
+	c := &computeClient{api: api}
+
+	top, err := c.GetRouterTopology(context.Background(), "cr")
+	if err != nil {
+		t.Fatalf("GetRouterTopology: %v", err)
+	}
+	if top.CloudRouterASN != 0 {
+		t.Errorf("ASN = %d, want 0 for a router with no BGP block", top.CloudRouterASN)
 	}
 }
