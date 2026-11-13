@@ -76,6 +76,15 @@
         "prBodyTemplate": "{{{header}}}{{{table}}}{{{notes}}}{{{changelogs}}}{{{configDescription}}}{{{controls}}}{{{footer}}}",
         "recreateWhen": "always",
         "rebaseWhen": "behind-base-branch"
+      },
+      {
+        "description": "Auto-merge label for main-branch Konflux Tekton catalog reference bumps",
+        "matchManagers": ["tekton"],
+        "matchJsonata": ["baseBranch = 'main'"],
+        "matchPackageNames": [
+          "/^quay.io/konflux-ci/tekton-catalog//"
+        ],
+        "addLabels": ["allow-automatic-merge"]
       }
     ],
     "schedule": [
