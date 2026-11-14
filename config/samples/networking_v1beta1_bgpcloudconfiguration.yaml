@@ -10,6 +10,8 @@ spec:
 
   routerNodeSelector:
     bgp_router: "true"
+  routeAdvertisementNodeSelector:
+    bgp_router: "true"
 
   # --- AWS auto-discovery mode ---
   # Under platform: AWS the operator discovers Route Server endpoints,
