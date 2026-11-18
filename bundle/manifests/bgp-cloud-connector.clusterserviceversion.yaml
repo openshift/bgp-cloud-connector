@@ -322,6 +322,9 @@ spec:
               - emptyDir: {}
                 name: tmp
               - configMap:
+                  items:
+                  - key: ca-bundle.crt
+                    path: ca-bundle.crt
                   name: openshift-bgp-cloud-connector-trusted-ca
                 name: trusted-ca
               - name: bound-sa-token

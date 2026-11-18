@@ -128,9 +128,18 @@ spec:
       volumes:
       - name: tmp
         emptyDir: {}
+      # The key is listed, not optional, so the kubelet will not mount the
+      # volume while the ConfigMap has no ca-bundle.crt. OLM's re-apply of
+      # the bundle deletes the injected data until the network operator
+      # puts it back: a pod starting in that gap waits in ContainerCreating
+      # rather than running with an empty trust store, and a running pod
+      # keeps the bundle it has.
       - name: trusted-ca
         configMap:
           name: trusted-ca
+          items:
+          - key: ca-bundle.crt
+            path: ca-bundle.crt
       - name: bound-sa-token
         projected:
           sources:
