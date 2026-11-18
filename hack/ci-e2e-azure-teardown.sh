@@ -117,6 +117,8 @@ if [[ "${cluster_reachable}" == true ]]; then
     # deleted fails the delete, and the Route Server is the expensive
     # thing.
     if oc -n openshift-bgp-cloud-connector get deployment/openshift-bgp-cloud-connector-controller-manager >/dev/null 2>&1; then
+        # Scaled down, the manager leaves gather-extra nothing to collect.
+        ci_save_operator_state
         if ! oc -n openshift-bgp-cloud-connector scale deployment/openshift-bgp-cloud-connector-controller-manager --replicas=0; then
             warn "scaling the operator down failed; continuing to the cloud resources"
             cluster_side_failed=true

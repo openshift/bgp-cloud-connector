@@ -51,3 +51,31 @@ ci_remove_workdir() {
     [[ -n "${ci_workdir}" ]] && rm -rf "${ci_workdir}"
     return 0
 }
+
+# Saves the operator's pods, events, CSVs and manager logs under
+# ${ARTIFACT_DIR}/operator, including the log of the container before a
+# restart; what oc says on stderr goes to errors.log there, so the YAML
+# stays parseable. The AWS and Azure teardowns call it before they scale the
+# operator to zero; after that gather-extra finds no manager pod, and a
+# restart during the run leaves no trace but an event.
+#
+# Returns 0 whatever happens, and every request has a deadline: the
+# teardown still has cloud resources to delete, and a cluster that
+# cannot answer, or stops answering, is a reason to save less, not to
+# stop.
+ci_save_operator_state() {
+    [[ -n "${ARTIFACT_DIR:-}" ]] || return 0
+    local dir="${ARTIFACT_DIR}/operator"
+    local -a kube=(oc --request-timeout=30s -n openshift-bgp-cloud-connector)
+    local pod
+    mkdir -p "${dir}" || return 0
+    "${kube[@]}" get pods -o yaml >"${dir}/pods.yaml" 2>>"${dir}/errors.log" || :
+    "${kube[@]}" get events -o yaml >"${dir}/events.yaml" 2>>"${dir}/errors.log" || :
+    "${kube[@]}" get csv -o yaml >"${dir}/csvs.yaml" 2>>"${dir}/errors.log" || :
+    for pod in $("${kube[@]}" get pods -l control-plane=controller-manager -o name 2>>"${dir}/errors.log"); do
+        "${kube[@]}" logs "${pod}" >"${dir}/${pod#pod/}.log" 2>>"${dir}/errors.log" || :
+        "${kube[@]}" logs --previous "${pod}" >"${dir}/${pod#pod/}.previous.log" 2>>"${dir}/errors.log" \
+            || rm -f "${dir}/${pod#pod/}.previous.log" || :
+    done
+    return 0
+}

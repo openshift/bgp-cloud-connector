@@ -1299,6 +1299,89 @@ ci_workdir=""
 ci_remove_workdir
 check "ci_remove_workdir succeeds with nothing to remove" "$?" "0"
 
+# The AWS and Azure teardowns scale the operator to zero before
+# gather-extra runs, which leaves gather-extra no manager pod to collect
+# logs from. ci_save_operator_state saves what a failed run needs first.
+stub_pods=""; stub_restarted=""; stub_oc_rc=0; stub_discovery_err=""
+oc_calls="${ci_home}/oc-calls"
+oc() {
+    printf '%s\n' "$*" >>"${oc_calls}"
+    (( stub_oc_rc == 0 )) || { echo "The connection to the server was refused" >&2; return "${stub_oc_rc}"; }
+    case "$*" in
+        *"get pods -l control-plane=controller-manager -o name"*)
+            [[ -n "${stub_discovery_err}" ]] && { echo "${stub_discovery_err}" >&2; return 1; }
+            local p; for p in ${stub_pods}; do echo "pod/${p}"; done ;;
+        *"get pods -o yaml"*)   echo "Warning: a deprecation oc prints on stderr" >&2; echo "kind: List # pods" ;;
+        *"get events -o yaml"*) echo "kind: List # events" ;;
+        *"get csv -o yaml"*)    echo "kind: List # csvs" ;;
+        *"logs --previous"*)
+            [[ " ${stub_restarted} " == *" ${*: -1} "* ]] || \
+                { echo "Error from server (BadRequest): previous terminated container \"manager\" not found" >&2; return 1; }
+            echo "trusted CA bundle changed, initiating shutdown to reload it" ;;
+        *" logs "*) echo "Warning: a message oc prints beside the log" >&2; echo "manager log for ${*: -1}" ;;
+        *) echo "unstubbed oc call: $*" >&2; return 1 ;;
+    esac
+}
+
+saved="${ci_home}/artifacts"
+: >"${oc_calls}"
+check "ci_save_operator_state does nothing outside prow" \
+    "$( (unset ARTIFACT_DIR; ci_save_operator_state; echo "rc=$?"; [[ -e "${saved}" ]] && echo saved) )" \
+    "rc=0"
+check "and asks the cluster nothing" "$(wc -l <"${oc_calls}")" "0"
+
+stub_pods="mgr-a"; stub_restarted="pod/mgr-a"
+( ARTIFACT_DIR="${saved}"; ci_save_operator_state )
+check "it saves the namespace's pods, and only YAML" "$(cat "${saved}/operator/pods.yaml")" "kind: List # pods"
+check "and its events" "$(cat "${saved}/operator/events.yaml")" "kind: List # events"
+check "and its CSVs" "$(cat "${saved}/operator/csvs.yaml")" "kind: List # csvs"
+check "and keeps oc's own messages beside them" \
+    "$(grep -c 'Warning: a deprecation oc prints on stderr' "${saved}/operator/errors.log")" "1"
+check "and the manager's log, and only the manager's" \
+    "$(cat "${saved}/operator/mgr-a.log")" "manager log for pod/mgr-a"
+check "with oc's messages about it beside the others" \
+    "$(grep -c 'Warning: a message oc prints beside the log' "${saved}/operator/errors.log")" "1"
+check "and the log of the container before a restart" \
+    "$(cat "${saved}/operator/mgr-a.previous.log")" \
+    "trusted CA bundle changed, initiating shutdown to reload it"
+# A server that accepts the connection and stops answering would hold
+# the teardown here, short of the scale-down and the cloud deletes.
+check "every call it makes has a request timeout" \
+    "$(grep -c -v -- '--request-timeout=30s ' "${oc_calls}")" "0"
+
+rm -rf "${saved}"; stub_pods="mgr-b"; stub_restarted=""
+( ARTIFACT_DIR="${saved}"; ci_save_operator_state )
+check "a manager that never restarted has its log saved" \
+    "$(cat "${saved}/operator/mgr-b.log")" "manager log for pod/mgr-b"
+check "and no previous log" \
+    "$([[ -e "${saved}/operator/mgr-b.previous.log" ]] && echo yes || echo no)" "no"
+check "but keeps the reason there is none" \
+    "$(grep -c 'previous terminated container "manager" not found' "${saved}/operator/errors.log")" "1"
+
+# Without pod names there are no manager logs, so the reason must be kept.
+rm -rf "${saved}"; stub_discovery_err="Unable to connect to the server: context deadline exceeded"
+( ARTIFACT_DIR="${saved}"; ci_save_operator_state )
+check "a pod lookup that fails says why" \
+    "$(grep -c 'context deadline exceeded' "${saved}/operator/errors.log")" "1"
+stub_discovery_err=""
+
+# Removing a failed capture can fail too, and must not stop the teardown.
+rm -rf "${saved}"
+out="$( ( set -o errexit
+          rm() { printf 'rm %s\n' "$*"; return 1; }
+          ARTIFACT_DIR="${saved}"; ci_save_operator_state; echo "carried on" ) 2>&1 )"
+check "it tries to remove a capture that failed" \
+    "$(printf '%s\n' "${out}" | grep -F -x -c -- "rm -f ${saved}/operator/mgr-b.previous.log")" "1"
+check "and a removal that fails does not fail the teardown" "$(printf '%s' "${out}" | tail -1)" "carried on"
+
+# The teardown still has cloud resources to delete, so nothing here may
+# fail it.
+rm -rf "${saved}"; stub_oc_rc=1
+out="$( ( set -o errexit; ARTIFACT_DIR="${saved}"; ci_save_operator_state; echo "carried on" ) 2>&1 )"
+check "an unreachable cluster does not fail the teardown" "$(printf '%s' "${out}" | tail -1)" "carried on"
+stub_oc_rc=0; stub_pods=""; stub_restarted=""
+unset -f oc
+
 ######################################################################
 echo "--- aws/ci.sh ---"
 
