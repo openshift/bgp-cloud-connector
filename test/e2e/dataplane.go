@@ -130,13 +130,10 @@ func EnsureNetexec(ctx context.Context, c client.Client, namespace string) error
 // network and fails silently.
 func NetexecPods(ctx context.Context, c client.Client, namespace string) ([]corev1.Node, map[string]string, error) {
 	workers := &corev1.NodeList{}
-	if err := c.List(ctx, workers, client.HasLabels{WorkerRoleLabel}); err != nil {
+	var err error
+	if workers.Items, err = Workers(ctx, c); err != nil {
 		return nil, nil, err
 	}
-	workers.Items = slices.DeleteFunc(workers.Items, func(n corev1.Node) bool {
-		_, infra := n.Labels[InfraRoleLabel]
-		return infra
-	})
 	pods := &corev1.PodList{}
 	if err := c.List(ctx, pods, client.InNamespace(namespace),
 		client.MatchingLabels{"app": netexecName}); err != nil {
@@ -171,6 +168,19 @@ func NetexecPods(ctx context.Context, c client.Client, namespace string) ([]core
 
 // podReady reports whether the pod's Ready condition is True, which with
 // the readiness probe above means /clientip is answering.
+// Workers are the nodes with the worker role that are not OSD infra
+// nodes: the nodes the data-plane check runs a pod on.
+func Workers(ctx context.Context, c client.Client) ([]corev1.Node, error) {
+	nodes := &corev1.NodeList{}
+	if err := c.List(ctx, nodes, client.HasLabels{WorkerRoleLabel}); err != nil {
+		return nil, err
+	}
+	return slices.DeleteFunc(nodes.Items, func(n corev1.Node) bool {
+		_, infra := n.Labels[InfraRoleLabel]
+		return infra
+	}), nil
+}
+
 func podReady(pod *corev1.Pod) bool {
 	for _, c := range pod.Status.Conditions {
 		if c.Type == corev1.PodReady {

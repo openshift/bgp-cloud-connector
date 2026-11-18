@@ -42,6 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	networkingapi "github.com/openshift/bgp-cloud-connector/api/v1beta1"
+	awsplatform "github.com/openshift/bgp-cloud-connector/internal/platform/aws"
 	e2e "github.com/openshift/bgp-cloud-connector/test/e2e"
 )
 
@@ -211,6 +212,17 @@ func allManagedPeers(ctx context.Context) ([]ec2types.RouteServerPeer, error) {
 	return all, nil
 }
 
+// peerIDs identifies each peer rather than its address: a speaker has one
+// peer per route server endpoint, so the loss of one leaves its address
+// in place.
+func peerIDs(peers []ec2types.RouteServerPeer) map[string]bool {
+	ids := make(map[string]bool, len(peers))
+	for _, p := range peers {
+		ids[aws.ToString(p.RouteServerPeerId)] = true
+	}
+	return ids
+}
+
 func routerNodes(ctx context.Context) ([]corev1.Node, error) {
 	nodeList := &corev1.NodeList{}
 	if err := k8sClient.List(ctx, nodeList, client.MatchingLabels(bgpConfig.Spec.RouterNodeSelector)); err != nil {
@@ -259,4 +271,26 @@ func primaryENI(inst *ec2types.Instance) *ec2types.InstanceNetworkInterface {
 		}
 	}
 	return nil
+}
+
+// setSourceDestCheck sets SourceDestCheck on the primary ENI of the
+// instance behind node.
+func setSourceDestCheck(ctx context.Context, node *corev1.Node, enabled bool) error {
+	instanceID, _, err := awsplatform.ParseProviderID(node.Spec.ProviderID)
+	if err != nil {
+		return err
+	}
+	inst, err := describeInstance(ctx, instanceID)
+	if err != nil {
+		return err
+	}
+	eni := primaryENI(inst)
+	if eni == nil {
+		return fmt.Errorf("instance %s of node %s has no primary ENI", instanceID, node.Name)
+	}
+	_, err = ec2Client.ModifyNetworkInterfaceAttribute(ctx, &ec2.ModifyNetworkInterfaceAttributeInput{
+		NetworkInterfaceId: eni.NetworkInterfaceId,
+		SourceDestCheck:    &ec2types.AttributeBooleanValue{Value: aws.Bool(enabled)},
+	})
+	return err
 }
