@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -312,25 +313,22 @@ func reconcileCredentialsRequest(ctx context.Context, c client.Client, namespace
 		return fmt.Errorf("reading the credentials request: %w", err)
 	}
 
-	existingSpec, _, _ := unstructured.NestedMap(existing.Object, "spec")
-	desiredSpec, _, _ := unstructured.NestedMap(desired.Object, "spec")
+	// DeepEqual on the raw specs holds only while desiredCredentialsRequest
+	// builds from the types the API server decodes JSON into (map[string]any,
+	// []any, string, bool, int64): a []string, or an int that reads back
+	// as int64, compares unequal to the same value read back, and every
+	// reconcile would rewrite the request.
+	// TestReconcileCredentialsRequest_UnchangedRequestIsNotRewritten fails
+	// if that happens.
 	adopted := ensureOwnerReference(existing, owner)
-	if equalSpecs(existingSpec, desiredSpec) && !adopted {
+	if reflect.DeepEqual(existing.Object["spec"], desired.Object["spec"]) && !adopted {
 		return nil
 	}
-	if err := unstructured.SetNestedMap(existing.Object, desiredSpec, "spec"); err != nil {
-		return fmt.Errorf("rewriting the credentials request: %w", err)
-	}
+	existing.Object["spec"] = desired.Object["spec"]
 	if err := c.Update(ctx, existing); err != nil {
 		return fmt.Errorf("updating the credentials request: %w", err)
 	}
 	return nil
-}
-
-func equalSpecs(a, b map[string]any) bool {
-	left, errA := json.Marshal(a)
-	right, errB := json.Marshal(b)
-	return errA == nil && errB == nil && string(left) == string(right)
 }
 
 // desiredCredentialsRequest is the request this build makes. wif is nil

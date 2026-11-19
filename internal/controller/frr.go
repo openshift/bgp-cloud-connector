@@ -390,9 +390,7 @@ func createOrUpdate(ctx context.Context, c client.Client, obj *unstructured.Unst
 // its own (e.g. FRRConfiguration defaults neighbors[].dualStackAddressFamily),
 // and comparing those exactly would never match, rewriting the object forever.
 func specEqual(existing, desired *unstructured.Unstructured) bool {
-	existingSpec, _, _ := unstructured.NestedMap(existing.Object, "spec")
-	desiredSpec, _, _ := unstructured.NestedMap(desired.Object, "spec")
-	return specSatisfied(existingSpec, desiredSpec)
+	return specSatisfied(existing.Object["spec"], desired.Object["spec"])
 }
 
 func specSatisfied(existing, desired interface{}) bool {

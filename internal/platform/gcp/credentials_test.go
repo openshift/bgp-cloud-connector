@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -583,7 +584,7 @@ func TestResolveCredentials_PartialWorkloadIdentityDoesNotStopAWorkingSecret(t *
 	if _, err := ResolveCredentials(context.Background(), c, testNamespace, testOwner()); err != nil {
 		t.Fatalf("ResolveCredentials with the full identity: %v", err)
 	}
-	before, _, _ := unstructured.NestedMap(getCredentialsRequest(t, c).Object, "spec")
+	before := getCredentialsRequest(t, c).Object["spec"]
 
 	env := fullWorkloadIdentityEnv()
 	delete(env, providerIDEnvVar)
@@ -595,8 +596,8 @@ func TestResolveCredentials_PartialWorkloadIdentityDoesNotStopAWorkingSecret(t *
 	if len(got) == 0 {
 		t.Fatal("no client options returned")
 	}
-	after, _, _ := unstructured.NestedMap(getCredentialsRequest(t, c).Object, "spec")
-	if !equalSpecs(before, after) {
+	after := getCredentialsRequest(t, c).Object["spec"]
+	if !reflect.DeepEqual(before, after) {
 		t.Errorf("the request was rewritten from an incomplete identity:\nbefore %v\nafter  %v", before, after)
 	}
 }
