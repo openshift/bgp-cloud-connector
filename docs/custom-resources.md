@@ -170,7 +170,8 @@ spec:
 | Field | Required | Description |
 |:---|:---|:---|
 | `spec.platform` | Yes | Which platform to reconcile against: `AWS`, `Azure`, `GCP`, or `Manual`. `Manual` is not a cloud: it reconciles nothing and takes its peering from `spec.bgp.peerGroups`. Selects which cloud block is required (`spec.aws` / `spec.azure` / `spec.gcp`), and refuses the others (CEL-enforced). |
-| `spec.routerNodeSelector` | Yes | Cluster-wide label selector for all BGP-enabled worker nodes (e.g. `bgp_router: "true"`). Must match labels applied to BGP router machine pools. |
+| `spec.routerNodeSelector` | Yes | Label selector for nodes that establish BGP sessions with external routers. These are the nodes from which routes are advertised through FRR. |
+| `spec.routeAdvertisementNodeSelector` | No | Label selector for nodes selected by `RouteAdvertisements` for PodNetwork advertisement. This is independent from `routerNodeSelector`; when omitted, the generated shared `RouteAdvertisements` keeps an empty selector and selects all nodes. |
 | `spec.bgp.localASN` | Yes | AS number for the OCP FRR routers. From `terraform output rosa_bgp_asn`. |
 | `spec.bgp.livenessDetection` | No | `bfd` or `bgp-keepalive` (default). Applies to all neighbors. BFD detects peer failure in ~1s (300ms interval × 3 multiplier). BGP keepalive detects peer failure in ~90s (default hold time). Whether a single peer failure fails over automatically depends on the platform having a second neighbour in the group to fall back to; on AWS each AZ has 2 Route Server endpoints, so it does. |
 | `spec.bgp.peerGroups[]` | Under `platform: Manual` | BGP peer groups with explicit neighbour addresses. Required under `platform: Manual`, and must not be set on any other platform, where the groups are discovered (CEL-enforced). |
@@ -202,6 +203,22 @@ spec:
 | `status.peerGroups[].key` | Names the group in cloud terms: the availability zone on AWS. |
 | `status.peerGroups[].nodeSelector` | Narrows `spec.routerNodeSelector` to this group's nodes. |
 | `status.peerGroups[].neighbors[]` | The addresses this group's router nodes peer with. |
+
+### BGP peering and route-advertisement selectors
+
+`routerNodeSelector` and `routeAdvertisementNodeSelector` control different
+parts of the BGP path:
+
+| Selector | Controls | Generated resource |
+|:---|:---|:---|
+| `routerNodeSelector` | Which nodes establish BGP sessions with external routers | `FRRConfiguration.spec.nodeSelector` |
+| `routeAdvertisementNodeSelector` | Which nodes are selected for PodNetwork route advertisement | `RouteAdvertisements.spec.nodeSelector` |
+
+They may use the same labels, but they are not required to. For example, a
+cluster may establish sessions on one set of nodes while selecting a smaller
+gateway set for route advertisement. Leaving
+`routeAdvertisementNodeSelector` unset preserves the default empty RA selector,
+which selects all nodes.
 
 **BGPRouting** (application teams create one per network):
 
@@ -364,6 +381,10 @@ spec:
 ```
 
 ### RouteAdvertisements (from BGPRouting — shared)
+
+The shared object uses `spec.routeAdvertisementNodeSelector` from
+`BGPCloudConfiguration` when it is set. If that field is omitted, the
+operator preserves the empty selector shown below, which selects all nodes.
 
 ```yaml
 apiVersion: k8s.ovn.org/v1

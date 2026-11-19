@@ -280,6 +280,15 @@ spec:
                 - GCP
                 - Manual
                 type: string
+              routeAdvertisementNodeSelector:
+                additionalProperties:
+                  type: string
+                description: |-
+                  routeAdvertisementNodeSelector selects the nodes from which PodNetwork
+                  routes are advertised. When omitted, RouteAdvertisements keeps its
+                  default empty selector and selects all nodes. The selector is limited to
+                  matchLabels for consistency with routerNodeSelector.
+                type: object
               routerNodeSelector:
                 additionalProperties:
                   type: string
