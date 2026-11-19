@@ -23,6 +23,8 @@ Phase 2: Wait for FRR
           ▼
 Node inventory (every platform)
   ├── List nodes matching spec.routerNodeSelector or spec.forwardingNodeSelector
+  ├── Union rule: a node that matches both selectors remains a speaker —
+  │   it is never downgraded to forwarding-only
   ├── A node is complete with an InternalIP and, on a cloud, also a
   │   topology.kubernetes.io/zone label and spec.providerID
   ├── No node matching spec.routerNodeSelector, or any incomplete node,
@@ -68,6 +70,10 @@ Phase 5: Reconcile AWS Resources (if spec.aws configured)
   ├── Forwarding: every selected node. Unset forwardingNodeSelector, or one
   │   that matches nobody, updates speakers only. Nodes that match only
   │   forwardingNodeSelector are not peered.
+  ├── NOTE: forwarding is intentionally never reverted. Removing a node from
+  │   the selector, or unsetting forwardingNodeSelector entirely, leaves the
+  │   cloud-side forwarding flag enabled. The flag is harmless once set, and
+  │   reverting it could break traffic mid-flight.
   └── Condition: CloudResourcesReconciled
           │
           ▼
