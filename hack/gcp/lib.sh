@@ -399,15 +399,63 @@ gcp_ensure_service_account() {
 }
 
 gcp_delete_service_account() {
-    local project="$1" name="$2" rc=0
-    gcp_sa_exists "${project}" "${name}" || rc=$?
-    case "${rc}" in
-        0) info "  deleting service account ${name}"
-           try gcloud iam service-accounts delete "$(gcp_sa_email "${name}" "${project}")" \
-               --project="${project}" --quiet ;;
-        1) info "  service account ${name} already gone" ;;
-        *) return 1 ;;
-    esac
+    local project="$1" name="$2" email err rc deadline
+    email="$(gcp_sa_email "${name}" "${project}")"
+    if [[ "${dry_run}" == true ]]; then
+        # By name: the email carries the project id.
+        info "  would delete service account ${name}"
+        return 0
+    fi
+    # Not decided from a list: IAM's list is eventually consistent (see
+    # _gcp_sa_policy_readable) and can miss an account created moments
+    # before, so the delete is attempted and its own NOT_FOUND is what
+    # "already gone" means. Observed for a missing account, from a
+    # credential holding iam.serviceAccounts.delete:
+    #   ERROR: (gcloud.iam.service-accounts.delete) NOT_FOUND: Unknown service account.
+    # Matched in that status position only. A credential without the
+    # permission gets PERMISSION_DENIED instead, which fails.
+    #
+    # The same consistency can answer NOT_FOUND straight after creation
+    # for an account that exists, so it counts only once it has held
+    # for GCP_IAM_WAIT_SECS, the window gcp_ensure_sa_binding gives IAM
+    # to see a new account; a wait that fails fails the delete. An
+    # account that is genuinely gone therefore takes the whole window.
+    # The error is printed with the project id masked; Prow logs for
+    # openshift repositories are public.
+    deadline=$(( SECONDS + ${GCP_IAM_WAIT_SECS:-120} ))
+    while true; do
+        rc=0
+        err="$(gcloud iam service-accounts delete "${email}" --project="${project}" --quiet 2>&1 >/dev/null)" || rc=$?
+        if (( rc == 0 )); then
+            info "  deleted service account ${name}"
+            return 0
+        fi
+        if ! grep -Eq '^ERROR: \(gcloud\.iam\.service-accounts\.delete\) NOT_FOUND:' <<<"${err}"; then
+            warn "  could not delete service account ${name}: $(_gcp_mask_project "${project}" <<<"${err}")"
+            return 1
+        fi
+        if (( SECONDS >= deadline )); then
+            break
+        fi
+        if ! sleep "${RETRY_INTERVAL_SECS:-5}"; then
+            warn "  could not wait between attempts to delete service account ${name}"
+            return 1
+        fi
+    done
+    info "  service account ${name} already gone"
+}
+
+# Replaces the project id with <PROJECT> wherever it stands as a whole
+# id, not inside a longer word: an id such as "proj" also spells the
+# start of "projects/". Project ids are lowercase letters, digits and
+# hyphens. One replacement per pass, repeated until none is left,
+# because a match consumes the delimiter after it and /g would then miss
+# an id that follows straight on. The replacement is in capitals so it
+# can never match an id, which would otherwise repeat for ever with an
+# id such as "project". The label is its own -e argument because only
+# GNU sed ends a label at a semicolon; BSD sed reads to the newline.
+_gcp_mask_project() {
+    sed -E -e ':a' -e "s/(^|[^a-z0-9-])$1([^a-z0-9-]|\$)/\1<PROJECT>\2/" -e 'ta'
 }
 
 # Whether a policy binds this member to this role: 0 yes, 1 no, 2 the
