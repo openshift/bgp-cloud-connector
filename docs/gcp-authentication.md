@@ -99,7 +99,7 @@ The subject names the namespace the operator runs in; change it if you installed
 
 The operator then adds `serviceAccountEmail` and `audience` (`//iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>`) to its `CredentialsRequest`, with `cloudTokenPath`, and CCO writes a secret holding the federated configuration.
 
-All four variables are needed. With only some of them, with a project id where the number belongs, or with a slash in the pool or provider, the operator sends nothing to CCO and reports the problem on the `BGPCloudConfiguration`, naming the variable.
+All four variables are needed. With only some of them, with a project id where the number belongs, or with a slash in the pool or provider, the operator sends nothing to CCO. Until CCO has written the secret, the operator reports the problem on the `BGPCloudConfiguration`, naming the variable. Once the secret exists, it keeps using it, leaves the `CredentialsRequest` as it is, and only writes the problem to its log.
 
 The variables are read from the operator's environment, so changing them needs a new pod. Setting them through the Subscription changes the Deployment and rolls the pod; the operator updates its existing `CredentialsRequest` on the next pass.
 
