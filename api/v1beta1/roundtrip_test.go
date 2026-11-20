@@ -46,7 +46,8 @@ func TestRoundtrip_BGPCloudConfiguration(t *testing.T) {
 				},
 				EnableNestedVirtualization: &nested,
 			},
-			RouterNodeSelector: map[string]string{"role": "router", "zone": "a"},
+			RouterNodeSelector:     map[string]string{"role": "router", "zone": "a"},
+			ForwardingNodeSelector: map[string]string{"cudn": "true"},
 		},
 	}
 
@@ -89,6 +90,9 @@ func TestRoundtrip_BGPCloudConfiguration(t *testing.T) {
 	}
 	if len(fetched.Spec.RouterNodeSelector) != 2 {
 		t.Errorf("routerNodeSelector has %d entries, want 2", len(fetched.Spec.RouterNodeSelector))
+	}
+	if len(fetched.Spec.ForwardingNodeSelector) != 1 || fetched.Spec.ForwardingNodeSelector["cudn"] != "true" {
+		t.Errorf("forwardingNodeSelector = %v, want cudn=true", fetched.Spec.ForwardingNodeSelector)
 	}
 }
 

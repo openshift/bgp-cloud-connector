@@ -130,6 +130,13 @@ func (in *BGPCloudConfigurationSpec) DeepCopyInto(out *BGPCloudConfigurationSpec
 			(*out)[key] = val
 		}
 	}
+	if in.ForwardingNodeSelector != nil {
+		in, out := &in.ForwardingNodeSelector, &out.ForwardingNodeSelector
+		*out = make(map[string]string, len(*in))
+		for key, val := range *in {
+			(*out)[key] = val
+		}
+	}
 	if in.AWS != nil {
 		in, out := &in.AWS, &out.AWS
 		*out = new(AWSConfig)

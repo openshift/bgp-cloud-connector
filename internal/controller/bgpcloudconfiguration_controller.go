@@ -259,7 +259,7 @@ func (r *BGPCloudConfigurationReconciler) Reconcile(ctx context.Context, req ctr
 	// Defer the transition Event until the status write succeeds. If the write
 	// conflicts, the next pass must be allowed to retry the transition once.
 	incompleteEvent := ""
-	routerNodes, incompleteNodes, err := r.listRouterNodes(ctx, config, cloudNodeMetadata)
+	routerNodes, incompleteNodes, err := r.listNodes(ctx, config, cloudNodeMetadata)
 	if err != nil {
 		return r.setDegraded(ctx, config, *baselineStatus, networkingapi.ConditionCompleteNodeInventory,
 			ReasonCheckFailed, fmt.Sprintf("failed to list router nodes: %v", err))
@@ -454,7 +454,7 @@ func (r *BGPCloudConfigurationReconciler) Reconcile(ctx context.Context, req ctr
 				Type:               networkingapi.ConditionCloudResourcesReconciled,
 				Status:             metav1.ConditionTrue,
 				Reason:             ReasonReconciled,
-				Message:            "Cloud BGP peerings and router node settings reconciled",
+				Message:            "Cloud BGP peerings and forwarding settings reconciled",
 				ObservedGeneration: config.Generation,
 			})
 		} else {
@@ -462,7 +462,7 @@ func (r *BGPCloudConfigurationReconciler) Reconcile(ctx context.Context, req ctr
 				Type:               networkingapi.ConditionCloudResourcesReconciled,
 				Status:             metav1.ConditionFalse,
 				Reason:             ReasonNodesIncomplete,
-				Message:            "Cloud resources reconciled only for complete router nodes",
+				Message:            "Cloud resources reconciled only for complete selected nodes",
 				ObservedGeneration: config.Generation,
 			})
 		}
@@ -549,12 +549,21 @@ func peerGroupsFromStatus(groups []networkingapi.PeerGroupStatus) *platform.Disc
 	return result
 }
 
+// routerInventoryHash identifies the node inventory the cloud was last
+// reconciled against: speakers and forwarding-only nodes. A node's role is
+// part of it, because moving a node between the two changes what the cloud
+// must do (peer or only forward) without changing any other field.
 func routerInventoryHash(complete, incomplete []platform.RouterNode) string {
 	nodes := append(append([]platform.RouterNode(nil), complete...), incomplete...)
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Name < nodes[j].Name })
 	hash := sha256.New()
 	for _, node := range nodes {
 		_, _ = fmt.Fprintf(hash, "%s\x00%s\x00%s\x00%s\x00", node.Name, node.PrivateIP, node.Zone, node.ProviderID)
+		// Only forwarding-only nodes add to the hash, so an inventory without
+		// them hashes as before and an upgrade does not force a cloud pass.
+		if node.ForwardingOnly {
+			_, _ = fmt.Fprint(hash, "forwarding-only\x00")
+		}
 	}
 	return fmt.Sprintf("%x", hash.Sum(nil))
 }
@@ -752,23 +761,42 @@ func getInfrastructureName(ctx context.Context, c client.Client) (string, error)
 	return name, nil
 }
 
-func (r *BGPCloudConfigurationReconciler) listRouterNodes(ctx context.Context, config *networkingapi.BGPCloudConfiguration, requireCloudMetadata bool) (complete []platform.RouterNode, incomplete []platform.RouterNode, err error) {
+func (r *BGPCloudConfigurationReconciler) listNodes(ctx context.Context, config *networkingapi.BGPCloudConfiguration, requireCloudMetadata bool) (complete []platform.RouterNode, incomplete []platform.RouterNode, err error) {
+	speakers, incomplete, err := r.listNodesForSelector(ctx, config.Spec.RouterNodeSelector, false, requireCloudMetadata)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Only the router selector must match something: without speakers there
+	// is no BGP. A forwarding selector that matches nothing is the same as
+	// leaving it unset.
+	if len(speakers) == 0 && len(incomplete) == 0 {
+		incomplete = []platform.RouterNode{{Name: "<no matching nodes>"}}
+	}
+	if len(config.Spec.ForwardingNodeSelector) == 0 {
+		return speakers, incomplete, nil
+	}
+	forwarding, forwardingIncomplete, err := r.listNodesForSelector(ctx, config.Spec.ForwardingNodeSelector, true, requireCloudMetadata)
+	if err != nil {
+		return nil, nil, err
+	}
+	return appendAbsentNodes(speakers, forwarding), appendAbsentNodes(incomplete, forwardingIncomplete), nil
+}
+
+func (r *BGPCloudConfigurationReconciler) listNodesForSelector(ctx context.Context, selector map[string]string, forwardingOnly, requireCloudMetadata bool) (complete []platform.RouterNode, incomplete []platform.RouterNode, err error) {
 	nodeList := &corev1.NodeList{}
-	sel := labels.SelectorFromSet(config.Spec.RouterNodeSelector)
+	sel := labels.SelectorFromSet(selector)
 	if err := r.List(ctx, nodeList, client.MatchingLabelsSelector{Selector: sel}); err != nil {
 		return nil, nil, err
 	}
 
 	complete = make([]platform.RouterNode, 0, len(nodeList.Items))
-	if len(nodeList.Items) == 0 {
-		return complete, []platform.RouterNode{{Name: "<no matching nodes>"}}, nil
-	}
 	for i := range nodeList.Items {
 		node := &nodeList.Items[i]
 		rn := platform.RouterNode{
-			Name:       node.Name,
-			ProviderID: node.Spec.ProviderID,
-			Zone:       node.Labels["topology.kubernetes.io/zone"],
+			Name:           node.Name,
+			ProviderID:     node.Spec.ProviderID,
+			Zone:           node.Labels["topology.kubernetes.io/zone"],
+			ForwardingOnly: forwardingOnly,
 		}
 		for _, addr := range node.Status.Addresses {
 			if addr.Type == corev1.NodeInternalIP {
@@ -809,7 +837,7 @@ func formatIncompleteNodesMessage(incomplete []platform.RouterNode, requireCloud
 		}
 		parts = append(parts, n.Name+" (missing "+strings.Join(missing, "/")+")")
 	}
-	return truncateConditionMessage(fmt.Sprintf("%d router node(s) incomplete: %s", len(incomplete), strings.Join(parts, "; ")))
+	return truncateConditionMessage(fmt.Sprintf("%d selected node(s) incomplete: %s", len(incomplete), strings.Join(parts, "; ")))
 }
 
 // truncateConditionMessage keeps a message inside the 32768-byte limit the API
@@ -1032,4 +1060,20 @@ func (r *BGPCloudConfigurationReconciler) SetupWithManager(mgr ctrl.Manager) err
 		})).
 		Named("bgpcloudconfiguration").
 		Complete(r)
+}
+
+// appendAbsentNodes appends nodes from extra whose names are not already in first.
+func appendAbsentNodes(first, extra []platform.RouterNode) []platform.RouterNode {
+	seen := make(map[string]struct{}, len(first))
+	for _, n := range first {
+		seen[n.Name] = struct{}{}
+	}
+	for _, n := range extra {
+		if _, found := seen[n.Name]; found {
+			continue
+		}
+		seen[n.Name] = struct{}{}
+		first = append(first, n)
+	}
+	return first
 }

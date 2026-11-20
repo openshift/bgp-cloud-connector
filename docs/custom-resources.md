@@ -132,6 +132,42 @@ spec:
     # enableNestedVirtualization: true      # default true; enabling restarts the instance
 ```
 
+### Forwarding-only nodes (optional, any cloud platform)
+
+When some nodes send CUDN-sourced traffic but should not become BGP speakers, add `spec.forwardingNodeSelector`. The selector is a simple label map — a node must carry **all** listed labels to match (AND semantics), just like `routerNodeSelector`.
+
+```yaml
+apiVersion: networking.openshift.io/v1beta1
+kind: BGPCloudConfiguration
+metadata:
+  name: cluster
+spec:
+  platform: AWS
+  routerNodeSelector:
+    bgp_router: "true"              # these nodes speak BGP and get forwarding
+  forwardingNodeSelector:
+    cudn-forwarding: "true"         # these nodes get forwarding only, no peering
+
+  bgp:
+    localASN: 65001
+  aws:
+    region: us-east-1
+    routeServerIDs:
+      - rs-0abc123456789abcd
+```
+
+Behaviour summary:
+
+- A node matching **only** `routerNodeSelector` is a BGP speaker and gets cloud forwarding enabled.
+- A node matching **only** `forwardingNodeSelector` gets cloud forwarding enabled but is **not** peered.
+- A node matching **both** selectors remains a speaker — it is never downgraded to forwarding-only.
+- An **unset** `forwardingNodeSelector`, or one that matches no nodes, is equivalent: only speakers are updated.
+- An **empty map** (`forwardingNodeSelector: {}`) is rejected by CEL validation, because it would match every node.
+- `forwardingNodeSelector` **must be absent** when `platform` is `Manual` (no cloud reconciliation).
+- Forwarding is **never reverted**: removing a node from the selector, or unsetting the field, leaves the cloud-side flag enabled. The flag is harmless once set.
+
+Watch the `CompleteNodeInventory` condition to confirm the operator sees the forwarding nodes. A forwarding node missing `spec.providerID` or `topology.kubernetes.io/zone` is reported as incomplete, just as an incomplete speaker would be.
+
 ## BGPRouting (one per network)
 
 ```yaml
@@ -171,6 +207,7 @@ spec:
 |:---|:---|:---|
 | `spec.platform` | Yes | Which platform to reconcile against: `AWS`, `Azure`, `GCP`, or `Manual`. `Manual` is not a cloud: it reconciles nothing and takes its peering from `spec.bgp.peerGroups`. Selects which cloud block is required (`spec.aws` / `spec.azure` / `spec.gcp`), and refuses the others (CEL-enforced). |
 | `spec.routerNodeSelector` | Yes | Cluster-wide label selector for all BGP-enabled worker nodes (e.g. `bgp_router: "true"`). Must match labels applied to BGP router machine pools. |
+| `spec.forwardingNodeSelector` | No | Nodes that send packets sourced from a CUDN address. Speakers from `routerNodeSelector` are always included. Nodes that match only this field are not peered. Unset means speakers only. Forwarding is never turned back off: a node that leaves the selector, or unsetting the field, keeps it enabled. An empty map is rejected. Must be absent when `platform` is `Manual`. |
 | `spec.bgp.localASN` | Yes | AS number for the OCP FRR routers. From `terraform output rosa_bgp_asn`. |
 | `spec.bgp.livenessDetection` | No | `bfd` or `bgp-keepalive` (default). Applies to all neighbors. BFD detects peer failure in ~1s (300ms interval × 3 multiplier). BGP keepalive detects peer failure in ~90s (default hold time). Whether a single peer failure fails over automatically depends on the platform having a second neighbour in the group to fall back to; on AWS each AZ has 2 Route Server endpoints, so it does. |
 | `spec.bgp.peerGroups[]` | Under `platform: Manual` | BGP peer groups with explicit neighbour addresses. Required under `platform: Manual`, and must not be set on any other platform, where the groups are discovered (CEL-enforced). |
