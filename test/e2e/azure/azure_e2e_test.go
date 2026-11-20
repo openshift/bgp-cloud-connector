@@ -402,7 +402,7 @@ var _ = Describe("Azure E2E", Ordered, func() {
 			}
 
 			By(fmt.Sprintf("requesting /clientip from every pod via the client VM at %s", vmAddress))
-			e2e.ProbeAllowingOVNKubeRestart(ctx, k8sClient, workers, 5*time.Minute, 30*time.Second, func(g Gomega) {
+			e2e.ProbeRecordingNetworkState(ctx, k8sClient, workers, 5*time.Minute, 30*time.Second, func(g Gomega) {
 				answers, probeErr := probe(ctx, addresses)
 				g.Expect(probeErr).NotTo(HaveOccurred())
 				g.Expect(e2e.CheckAnswers(dests, answers, vmAddress)).To(Succeed())

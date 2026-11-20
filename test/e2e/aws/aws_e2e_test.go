@@ -392,7 +392,7 @@ var _ = Describe("AWS E2E", Ordered, func() {
 			// CRs were applied, measured once. The specs before this one
 			// normally cover that, but the probe should not depend on it.
 			By(fmt.Sprintf("requesting /clientip from every pod via the client instance at %s", clientAddress))
-			e2e.ProbeAllowingOVNKubeRestart(ctx, k8sClient, workers, 10*time.Minute, 30*time.Second, func(g Gomega) {
+			e2e.ProbeRecordingNetworkState(ctx, k8sClient, workers, 10*time.Minute, 30*time.Second, func(g Gomega) {
 				answers, probeErr := probe(ctx, instanceID, addresses)
 				g.Expect(probeErr).NotTo(HaveOccurred())
 				g.Expect(e2e.CheckAnswers(dests, answers, clientAddress)).To(Succeed())
