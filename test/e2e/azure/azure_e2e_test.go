@@ -19,12 +19,14 @@ package azure_e2e
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -411,6 +413,133 @@ var _ = Describe("Azure E2E", Ordered, func() {
 			// After the probe, so that a run which trips this has already
 			// shown whether every pod it could reach answered.
 			Expect(e2e.CheckCoverage(dests)).To(Succeed())
+		})
+	})
+
+	// ---------------------------------------------------------------
+	// E2E-AZURE-07: forwardingNodeSelector
+	//
+	// After E2E-AZURE-06 and before E2E-AZURE-05. 05 removes the CRs
+	// this spec needs, and 06 has already waited for the advertised route,
+	// so the probe here only waits for the replies. The spec turns
+	// enableIPForwarding on for every worker and, as the operator never
+	// turns it off, turns it off again when it ends on the workers that
+	// started without it. The container is Ordered, so position decides.
+	// ---------------------------------------------------------------
+	Context("E2E-AZURE-07: forwardingNodeSelector", func() {
+		It("should answer from every worker once the selector matches them, without adding peers", func(ctx context.Context) {
+			namespace := bgpRouting.Spec.Network.Name
+
+			By("reading the client VM's address")
+			vmAddress, err := clientVMAddress(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("making sure a netexec pod is running on every worker")
+			Expect(e2e.EnsureNetexec(ctx, k8sClient, namespace)).To(Succeed())
+
+			By("checking that at least one worker interface does not forward yet")
+			var initial []e2e.Destination
+			Eventually(func(g Gomega) {
+				found, findErr := destinations(ctx, namespace)
+				g.Expect(findErr).NotTo(HaveOccurred())
+				initial = found
+			}).WithTimeout(5 * time.Minute).WithPolling(pollInterval).Should(Succeed())
+			Expect(slices.ContainsFunc(initial, func(d e2e.Destination) bool { return !d.Forwarding })).To(BeTrue(),
+				"every worker interface already forwards, so the selector cannot be seen turning forwarding on; "+
+					"run this spec on a cluster where a worker still has IP forwarding off")
+
+			var restore []string
+			for _, d := range initial {
+				if !d.Forwarding {
+					restore = append(restore, d.Node)
+				}
+			}
+			DeferCleanup(func(ctx context.Context) {
+				By("unsetting forwardingNodeSelector and waiting for the cloud pass that saw it")
+				gen, clearErr := e2e.ClearForwardingSelector(ctx, k8sClient, configCR.Name)
+				Expect(clearErr).NotTo(HaveOccurred())
+				Eventually(func() error {
+					return e2e.CloudPassDone(ctx, k8sClient, configCR.Name, gen)
+				}).WithTimeout(reconcileTimeout).WithPolling(pollInterval).Should(Succeed())
+
+				By("turning IP forwarding back off for the workers that started without it")
+				for _, name := range restore {
+					node := &corev1.Node{}
+					Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name}, node)).To(Succeed())
+					nic, nicErr := nicForNode(ctx, node)
+					Expect(nicErr).NotTo(HaveOccurred())
+					Expect(nic).NotTo(BeNil())
+					Expect(setForwarding(ctx, nic, false)).To(Succeed())
+				}
+			})
+
+			before, err := managedPeerings(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			beforeIPs := peeringIPs(before)
+
+			By("labelling the workers to select")
+			selector, err := e2e.LabelForwardingWorkers(ctx, k8sClient)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func(ctx context.Context) {
+				Expect(e2e.RemoveForwardingLabel(ctx, k8sClient)).To(Succeed())
+			})
+
+			By("setting forwardingNodeSelector to the labelled workers")
+			cfg := &networkingapi.BGPCloudConfiguration{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: configCR.Name}, cfg)).To(Succeed())
+			patch := client.MergeFrom(cfg.DeepCopy())
+			cfg.Spec.ForwardingNodeSelector = selector
+			Expect(k8sClient.Patch(ctx, cfg, patch)).To(Succeed())
+			patched := cfg.Generation
+
+			By("waiting for the cloud pass that saw the selector to finish")
+			Eventually(func(g Gomega) {
+				fresh := &networkingapi.BGPCloudConfiguration{}
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: configCR.Name}, fresh)).To(Succeed())
+				g.Expect(fresh.Status.Phase).To(Equal(networkingapi.PhaseReady))
+				cond := meta.FindStatusCondition(fresh.Status.Conditions, networkingapi.ConditionCloudResourcesReconciled)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+				g.Expect(cond.ObservedGeneration).To(Equal(patched))
+			}).WithTimeout(reconcileTimeout).WithPolling(pollInterval).Should(Succeed())
+
+			By("waiting until every worker interface forwards")
+			var dests []e2e.Destination
+			Eventually(func(g Gomega) {
+				found, findErr := destinations(ctx, namespace)
+				g.Expect(findErr).NotTo(HaveOccurred())
+				g.Expect(found).NotTo(BeEmpty())
+				for _, d := range found {
+					g.Expect(d.Forwarding).To(BeTrue(), "enableIPForwarding still off on %s", d.Node)
+				}
+				dests = found
+			}).WithTimeout(reconcileTimeout).WithPolling(pollInterval).Should(Succeed())
+
+			// At least one worker must not already be a speaker, or this selector adds nobody.
+			routers, err := routerNodes(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(routers).NotTo(BeEmpty())
+			Expect(len(dests)).To(BeNumerically(">", len(routers)))
+
+			// Workers matched only by forwardingNodeSelector must not be added as peers.
+			after, err := managedPeerings(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(peeringIPs(after)).To(ConsistOf(beforeIPs))
+
+			addresses := make([]string, 0, len(dests))
+			workers := make([]string, 0, len(dests))
+			for _, d := range dests {
+				addresses = append(addresses, d.PodAddress)
+				workers = append(workers, d.Node)
+			}
+
+			// The advertised prefix is already programmed. The remaining wait is the reply from the other workers.
+			By(fmt.Sprintf("requesting /clientip from every pod via the client VM at %s", vmAddress))
+			e2e.ProbeAllowingOVNKubeRestart(ctx, k8sClient, workers, 2*time.Minute, 30*time.Second, func(g Gomega) {
+				answers, probeErr := probe(ctx, addresses)
+				g.Expect(probeErr).NotTo(HaveOccurred())
+				g.Expect(e2e.CheckAnswers(dests, answers, vmAddress)).To(Succeed())
+			})
 		})
 	})
 

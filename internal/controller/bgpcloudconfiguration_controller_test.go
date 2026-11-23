@@ -18,7 +18,9 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -45,6 +47,12 @@ import (
 )
 
 const wrongName = "wrong-name"
+
+const routerName = "router"
+
+// forwardingLabel is what the forwarding tests select with
+// forwardingNodeSelector.
+var forwardingLabel = map[string]string{"cudn": "true"}
 
 func configTestScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
@@ -1158,6 +1166,261 @@ func TestConfigReconcile_IncompleteAndReconcileFailureEachReportedOnce(t *testin
 	if got[ReasonNodesIncomplete] != 1 || got[ReasonCloudReconcileFailed] != 1 {
 		t.Errorf("warnings over two passes = %v, want NodesIncomplete=1 CloudReconcileFailed=1", got)
 	}
+}
+
+func TestConfigReconcile_ForwardingNodesAreNotPeered(t *testing.T) {
+	config := newTestBGPCloudConfigurationWithAWS()
+	config.Finalizers = []string{ConfigFinalizerName}
+	config.Spec.ForwardingNodeSelector = forwardingLabel
+
+	router := newRouterNode(routerName, "10.0.1.10", "us-east-1a", "aws:///us-east-1a/i-router")
+	maps.Copy(router.Labels, forwardingLabel)
+	worker := newForwardingNode("worker", "10.0.1.20", "us-east-1a", "aws:///us-east-1a/i-worker")
+	bystander := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "bystander",
+			Labels: map[string]string{"topology.kubernetes.io/zone": "us-east-1a"},
+		},
+		Spec: corev1.NodeSpec{ProviderID: "aws:///us-east-1a/i-other"},
+		Status: corev1.NodeStatus{
+			Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.1.30"}},
+		},
+	}
+	r, c, mock := newMockCloudReconciler(config, router, worker, bystander)
+
+	cond := reconcileInventory(t, r, c)
+	if len(mock.reconcileNodesArgs) != 2 {
+		t.Fatalf("ReconcileNodes = %v, want router and worker", nodeNames(mock.reconcileNodesArgs))
+	}
+	got := map[string]bool{}
+	for _, n := range mock.reconcileNodesArgs {
+		got[n.Name] = n.ForwardingOnly
+	}
+	if forwardingOnly, ok := got[routerName]; !ok || forwardingOnly {
+		t.Errorf("router ForwardingOnly=%v present=%v, want a speaker", forwardingOnly, ok)
+	}
+	if forwardingOnly, ok := got["worker"]; !ok || !forwardingOnly {
+		t.Errorf("worker ForwardingOnly=%v present=%v, want forwarding-only", forwardingOnly, ok)
+	}
+	if _, ok := got["bystander"]; ok {
+		t.Errorf("bystander was passed to ReconcileNodes")
+	}
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Errorf("CompleteNodeInventory = %+v, want True", cond)
+	}
+}
+
+// TestConfigReconcile_ForwardingSelectorWithoutMatchesAddsNoNodes checks that
+// a forwarding selector that is unset or matches no nodes leaves only the
+// speakers in the inventory, and that the inventory is still complete.
+func TestConfigReconcile_ForwardingSelectorWithoutMatchesAddsNoNodes(t *testing.T) {
+	tests := []struct {
+		name     string
+		selector map[string]string
+	}{
+		{
+			name:     "unset",
+			selector: nil,
+		},
+		{
+			name:     "matches no nodes",
+			selector: map[string]string{"cudn": "typo"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := newTestBGPCloudConfigurationWithAWS()
+			config.Finalizers = []string{ConfigFinalizerName}
+			config.Spec.ForwardingNodeSelector = tt.selector
+			router := newRouterNode(routerName, "10.0.1.10", "us-east-1a", "aws:///us-east-1a/i-router")
+			worker := newForwardingNode("worker", "10.0.1.20", "us-east-1a", "aws:///us-east-1a/i-worker")
+			r, c, mock := newMockCloudReconciler(config, router, worker)
+
+			cond := reconcileInventory(t, r, c)
+			if len(mock.reconcileNodesArgs) != 1 || mock.reconcileNodesArgs[0].Name != routerName || mock.reconcileNodesArgs[0].ForwardingOnly {
+				t.Fatalf("ReconcileNodes = %+v, want speaker [router]", mock.reconcileNodesArgs)
+			}
+			if cond == nil || cond.Status != metav1.ConditionTrue {
+				t.Errorf("CompleteNodeInventory = %+v, want True", cond)
+			}
+		})
+	}
+}
+
+// TestConfigReconcile_IncompleteForwardingNodeHoldsInventory checks that a
+// forwarding-only node without the metadata the cloud needs makes the
+// inventory incomplete, as an incomplete speaker does, while the complete
+// nodes are still reconciled.
+func TestConfigReconcile_IncompleteForwardingNodeHoldsInventory(t *testing.T) {
+	config := newTestBGPCloudConfigurationWithAWS()
+	config.Finalizers = []string{ConfigFinalizerName}
+	config.Spec.ForwardingNodeSelector = forwardingLabel
+	router := newRouterNode(routerName, "10.0.1.10", "us-east-1a", "aws:///us-east-1a/i-router")
+	worker := newForwardingNode("worker", "10.0.1.20", "us-east-1a", "")
+	r, c, mock := newMockCloudReconciler(config, router, worker)
+
+	cond := reconcileInventory(t, r, c)
+	if len(mock.reconcileNodesArgs) != 1 || mock.reconcileNodesArgs[0].Name != routerName {
+		t.Fatalf("ReconcileNodes = %v, want [router]", nodeNames(mock.reconcileNodesArgs))
+	}
+	want := "1 selected node(s) incomplete: worker (missing providerID)"
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Message != want {
+		t.Errorf("CompleteNodeInventory = %+v, want False with %q", cond, want)
+	}
+}
+
+// TestConfigReconcile_ForwardingNodePromotedToSpeaker checks that a node
+// initially selected only by forwardingNodeSelector is promoted to a speaker
+// when it gains the routerNodeSelector labels, and the inventory hash changes.
+func TestConfigReconcile_ForwardingNodePromotedToSpeaker(t *testing.T) {
+	config := newTestBGPCloudConfigurationWithAWS()
+	config.Finalizers = []string{ConfigFinalizerName}
+	config.Spec.ForwardingNodeSelector = forwardingLabel
+
+	router := newRouterNode(routerName, "10.0.1.10", "us-east-1a", "aws:///us-east-1a/i-router")
+	forwarder := newForwardingNode("forwarder", "10.0.1.30", "us-east-1b", "aws:///us-east-1b/i-forwarder")
+	r, c, mock := newMockCloudReconciler(config, router, forwarder)
+
+	// First reconcile: forwarder is forwarding-only.
+	reconcileInventory(t, r, c)
+	firstNodes := make(map[string]bool, len(mock.reconcileNodesArgs))
+	for _, n := range mock.reconcileNodesArgs {
+		firstNodes[n.Name] = n.ForwardingOnly
+	}
+	if !firstNodes["forwarder"] {
+		t.Fatalf("first pass: forwarder ForwardingOnly=%v, want true", firstNodes["forwarder"])
+	}
+
+	// Promote forwarder to speaker by adding the router label.
+	ctx := context.Background()
+	node := &corev1.Node{}
+	if err := c.Get(ctx, types.NamespacedName{Name: "forwarder"}, node); err != nil {
+		t.Fatalf("get forwarder: %v", err)
+	}
+	node.Labels["bgp_router"] = "true"
+	if err := c.Update(ctx, node); err != nil {
+		t.Fatalf("update forwarder labels: %v", err)
+	}
+
+	// Second reconcile: forwarder should now be a speaker.
+	reconcileInventory(t, r, c)
+	secondNodes := make(map[string]bool, len(mock.reconcileNodesArgs))
+	for _, n := range mock.reconcileNodesArgs {
+		secondNodes[n.Name] = n.ForwardingOnly
+	}
+	if secondNodes["forwarder"] {
+		t.Errorf("second pass: forwarder ForwardingOnly=%v, want false (promoted to speaker)", secondNodes["forwarder"])
+	}
+	if _, ok := secondNodes["forwarder"]; !ok {
+		t.Errorf("second pass: forwarder missing from ReconcileNodes")
+	}
+}
+
+// TestConfigReconcile_ForwardingSelectorRemovedDropsForwardingNodes checks
+// that removing forwardingNodeSelector from the spec reduces the reconciled
+// set to speakers only — the controller does not attempt to revert the
+// cloud-side forwarding flag.
+func TestConfigReconcile_ForwardingSelectorRemovedDropsForwardingNodes(t *testing.T) {
+	config := newTestBGPCloudConfigurationWithAWS()
+	config.Finalizers = []string{ConfigFinalizerName}
+	config.Spec.ForwardingNodeSelector = forwardingLabel
+
+	router := newRouterNode(routerName, "10.0.1.10", "us-east-1a", "aws:///us-east-1a/i-router")
+	worker := newForwardingNode("worker", "10.0.1.20", "us-east-1a", "aws:///us-east-1a/i-worker")
+	r, c, mock := newMockCloudReconciler(config, router, worker)
+
+	// First reconcile: both nodes present.
+	reconcileInventory(t, r, c)
+	if len(mock.reconcileNodesArgs) != 2 {
+		t.Fatalf("first pass: ReconcileNodes got %v, want [router, worker]", nodeNames(mock.reconcileNodesArgs))
+	}
+
+	// Remove the forwarding selector from the config.
+	ctx := context.Background()
+	cfg := &networkingapi.BGPCloudConfiguration{}
+	if err := c.Get(ctx, types.NamespacedName{Name: "cluster"}, cfg); err != nil {
+		t.Fatalf("get config: %v", err)
+	}
+	cfg.Spec.ForwardingNodeSelector = nil
+	if err := c.Update(ctx, cfg); err != nil {
+		t.Fatalf("update config: %v", err)
+	}
+
+	// Second reconcile: only the speaker should remain.
+	reconcileInventory(t, r, c)
+	if len(mock.reconcileNodesArgs) != 1 || mock.reconcileNodesArgs[0].Name != routerName {
+		t.Errorf("second pass: ReconcileNodes got %v, want [router]", nodeNames(mock.reconcileNodesArgs))
+	}
+	if mock.reconcileNodesArgs[0].ForwardingOnly {
+		t.Errorf("second pass: router ForwardingOnly=true, want false")
+	}
+}
+
+func TestRouterInventoryHash(t *testing.T) {
+	speaker := platform.RouterNode{
+		Name:       "node-1",
+		PrivateIP:  "10.0.1.10",
+		Zone:       "us-east-1a",
+		ProviderID: "aws:///us-east-1a/i-001",
+	}
+	forwarding := speaker
+	forwarding.ForwardingOnly = true
+	other := platform.RouterNode{
+		Name:       "node-2",
+		PrivateIP:  "10.0.1.11",
+		Zone:       "us-east-1b",
+		ProviderID: "aws:///us-east-1b/i-002",
+	}
+
+	// preRoleHash is the hash before the role was added to it.
+	preRoleHash := func(n platform.RouterNode) string {
+		h := sha256.New()
+		_, _ = fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\x00", n.Name, n.PrivateIP, n.Zone, n.ProviderID)
+		return fmt.Sprintf("%x", h.Sum(nil))
+	}
+
+	tests := []struct {
+		name      string
+		inventory []platform.RouterNode
+		compareTo string
+		wantEqual bool
+	}{
+		{
+			name:      "node order does not matter",
+			inventory: []platform.RouterNode{other, speaker},
+			compareTo: routerInventoryHash([]platform.RouterNode{speaker, other}, nil),
+			wantEqual: true,
+		},
+		{
+			name:      "role change changes the hash",
+			inventory: []platform.RouterNode{forwarding},
+			compareTo: routerInventoryHash([]platform.RouterNode{speaker}, nil),
+			wantEqual: false,
+		},
+		{
+			// Otherwise every upgraded cluster gets one extra cloud pass.
+			name:      "inventory without forwarding-only nodes keeps the pre-role hash",
+			inventory: []platform.RouterNode{speaker},
+			compareTo: preRoleHash(speaker),
+			wantEqual: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := routerInventoryHash(tt.inventory, nil)
+			if (got == tt.compareTo) != tt.wantEqual {
+				t.Errorf("hash = %s, compareTo = %s, want equal = %v", got, tt.compareTo, tt.wantEqual)
+			}
+		})
+	}
+}
+
+func nodeNames(nodes []platform.RouterNode) []string {
+	names := make([]string, len(nodes))
+	for i, n := range nodes {
+		names[i] = n.Name
+	}
+	return names
 }
 
 func TestConfigReconcile_DeleteSucceedsWithCredentialFailure(t *testing.T) {
@@ -2300,4 +2563,64 @@ func TestConfigReconcile_DeleteRemovesLegacyFRRConfigurationsAndUnpatches(t *tes
 	if err == nil && slices.Contains(updated.Finalizers, ConfigFinalizerName) {
 		t.Error("finalizer must be removed once only our own objects remained")
 	}
+}
+
+// newForwardingNode returns a node that only forwardingLabel selects. An
+// empty providerID leaves the node without one.
+func newForwardingNode(name, ip, az, providerID string) *corev1.Node {
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   name,
+			Labels: map[string]string{"topology.kubernetes.io/zone": az},
+		},
+		Spec: corev1.NodeSpec{ProviderID: providerID},
+		Status: corev1.NodeStatus{
+			Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: ip}},
+		},
+	}
+	maps.Copy(node.Labels, forwardingLabel)
+	return node
+}
+
+// newMockCloudReconciler returns a reconciler over a fake client holding
+// config, the cluster Network, a running frr-k8s pod, and nodes. Its cloud
+// platform is the returned mock.
+func newMockCloudReconciler(config *networkingapi.BGPCloudConfiguration, nodes ...*corev1.Node) (*BGPCloudConfigurationReconciler, client.Client, *mockPlatform) {
+	mock := &mockPlatform{}
+	s := configTestScheme()
+	frrNS := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: FRRNamespace}}
+	frrPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "frr-k8s-pod", Namespace: FRRNamespace, Labels: map[string]string{"app": "frr-k8s"}},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	objs := []client.Object{config, newEmptyNetwork(), frrNS, frrPod}
+	for _, node := range nodes {
+		objs = append(objs, node)
+	}
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(objs...).
+		WithStatusSubresource(config).
+		Build()
+	r := &BGPCloudConfigurationReconciler{
+		Client: c, Scheme: s,
+		PlatformBuilder: func(_ context.Context, _ client.Client, _ *networkingapi.BGPCloudConfiguration) (platform.CloudPlatform, error) {
+			return mock, nil
+		},
+	}
+	return r, c, mock
+}
+
+// reconcileInventory runs one reconcile and returns the resulting
+// CompleteNodeInventory condition.
+func reconcileInventory(t *testing.T, r *BGPCloudConfigurationReconciler, c client.Client) *metav1.Condition {
+	t.Helper()
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile error: %v", err)
+	}
+	got := &networkingapi.BGPCloudConfiguration{}
+	if err := c.Get(context.Background(), req.NamespacedName, got); err != nil {
+		t.Fatalf("get config: %v", err)
+	}
+	return meta.FindStatusCondition(got.Status.Conditions, networkingapi.ConditionCompleteNodeInventory)
 }
