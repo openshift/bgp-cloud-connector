@@ -19,6 +19,7 @@ package aws_e2e
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"time"
 
@@ -527,6 +528,179 @@ var _ = Describe("AWS E2E", Ordered, func() {
 				g.Expect(probeErr).NotTo(HaveOccurred())
 				g.Expect(e2e.CheckAnswers(dests, answers, clientAddress)).To(Succeed())
 			})
+		})
+	})
+
+	// ---------------------------------------------------------------
+	// E2E-AWS-08: one node cannot disable SourceDestCheck
+	//
+	// Late in the ordered suite because it deliberately disrupts one
+	// established peer. E2E-AWS-05 is the only spec after it and removes
+	// the configuration and all managed peers.
+	// ---------------------------------------------------------------
+	Context("E2E-AWS-08: Isolate SourceDestCheck failure", func() {
+		It("should skip only the failed node and recover after the deny is removed", func(ctx context.Context) {
+			const denyPolicyName = "bgpcc-e2e-deny-source-dest-check"
+
+			By("choosing one established router node as the forwarding failure")
+			nodes, err := routerNodes(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(len(nodes)).To(BeNumerically(">=", 2), "the isolation check needs one failed and one healthy router node")
+			victim, control := nodes[0], nodes[1]
+			touchedNodes := []*corev1.Node{&victim, &control}
+			victimIP := nodeInternalIP(&victim)
+			controlIP := nodeInternalIP(&control)
+			instanceID, _, err := awsplatform.ParseProviderID(victim.Spec.ProviderID)
+			Expect(err).NotTo(HaveOccurred())
+			instance, err := describeInstance(ctx, instanceID)
+			Expect(err).NotTo(HaveOccurred())
+			eni := primaryENI(instance)
+			Expect(eni).NotTo(BeNil())
+			eniID := aws.ToString(eni.NetworkInterfaceId)
+
+			op, err := operatorPrincipal(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			GinkgoWriter.Printf("failure target node=%s eni=%s operator=%s:%s\n", victim.Name, eniID, op.Kind, op.ARN)
+
+			cfg := &networkingapi.BGPCloudConfiguration{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: bgpConfig.Name}, cfg)).To(Succeed())
+			Expect(cfg.Spec.ForwardingNodeSelector).To(BeEmpty(), "forwarding selector cleanup did not complete")
+			originalForwardingSelector := maps.Clone(cfg.Spec.ForwardingNodeSelector)
+			selectorChanged := false
+			policyAttached := false
+
+			restoreForwardingSelector := func(ctx context.Context) int64 {
+				fresh := &networkingapi.BGPCloudConfiguration{}
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: bgpConfig.Name}, fresh)).To(Succeed())
+				patch := client.MergeFrom(fresh.DeepCopy())
+				fresh.Spec.ForwardingNodeSelector = maps.Clone(originalForwardingSelector)
+				Expect(k8sClient.Patch(ctx, fresh, patch)).To(Succeed())
+				return fresh.Generation
+			}
+			sourceDestCheck := func(g Gomega, node *corev1.Node) bool {
+				id, _, err := awsplatform.ParseProviderID(node.Spec.ProviderID)
+				g.Expect(err).NotTo(HaveOccurred())
+				instance, err := describeInstance(ctx, id)
+				g.Expect(err).NotTo(HaveOccurred())
+				eni := primaryENI(instance)
+				g.Expect(eni).NotTo(BeNil())
+				return aws.ToBool(eni.SourceDestCheck)
+			}
+
+			// Register cleanup before the first mutation so no failure can leave the deny attached.
+			DeferCleanup(func(ctx context.Context) {
+				if policyAttached {
+					By("removing the temporary SourceDestCheck deny")
+					Expect(deleteInlinePolicy(ctx, op, denyPolicyName)).To(Succeed())
+				}
+
+				for _, node := range touchedNodes {
+					Expect(setSourceDestCheck(ctx, node, false)).To(Succeed())
+				}
+				if selectorChanged {
+					restoreForwardingSelector(ctx)
+				}
+			})
+
+			before, err := allManagedPeers(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			oldPeers := map[string]map[string]bool{victimIP: {}, controlIP: {}}
+			for _, peer := range before {
+				if peer.State != ec2types.RouteServerPeerStateAvailable {
+					continue
+				}
+				if peers := oldPeers[aws.ToString(peer.PeerAddress)]; peers != nil {
+					peers[aws.ToString(peer.RouteServerPeerId)] = true
+				}
+			}
+			Expect(oldPeers[victimIP]).NotTo(BeEmpty(), "victim %s has no available peer to remove", victim.Name)
+			Expect(oldPeers[controlIP]).NotTo(BeEmpty(), "control %s has no available peer to preserve", control.Name)
+
+			By("denying SourceDestCheck changes only on the victim ENI")
+			eniARN := fmt.Sprintf("arn:%s:ec2:%s:%s:network-interface/%s", op.Partition, cfg.Spec.AWS.Region, op.Account, eniID)
+			err = putInlinePolicy(ctx, op, denyPolicyName, eniARN)
+			Expect(err).NotTo(HaveOccurred(), "cannot attach inline policy to operator %s", op.Kind)
+			policyAttached = true
+
+			By("turning SourceDestCheck on for the victim and one healthy control")
+			for _, node := range touchedNodes {
+				Expect(setSourceDestCheck(ctx, node, true)).To(Succeed(), "E2E and operator identities must differ")
+			}
+
+			By("changing generation without changing the effective router set")
+			patch := client.MergeFrom(cfg.DeepCopy())
+			cfg.Spec.ForwardingNodeSelector = maps.Clone(cfg.Spec.RouterNodeSelector)
+			Expect(k8sClient.Patch(ctx, cfg, patch)).To(Succeed())
+			selectorChanged = true
+			failureGeneration := cfg.Generation
+
+			By("waiting for the partial cloud pass to report the victim")
+			Eventually(func(g Gomega) {
+				// Re-arm the fault until the IAM deny reaches the operator identity.
+				g.Expect(setSourceDestCheck(ctx, &victim, true)).To(Succeed())
+				fresh := &networkingapi.BGPCloudConfiguration{}
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: bgpConfig.Name}, fresh)).To(Succeed())
+				g.Expect(fresh.Status.Phase).To(Equal(networkingapi.PhaseDegraded))
+				cond := meta.FindStatusCondition(fresh.Status.Conditions, networkingapi.ConditionCloudResourcesReconciled)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(cond.Reason).To(Equal("CloudReconcileFailed"))
+				g.Expect(cond.ObservedGeneration).To(Equal(failureGeneration))
+				g.Expect(cond.Message).To(ContainSubstring(victim.Name))
+				g.Expect(cond.Message).To(ContainSubstring(eniID))
+			}).WithTimeout(reconcileTimeout).WithPolling(pollInterval).Should(Succeed())
+
+			By("verifying the victim remains enabled while the healthy control is repaired")
+			Eventually(func(g Gomega) {
+				g.Expect(sourceDestCheck(g, &victim)).To(BeTrue())
+				g.Expect(sourceDestCheck(g, &control)).To(BeFalse(), "healthy control %s was not reconciled", control.Name)
+			}).WithTimeout(reconcileTimeout).WithPolling(pollInterval).Should(Succeed())
+
+			By("waiting for the unsafe victim peer to be removed")
+			Eventually(func(g Gomega) {
+				peers, listErr := allManagedPeers(ctx)
+				g.Expect(listErr).NotTo(HaveOccurred())
+				remainingControlPeers := maps.Clone(oldPeers[controlIP])
+				for _, peer := range peers {
+					address := aws.ToString(peer.PeerAddress)
+					g.Expect(address).NotTo(Equal(victimIP), "victim peer %s remains", aws.ToString(peer.RouteServerPeerId))
+					if address == controlIP && peer.State == ec2types.RouteServerPeerStateAvailable {
+						delete(remainingControlPeers, aws.ToString(peer.RouteServerPeerId))
+					}
+				}
+				g.Expect(remainingControlPeers).To(BeEmpty(),
+					"original healthy control peers were removed: %v", remainingControlPeers)
+			}).WithTimeout(peerSettleTimeout).WithPolling(pollInterval).Should(Succeed())
+
+			By("removing the deny and relying on the degraded retry to recover")
+			err = deleteInlinePolicy(ctx, op, denyPolicyName)
+			Expect(err).NotTo(HaveOccurred(), "cannot remove inline policy from operator %s", op.Kind)
+			policyAttached = false
+
+			By("waiting for forwarding, a replacement peer, and Ready status")
+			Eventually(func(g Gomega) {
+				g.Expect(sourceDestCheck(g, &victim)).To(BeFalse())
+
+				peers, listErr := allManagedPeers(ctx)
+				g.Expect(listErr).NotTo(HaveOccurred())
+				replacementAvailable := slices.ContainsFunc(peers, func(peer ec2types.RouteServerPeer) bool {
+					return aws.ToString(peer.PeerAddress) == victimIP &&
+						!oldPeers[victimIP][aws.ToString(peer.RouteServerPeerId)] &&
+						peer.State == ec2types.RouteServerPeerStateAvailable
+				})
+				g.Expect(replacementAvailable).To(BeTrue())
+
+				fresh := &networkingapi.BGPCloudConfiguration{}
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: bgpConfig.Name}, fresh)).To(Succeed())
+				g.Expect(fresh.Status.Phase).To(Equal(networkingapi.PhaseReady))
+			}).WithTimeout(peerSettleTimeout).WithPolling(pollInterval).Should(Succeed())
+
+			By("restoring the original forwarding selector")
+			restoredGeneration := restoreForwardingSelector(ctx)
+			Eventually(func() error {
+				return e2e.CloudPassDone(ctx, k8sClient, bgpConfig.Name, restoredGeneration)
+			}).WithTimeout(reconcileTimeout).WithPolling(pollInterval).Should(Succeed())
+			selectorChanged = false
 		})
 	})
 
