@@ -79,6 +79,12 @@ func (r *BGPRoutingReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return r.reconcileDelete(ctx, routing)
 	}
 
+	if (routing.Spec.Network == nil) == (routing.Spec.NetworkRef == nil) {
+		routing.Status.ObservedGeneration = routing.Generation
+		return r.setDegraded(ctx, routing, *baselineStatus, networkingapi.ConditionNetworkResolved,
+			"InvalidNetworkSource", "Exactly one of network and networkRef must be set")
+	}
+
 	if !controllerutil.ContainsFinalizer(routing, RoutingFinalizerName) {
 		controllerutil.AddFinalizer(routing, RoutingFinalizerName)
 		if err := r.Update(ctx, routing); err != nil {
@@ -89,6 +95,13 @@ func (r *BGPRoutingReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	routing.Status.Phase = networkingapi.PhaseConfiguring
 	routing.Status.ObservedGeneration = routing.Generation
 
+	if routing.Spec.NetworkRef != nil {
+		return r.reconcileNetworkRef(ctx, routing, *baselineStatus)
+	}
+
+	routing.Status.NetworkRef = nil
+	routing.Status.RouteAdvertisementsRef = nil
+
 	// Pre-check: spec.network.name must be unique across all BGPRouting CRs
 	routingList := &networkingapi.BGPRoutingList{}
 	if err := r.List(ctx, routingList); err != nil {
@@ -96,7 +109,7 @@ func (r *BGPRoutingReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 	for i := range routingList.Items {
 		other := &routingList.Items[i]
-		if other.Name != routing.Name && other.Spec.Network.Name == routing.Spec.Network.Name {
+		if other.Name != routing.Name && other.Spec.Network != nil && other.Spec.Network.Name == routing.Spec.Network.Name {
 			return r.setDegraded(ctx, routing, *baselineStatus, networkingapi.ConditionNetworkCreated,
 				ReasonDuplicateNetwork,
 				fmt.Sprintf("spec.network.name %q already claimed by BGPRouting %q", routing.Spec.Network.Name, other.Name))
@@ -130,9 +143,10 @@ func (r *BGPRoutingReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	// Phase 1: Validate namespace labels + ensure ClusterUDN
-	log.Info("Phase 1: validating namespace and ensuring ClusterUDN", "network", routing.Spec.Network.Name)
-	if err := EnsureClusterUDN(ctx, r.Client, routing); err != nil {
+	// Phase 1: Ensure ClusterUDN and check its OVN status
+	log.Info("Phase 1: ensuring ClusterUDN", "network", routing.Spec.Network.Name)
+	cudn, err := EnsureClusterUDN(ctx, r.Client, routing)
+	if err != nil {
 		var validationErr *CUDNValidationError
 		if errors.As(err, &validationErr) {
 			return r.setDegraded(ctx, routing, *baselineStatus, networkingapi.ConditionNetworkCreated,
@@ -141,19 +155,20 @@ func (r *BGPRoutingReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return r.setDegraded(ctx, routing, *baselineStatus, networkingapi.ConditionNetworkCreated,
 			ReasonCUDNFailed, fmt.Sprintf("failed to ensure ClusterUDN: %v", err))
 	}
-	if observed, ready, message, err := clusterUDNNetworkCreated(ctx, r.Client, routing.Spec.Network.Name); err != nil {
+	routing.Status.NetworkRef = resolvedRoutingNetwork(cudn)
+	if observed, ready, message, err := clusterUDNNetworkCreated(cudn); err != nil {
 		return r.setDegraded(ctx, routing, *baselineStatus, networkingapi.ConditionNetworkCreated,
 			ReasonCUDNFailed, fmt.Sprintf("failed to read ClusterUDN status: %v", err))
 	} else if observed && !ready {
 		return r.setDegraded(ctx, routing, *baselineStatus, networkingapi.ConditionNetworkCreated,
 			ReasonCUDNFailed, fmt.Sprintf("ClusterUDN %q is not ready: %s",
-				ClusterUDNNamePrefix+routing.Spec.Network.Name, message))
+				cudn.GetName(), message))
 	}
 	meta.SetStatusCondition(&routing.Status.Conditions, metav1.Condition{
 		Type:               networkingapi.ConditionNetworkCreated,
 		Status:             metav1.ConditionTrue,
 		Reason:             ReasonCreated,
-		Message:            fmt.Sprintf("ClusterUDN %q ensured", ClusterUDNNamePrefix+routing.Spec.Network.Name),
+		Message:            fmt.Sprintf("ClusterUDN %q ensured", cudn.GetName()),
 		ObservedGeneration: routing.Generation,
 	})
 
@@ -163,6 +178,7 @@ func (r *BGPRoutingReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return r.setDegraded(ctx, routing, *baselineStatus, networkingapi.ConditionRouteAdvertisementsCreated,
 			ReasonRAFailed, fmt.Sprintf("failed to ensure RouteAdvertisements: %v", err))
 	}
+	routing.Status.RouteAdvertisementsRef = &networkingapi.RoutingAdvertisementReference{Name: RouteAdvertisementName}
 	meta.SetStatusCondition(&routing.Status.Conditions, metav1.Condition{
 		Type:               networkingapi.ConditionRouteAdvertisementsCreated,
 		Status:             metav1.ConditionTrue,
@@ -191,6 +207,19 @@ func (r *BGPRoutingReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 func (r *BGPRoutingReconciler) reconcileDelete(ctx context.Context, routing *networkingapi.BGPRouting) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
+	if routing.Spec.NetworkRef != nil {
+		if err := r.deleteReferencedAdvertisement(ctx, routing); err != nil {
+			return ctrl.Result{}, err
+		}
+		controllerutil.RemoveFinalizer(routing, RoutingFinalizerName)
+		return ctrl.Result{}, r.Update(ctx, routing)
+	}
+
+	if routing.Spec.Network == nil {
+		controllerutil.RemoveFinalizer(routing, RoutingFinalizerName)
+		return ctrl.Result{}, r.Update(ctx, routing)
+	}
+
 	// Delete ClusterUDN (namespace is left intact)
 	log.Info("deleting ClusterUDN", "network", routing.Spec.Network.Name)
 	if err := DeleteClusterUDN(ctx, r.Client, routing.Spec.Network.Name); err != nil {
@@ -205,7 +234,7 @@ func (r *BGPRoutingReconciler) reconcileDelete(ctx context.Context, routing *net
 
 	remaining := 0
 	for i := range routingList.Items {
-		if routingList.Items[i].Name != routing.Name {
+		if routingList.Items[i].Name != routing.Name && routingList.Items[i].Spec.Network != nil {
 			remaining++
 		}
 	}
@@ -299,7 +328,8 @@ func (r *BGPRoutingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				if !ok1 || !ok2 {
 					return true
 				}
-				return oldR.Spec.Network.Name != newR.Spec.Network.Name
+				return oldR.Spec.Network != nil && newR.Spec.Network != nil &&
+					oldR.Spec.Network.Name != newR.Spec.Network.Name
 			},
 			GenericFunc: func(event.GenericEvent) bool { return false },
 		})).
@@ -323,18 +353,19 @@ func (r *BGPRoutingReconciler) enqueueAllRoutings(ctx context.Context, _ client.
 }
 
 func (r *BGPRoutingReconciler) mapClusterUDNToRouting(ctx context.Context, obj client.Object) []reconcile.Request {
-	if obj.GetLabels()[LabelManagedBy] != LabelManagedByVal {
-		return nil
-	}
+	managed := obj.GetLabels()[LabelManagedBy] == LabelManagedByVal
 	networkName := strings.TrimPrefix(obj.GetName(), ClusterUDNNamePrefix)
 	routingList := &networkingapi.BGPRoutingList{}
 	if err := r.List(ctx, routingList); err != nil {
 		return nil
 	}
+	var requests []reconcile.Request
 	for _, rt := range routingList.Items {
-		if rt.Spec.Network.Name == networkName {
-			return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: rt.Name}}}
+		referencesCUDN := rt.Spec.NetworkRef != nil && rt.Spec.NetworkRef.Name == obj.GetName()
+		managesCUDN := managed && rt.Spec.Network != nil && rt.Spec.Network.Name == networkName
+		if referencesCUDN || managesCUDN {
+			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&rt)})
 		}
 	}
-	return nil
+	return requests
 }

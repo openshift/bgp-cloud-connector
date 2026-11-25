@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -40,7 +41,7 @@ func (e *CUDNValidationError) Error() string {
 
 func (e *CUDNValidationError) Unwrap() error { return e.Cause }
 
-func EnsureClusterUDN(ctx context.Context, c client.Client, routing *networkingapi.BGPRouting) error {
+func EnsureClusterUDN(ctx context.Context, c client.Client, routing *networkingapi.BGPRouting) (*unstructured.Unstructured, error) {
 	name := ClusterUDNNamePrefix + routing.Spec.Network.Name
 
 	obj := &unstructured.Unstructured{
@@ -61,9 +62,9 @@ func EnsureClusterUDN(ctx context.Context, c client.Client, routing *networkinga
 					},
 				},
 				"network": map[string]interface{}{
-					"topology": "Layer2",
+					"topology": layer2Topology,
 					"layer2": map[string]interface{}{
-						"role": "Primary",
+						"role": primaryNetworkRole,
 						"ipam": map[string]interface{}{
 							"lifecycle": "Persistent",
 						},
@@ -74,7 +75,16 @@ func EnsureClusterUDN(ctx context.Context, c client.Client, routing *networkinga
 		},
 	}
 
-	return createOrUpdateCUDN(ctx, c, obj)
+	err := createOrUpdate(ctx, c, obj, func(existing *unstructured.Unstructured) bool {
+		return !cudnOptedInForReference(existing)
+	})
+	if apierrors.IsInvalid(err) {
+		return nil, &CUDNValidationError{Cause: err}
+	}
+	if err != nil {
+		return nil, err
+	}
+	return obj, nil
 }
 
 // clusterUDNNetworkCreated reports the observed NetworkCreated condition. The
@@ -82,13 +92,7 @@ func EnsureClusterUDN(ctx context.Context, c client.Client, routing *networkinga
 // caller keeps the existing optimistic status until OVN publishes its first
 // observation. Once present, any status other than True means the CUDN is not
 // serving the requested network.
-func clusterUDNNetworkCreated(ctx context.Context, c client.Client, networkName string) (observed, ready bool, message string, err error) {
-	obj := &unstructured.Unstructured{}
-	obj.SetGroupVersionKind(ClusterUDNGVK)
-	if err := c.Get(ctx, client.ObjectKey{Name: ClusterUDNNamePrefix + networkName}, obj); err != nil {
-		return false, false, "", err
-	}
-
+func clusterUDNNetworkCreated(obj *unstructured.Unstructured) (observed, ready bool, message string, err error) {
 	conditions, found, err := unstructured.NestedSlice(obj.Object, "status", "conditions")
 	if err != nil {
 		return false, false, "", fmt.Errorf("reading ClusterUDN %q conditions: %w", obj.GetName(), err)
@@ -128,12 +132,12 @@ func clusterUDNNetworkCreated(ctx context.Context, c client.Client, networkName 
 	return false, false, "", nil
 }
 
-func createOrUpdateCUDN(ctx context.Context, c client.Client, obj *unstructured.Unstructured) error {
-	err := createOrUpdate(ctx, c, obj, nil)
-	if err != nil && apierrors.IsInvalid(err) {
-		return &CUDNValidationError{Cause: err}
+func resolvedRoutingNetwork(cudn *unstructured.Unstructured) *networkingapi.ResolvedRoutingNetwork {
+	topology, _, _ := unstructured.NestedString(cudn.Object, "spec", "network", "topology")
+	role, _, _ := unstructured.NestedString(cudn.Object, "spec", "network", strings.ToLower(topology), "role")
+	return &networkingapi.ResolvedRoutingNetwork{
+		Name: cudn.GetName(), UID: string(cudn.GetUID()), Role: role, Topology: topology,
 	}
-	return err
 }
 
 func DeleteClusterUDN(ctx context.Context, c client.Client, networkName string) error {
@@ -141,10 +145,14 @@ func DeleteClusterUDN(ctx context.Context, c client.Client, networkName string) 
 	obj.SetGroupVersionKind(ClusterUDNGVK)
 	obj.SetName(ClusterUDNNamePrefix + networkName)
 
-	if err := c.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
-		return err
+	if err := c.Get(ctx, client.ObjectKeyFromObject(obj), obj); err != nil {
+		return client.IgnoreNotFound(err)
 	}
-	return nil
+	if cudnOptedInForReference(obj) {
+		return nil
+	}
+	uid, version := obj.GetUID(), obj.GetResourceVersion()
+	return client.IgnoreNotFound(c.Delete(ctx, obj, client.Preconditions{UID: &uid, ResourceVersion: &version}))
 }
 
 func toSubnetInterfaces(subnets []string) []interface{} {

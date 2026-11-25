@@ -22,6 +22,9 @@ spec:
     - jsonPath: .spec.network.name
       name: Network
       type: string
+    - jsonPath: .spec.networkRef.name
+      name: Network Ref
+      type: string
     - jsonPath: .status.phase
       name: Phase
       type: string
@@ -43,8 +46,7 @@ spec:
       openAPIV3Schema:
         description: |-
           BGPRouting declares a single network to advertise via BGP.
-          Users must pre-create and label namespaces; the operator manages only the
-          ClusterUserDefinedNetwork and RouteAdvertisements.
+          It can provision a ClusterUserDefinedNetwork or advertise an existing one.
         properties:
           apiVersion:
             description: |-
@@ -93,9 +95,36 @@ spec:
                 x-kubernetes-validations:
                 - message: each subnet must be a valid CIDR (e.g. 10.0.0.0/16 or 2001:db8::/64)
                   rule: self.subnets.all(s, isCIDR(s))
-            required:
-            - network
+              networkRef:
+                description: |-
+                  NetworkRef references an existing primary ClusterUserDefinedNetwork.
+                  The network must opt in via the networking.openshift.io/bgp-network-ref
+                  label with its UID as the value.
+                properties:
+                  kind:
+                    description: Kind is the kind in the k8s.ovn.org API group.
+                    enum:
+                    - ClusterUserDefinedNetwork
+                    type: string
+                  name:
+                    description: Name is the name of the existing network.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                    type: string
+                required:
+                - kind
+                - name
+                type: object
+                x-kubernetes-validations:
+                - message: networkRef is immutable
+                  rule: self == oldSelf
             type: object
+            x-kubernetes-validations:
+            - message: exactly one of network and networkRef must be set
+              rule: has(self.network) != has(self.networkRef)
+            - message: the network source is immutable
+              rule: has(self.networkRef) == has(oldSelf.networkRef)
           status:
             description: BGPRoutingStatus defines the observed state of BGPRouting.
             properties:
@@ -160,6 +189,24 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              networkRef:
+                description: NetworkRef identifies the CUDN that was provisioned or
+                  resolved.
+                properties:
+                  name:
+                    type: string
+                  role:
+                    type: string
+                  topology:
+                    type: string
+                  uid:
+                    type: string
+                required:
+                - name
+                - role
+                - topology
+                - uid
+                type: object
               observedGeneration:
                 description: ObservedGeneration is the most recent generation observed
                   by the controller.
@@ -173,7 +220,18 @@ spec:
                 - Ready
                 - Degraded
                 type: string
+              routeAdvertisementsRef:
+                description: RouteAdvertisementsRef identifies the dedicated or shared
+                  advertisement.
+                properties:
+                  name:
+                    type: string
+                required:
+                - name
+                type: object
             type: object
+        required:
+        - spec
         type: object
     served: true
     storage: true

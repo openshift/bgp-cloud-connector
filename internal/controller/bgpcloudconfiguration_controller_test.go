@@ -277,7 +277,7 @@ func TestConfigReconcile_DeleteBlockedByRouting(t *testing.T) {
 	routing := &networkingapi.BGPRouting{
 		ObjectMeta: metav1.ObjectMeta{Name: "prod"},
 		Spec: networkingapi.BGPRoutingSpec{
-			Network: networkingapi.NetworkConfig{
+			Network: &networkingapi.NetworkConfig{
 				Name: "prod", Subnets: []string{"10.100.0.0/16"},
 			},
 		},
@@ -1297,7 +1297,7 @@ func TestConfigReconcile_ForwardingNodePromotedToSpeaker(t *testing.T) {
 	if err := c.Get(ctx, types.NamespacedName{Name: "forwarder"}, node); err != nil {
 		t.Fatalf("get forwarder: %v", err)
 	}
-	node.Labels["bgp_router"] = "true"
+	maps.Copy(node.Labels, config.Spec.RouterNodeSelector)
 	if err := c.Update(ctx, node); err != nil {
 		t.Fatalf("update forwarder labels: %v", err)
 	}

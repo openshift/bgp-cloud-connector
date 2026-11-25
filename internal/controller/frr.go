@@ -337,8 +337,9 @@ func toInterfaceMap(m map[string]string) map[string]interface{} {
 // createOrUpdate creates obj, or updates the object of the same name when what we
 // manage differs. adoptable is an optional escape hatch: it is consulted for an
 // existing object that does not yet carry obj's owner reference, and lets a
-// caller take over objects an older build wrote without one. Pass nil to refuse
-// every such object.
+// caller take over objects an older build wrote without one. With no desired
+// owner reference, a non-nil predicate restricts which existing objects can
+// be updated. On success, obj holds the server object.
 func createOrUpdate(ctx context.Context, c client.Client, obj *unstructured.Unstructured, adoptable func(*unstructured.Unstructured) bool) error {
 	existing := &unstructured.Unstructured{}
 	existing.SetGroupVersionKind(obj.GroupVersionKind())
@@ -363,6 +364,7 @@ func createOrUpdate(ctx context.Context, c client.Client, obj *unstructured.Unst
 	// The objects written here are watched by the controller that writes them, so
 	// skip the write when nothing we manage differs and avoid re-triggering reconcile.
 	if specEqual(existing, obj) && labelsSatisfied(existing.GetLabels(), obj.GetLabels()) && ownerRefsSatisfied(existing, obj) {
+		*obj = *existing
 		return nil
 	}
 
@@ -432,11 +434,12 @@ func labelsSatisfied(existing, desired map[string]string) bool {
 	return true
 }
 
-// canAdopt reports whether existing may be written as desired. An object that
-// already carries the desired owner reference is ours; one that does not is only
-// taken over when the caller's adoptable predicate says so.
+// canAdopt protects owned resources and honors any caller-supplied adoption rule.
 func canAdopt(existing, desired *unstructured.Unstructured, adoptable func(*unstructured.Unstructured) bool) bool {
-	if len(desired.GetOwnerReferences()) == 0 || ownerRefsSatisfied(existing, desired) {
+	if len(desired.GetOwnerReferences()) == 0 {
+		return adoptable == nil || adoptable(existing)
+	}
+	if ownerRefsSatisfied(existing, desired) {
 		return true
 	}
 	return adoptable != nil && adoptable(existing)
@@ -446,10 +449,12 @@ func canAdopt(existing, desired *unstructured.Unstructured, adoptable func(*unst
 // lack it: a genuine name collision, or a leftover from a previous instance of the
 // owner that garbage collection has not removed yet.
 func adoptionRefusedError(desired *unstructured.Unstructured) error {
-	owner := "this controller"
-	if refs := desired.GetOwnerReferences(); len(refs) > 0 {
-		owner = refs[0].Kind + "/" + refs[0].Name
+	refs := desired.GetOwnerReferences()
+	if len(refs) == 0 {
+		return fmt.Errorf("refusing to manage existing %s %q: excluded by the adoption policy",
+			desired.GetKind(), desired.GetName())
 	}
+	owner := refs[0].Kind + "/" + refs[0].Name
 	return fmt.Errorf("refusing to adopt existing %s %s/%s: it carries no owner reference to %s "+
 		"(name collision, or a leftover of a previous %s awaiting garbage collection)",
 		desired.GetKind(), desired.GetNamespace(), desired.GetName(), owner, owner)

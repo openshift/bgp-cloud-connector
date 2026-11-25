@@ -100,7 +100,7 @@ func TestRoundtrip_BGPRouting(t *testing.T) {
 	orig := &networkingapi.BGPRouting{
 		ObjectMeta: metav1.ObjectMeta{Name: "rt-routing"},
 		Spec: networkingapi.BGPRoutingSpec{
-			Network: networkingapi.NetworkConfig{
+			Network: &networkingapi.NetworkConfig{
 				Name:    "prod",
 				Subnets: []string{"10.100.0.0/16", "2001:db8::/64"},
 			},
