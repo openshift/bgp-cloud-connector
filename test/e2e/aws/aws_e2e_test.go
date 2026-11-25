@@ -522,7 +522,7 @@ var _ = Describe("AWS E2E", Ordered, func() {
 
 			// The advertised prefix is already programmed. The remaining wait is the reply from the other workers.
 			By(fmt.Sprintf("requesting /clientip from every pod via the client instance at %s", clientAddress))
-			e2e.ProbeAllowingOVNKubeRestart(ctx, k8sClient, workers, 2*time.Minute, 30*time.Second, func(g Gomega) {
+			e2e.ProbeRecordingNetworkState(ctx, k8sClient, workers, 2*time.Minute, 30*time.Second, func(g Gomega) {
 				answers, probeErr := probe(ctx, instanceID, addresses)
 				g.Expect(probeErr).NotTo(HaveOccurred())
 				g.Expect(e2e.CheckAnswers(dests, answers, clientAddress)).To(Succeed())
