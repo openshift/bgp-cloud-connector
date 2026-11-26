@@ -151,16 +151,6 @@ func (b *RouteServerBackend) ReconcilePeers(ctx context.Context, desired []Peer)
 	}
 
 	changed := false
-	for name, want := range desiredByName {
-		cur, ok := findCurrent(current, name)
-		if !ok || !cur.applied() || cur.PeerIP != want.PeerIP || cur.PeerASN != want.PeerASN {
-			if err := b.createOrUpdate(ctx, want); err != nil {
-				return changed, err
-			}
-			changed = true
-		}
-	}
-
 	for _, cur := range current {
 		if _, keep := desiredByName[cur.Name]; keep {
 			continue
@@ -169,6 +159,16 @@ func (b *RouteServerBackend) ReconcilePeers(ctx context.Context, desired []Peer)
 			return changed, err
 		}
 		changed = true
+	}
+
+	for name, want := range desiredByName {
+		cur, ok := findCurrent(current, name)
+		if !ok || !cur.applied() || cur.PeerIP != want.PeerIP || cur.PeerASN != want.PeerASN {
+			if err := b.createOrUpdate(ctx, want); err != nil {
+				return changed, err
+			}
+			changed = true
+		}
 	}
 
 	return changed, nil

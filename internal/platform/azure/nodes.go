@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -28,29 +29,61 @@ import (
 // condition this operator reports is True while no packet reaches a pod.
 //
 // The interface is matched on the VM's ARM resource ID, which Azure records on
-// it, so no naming convention has to hold.
-func (p *Platform) ensureNodesCanForward(ctx context.Context, vms []VirtualMachine) error {
+// it, so no naming convention has to hold. The results distinguish nodes
+// confirmed able to forward from nodes whose state could not be inspected.
+// A node observed with forwarding disabled whose update fails is in neither
+// result: it is known unsafe for peering.
+func (p *Platform) ensureNodesCanForward(
+	ctx context.Context, nodes []platform.RouterNode,
+) ([]platform.RouterNode, []platform.RouterNode, error) {
 	logger := log.FromContext(ctx)
+	forwardingNodes := make([]platform.RouterNode, 0, len(nodes))
+	unknownNodes := make([]platform.RouterNode, 0, len(nodes))
+	var errs []error
+
+	type nodeVM struct {
+		node platform.RouterNode
+		vm   VirtualMachine
+	}
 
 	// The interfaces live in the VM's resource group, which is the cluster's
 	// and need not be the Route Server's, so they are listed per group rather
 	// than assuming one.
-	byGroup := make(map[string][]VirtualMachine)
-	for _, vm := range vms {
-		byGroup[vm.ResourceGroup] = append(byGroup[vm.ResourceGroup], vm)
+	byGroup := make(map[string][]nodeVM)
+	for _, node := range nodes {
+		vm, err := ParseProviderID(node.ProviderID)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("node %q: %w", node.Name, err))
+			unknownNodes = append(unknownNodes, node)
+			continue
+		}
+		byGroup[vm.ResourceGroup] = append(byGroup[vm.ResourceGroup], nodeVM{node: node, vm: vm})
 	}
 
-	for group, groupVMs := range byGroup {
+	groups := make([]string, 0, len(byGroup))
+	for group := range byGroup {
+		groups = append(groups, group)
+	}
+	sort.Strings(groups)
+	for _, group := range groups {
+		groupNodes := byGroup[group]
 		nics, err := p.nics.ListNICs(ctx, group)
 		if err != nil {
 			platform.RecordCloudAPIError(platform.PlatformAzure, platform.OpNodeForwarding)
-			return fmt.Errorf("listing network interfaces in %q: %w", group, err)
+			nodeNames := make([]string, 0, len(groupNodes))
+			for _, item := range groupNodes {
+				unknownNodes = append(unknownNodes, item.node)
+				nodeNames = append(nodeNames, item.node.Name)
+			}
+			errs = append(errs, fmt.Errorf("listing network interfaces in %q for nodes %q: %w", group, nodeNames, err))
+			continue
 		}
 
-		for _, vm := range groupVMs {
+		for _, item := range groupNodes {
 			found := false
+			canForward := true
 			for _, nic := range nics {
-				if !sameResource(nic.VMID, vm.ID) {
+				if !sameResource(nic.VMID, item.vm.ID) {
 					continue
 				}
 				found = true
@@ -59,21 +92,31 @@ func (p *Platform) ensureNodesCanForward(ctx context.Context, vms []VirtualMachi
 				}
 				if err := p.nics.EnableIPForwarding(ctx, nic.ResourceGroup, nic.Name); err != nil {
 					platform.RecordCloudAPIError(platform.PlatformAzure, platform.OpNodeForwarding)
+					canForward = false
 					if code, refused := writeRefused(err); refused {
-						return &forwardingRefusedError{nic: nic.Name, vm: vm.Name, code: code, err: err}
+						errs = append(errs, fmt.Errorf("node %q: %w", item.node.Name, &forwardingRefusedError{
+							nic: nic.Name, vm: item.vm.Name, code: code, err: err,
+						}))
+						continue
 					}
-					return fmt.Errorf("enabling IP forwarding on %q: %w", nic.Name, err)
+					errs = append(errs, fmt.Errorf("node %q: enabling IP forwarding on %q: %w", item.node.Name, nic.Name, err))
+					continue
 				}
-				logger.Info("enabled IP forwarding", "nic", nic.Name, "instance", vm.Name)
+				logger.Info("enabled IP forwarding", "nic", nic.Name, "instance", item.vm.Name)
 			}
 			if !found {
 				// Azure listed the interfaces without complaint; none of them
 				// belongs to this VM. Not a cloud API error.
-				return fmt.Errorf("no network interface is attached to %q", vm.Name)
+				errs = append(errs, fmt.Errorf("node %q: no network interface is attached to %q", item.node.Name, item.vm.Name))
+				unknownNodes = append(unknownNodes, item.node)
+				continue
+			}
+			if canForward {
+				forwardingNodes = append(forwardingNodes, item.node)
 			}
 		}
 	}
-	return nil
+	return forwardingNodes, unknownNodes, errors.Join(errs...)
 }
 
 // forwardingRefusedError is a router node whose interface has forwarding off

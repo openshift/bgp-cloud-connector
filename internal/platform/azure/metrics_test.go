@@ -25,11 +25,6 @@ func (*errTopo) GetTopology(_ context.Context) (*RouteServerTopology, error) { r
 // TestAzureMetrics_APIErrorsIncrement covers every operation label Azure
 // records against cloud_api_errors_total: each counts an Azure failure once.
 func TestAzureMetrics_APIErrorsIncrement(t *testing.T) {
-	vm, err := ParseProviderID(testProviderID)
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	cases := []struct {
 		op   string
 		fail func(*testing.T)
@@ -47,7 +42,7 @@ func TestAzureMetrics_APIErrorsIncrement(t *testing.T) {
 			op: platform.OpPeer,
 			fail: func(t *testing.T) {
 				p := &Platform{cfg: Config{ClusterID: "cluster"}, rs: &errRS{}}
-				if _, err := p.reconcileOurPeerings(context.Background(), nil); err == nil {
+				if _, err := p.reconcileOurPeerings(context.Background(), nil, nil); err == nil {
 					t.Fatal("expected error")
 				}
 			},
@@ -56,7 +51,8 @@ func TestAzureMetrics_APIErrorsIncrement(t *testing.T) {
 			op: platform.OpNodeForwarding,
 			fail: func(t *testing.T) {
 				p := &Platform{nics: &errNICs{}}
-				if err := p.ensureNodesCanForward(context.Background(), []VirtualMachine{vm}); err == nil {
+				node := testNode("worker-centralus1-xjf5l", "10.0.128.4")
+				if _, _, err := p.ensureNodesCanForward(context.Background(), []platform.RouterNode{node}); err == nil {
 					t.Fatal("expected error")
 				}
 			},

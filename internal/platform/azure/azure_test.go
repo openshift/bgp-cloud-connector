@@ -16,6 +16,23 @@ import (
 
 const testProviderID = "azure:///subscriptions/53b8f551-f0fc-4bea-8cba-6d1fefd54c8a/resourceGroups/amcdermo-rg/providers/Microsoft.Compute/virtualMachines/worker-centralus1-xjf5l"
 
+func testNode(name, ip string) platform.RouterNode {
+	return platform.RouterNode{
+		Name:       name,
+		PrivateIP:  ip,
+		ProviderID: strings.Replace(testProviderID, "worker-centralus1-xjf5l", name, 1),
+	}
+}
+
+func mustParseProviderID(t *testing.T, providerID string) VirtualMachine {
+	t.Helper()
+	vm, err := ParseProviderID(providerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return vm
+}
+
 func TestParseProviderID(t *testing.T) {
 	vm, err := ParseProviderID(testProviderID)
 	if err != nil {
@@ -90,13 +107,18 @@ func (f *fakeRS) DeleteAllPeers(_ context.Context) error { return nil }
 var _ Backend = (*fakeRS)(nil)
 
 type fakeNICs struct {
-	nics    []NIC
-	enabled []string
+	nics       []NIC
+	enabled    []string
+	listErrs   map[string]error
+	enableErrs map[string]error
 	// enableErr, when set, is what every EnableIPForwarding returns.
 	enableErr error
 }
 
 func (f *fakeNICs) ListNICs(_ context.Context, rg string) ([]NIC, error) {
+	if err := f.listErrs[rg]; err != nil {
+		return nil, err
+	}
 	var out []NIC
 	for _, n := range f.nics {
 		if n.ResourceGroup == rg {
@@ -107,6 +129,9 @@ func (f *fakeNICs) ListNICs(_ context.Context, rg string) ([]NIC, error) {
 }
 
 func (f *fakeNICs) EnableIPForwarding(_ context.Context, _, name string) error {
+	if err := f.enableErrs[name]; err != nil {
+		return err
+	}
 	if f.enableErr != nil {
 		return f.enableErr
 	}
@@ -130,7 +155,7 @@ func TestReconcileOurPeerings_LeavesOtherClustersAlone(t *testing.T) {
 	p := &Platform{cfg: Config{ClusterID: "cluster", LocalASN: 65001}, rs: rs}
 
 	ours := []Peer{{Name: peeringName("cluster", "10.0.128.4"), PeerIP: "10.0.128.4", PeerASN: 65001}}
-	if _, err := p.reconcileOurPeerings(context.Background(), ours); err != nil {
+	if _, err := p.reconcileOurPeerings(context.Background(), ours, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -180,9 +205,14 @@ func TestEnsureNodesCanForward_MatchesOnVMID(t *testing.T) {
 		{Name: "already-on", ResourceGroup: "amcdermo-rg", VMID: "/subscriptions/x/other", IPForwarding: true},
 	}}
 	p := &Platform{cfg: Config{}, nics: nics}
+	node := testNode("worker-centralus1-xjf5l", "10.0.128.4")
 
-	if err := p.ensureNodesCanForward(context.Background(), []VirtualMachine{vm}); err != nil {
+	forwarding, unknown, err := p.ensureNodesCanForward(context.Background(), []platform.RouterNode{node})
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(forwarding) != 1 || forwarding[0].Name != node.Name || len(unknown) != 0 {
+		t.Errorf("forwarding = %v, unknown = %v, want only %s forwarding", forwarding, unknown, node.Name)
 	}
 	if len(nics.enabled) != 1 || nics.enabled[0] != "some-other-nic-name" {
 		t.Errorf("enabled %v, want the interface attached to the VM", nics.enabled)
@@ -193,10 +223,38 @@ func TestEnsureNodesCanForward_MatchesOnVMID(t *testing.T) {
 // nothing, since a router node whose interface drops forwarded packets looks
 // entirely healthy from the cluster.
 func TestEnsureNodesCanForward_NoInterface(t *testing.T) {
-	vm, _ := ParseProviderID(testProviderID)
+	node := testNode("worker-centralus1-xjf5l", "10.0.128.4")
 	p := &Platform{cfg: Config{}, nics: &fakeNICs{}}
-	if err := p.ensureNodesCanForward(context.Background(), []VirtualMachine{vm}); err == nil {
+	forwarding, unknown, err := p.ensureNodesCanForward(context.Background(), []platform.RouterNode{node})
+	if err == nil {
 		t.Error("expected an error when no interface is attached to the VM")
+	}
+	if len(forwarding) != 0 || len(unknown) != 1 || unknown[0].Name != node.Name {
+		t.Errorf("forwarding = %v, unknown = %v, want only %s unknown", forwarding, unknown, node.Name)
+	}
+}
+
+func TestEnsureNodesCanForward_ListFailureMarksGroupUnknownAndContinues(t *testing.T) {
+	unknownNode := testNode("unknown", "10.0.128.4")
+	unknownNode.ProviderID = strings.Replace(unknownNode.ProviderID, "amcdermo-rg", "aaa-unreadable-rg", 1)
+	forwardingNode := testNode("forwarding", "10.0.128.5")
+	forwardingVM := mustParseProviderID(t, forwardingNode.ProviderID)
+	nics := &fakeNICs{
+		nics:     []NIC{{Name: "forwarding-nic", ResourceGroup: forwardingVM.ResourceGroup, VMID: forwardingVM.ID}},
+		listErrs: map[string]error{"aaa-unreadable-rg": errors.New("list failed")},
+	}
+	p := &Platform{nics: nics}
+
+	forwarding, unknown, err := p.ensureNodesCanForward(
+		context.Background(), []platform.RouterNode{unknownNode, forwardingNode})
+	if err == nil || !strings.Contains(err.Error(), unknownNode.Name) {
+		t.Fatalf("error = %v, want it to name %s", err, unknownNode.Name)
+	}
+	if len(forwarding) != 1 || forwarding[0].Name != forwardingNode.Name {
+		t.Errorf("forwarding = %v, want only %s", forwarding, forwardingNode.Name)
+	}
+	if len(unknown) != 1 || unknown[0].Name != unknownNode.Name {
+		t.Errorf("unknown = %v, want only %s", unknown, unknownNode.Name)
 	}
 }
 
@@ -235,7 +293,8 @@ func TestEnsureNodesCanForward_RefusedWriteSaysWhatToDo(t *testing.T) {
 			}
 			p := &Platform{cfg: Config{}, nics: nics}
 
-			err := p.ensureNodesCanForward(context.Background(), []VirtualMachine{vm})
+			node := testNode("worker-centralus1-xjf5l", "10.0.128.4")
+			forwarding, unknown, err := p.ensureNodesCanForward(context.Background(), []platform.RouterNode{node})
 
 			var refused *forwardingRefusedError
 			if !errors.As(err, &refused) {
@@ -245,7 +304,8 @@ func TestEnsureNodesCanForward_RefusedWriteSaysWhatToDo(t *testing.T) {
 				t.Errorf("got nic=%q vm=%q code=%q, want router-nic, %s, %s",
 					refused.nic, refused.vm, refused.code, vm.Name, code)
 			}
-			want := `IP forwarding is off on network interface "router-nic" of "worker-centralus1-xjf5l", ` +
+			want := `node "worker-centralus1-xjf5l": ` +
+				`IP forwarding is off on network interface "router-nic" of "worker-centralus1-xjf5l", ` +
 				`and Azure refused this identity's change to it (` + code + `). Enable IP forwarding ` +
 				`on the node pool, or let the identity write the interface and join its subnet and ` +
 				`load balancer backend pool`
@@ -254,6 +314,9 @@ func TestEnsureNodesCanForward_RefusedWriteSaysWhatToDo(t *testing.T) {
 			}
 			if !errors.Is(err, refusal) {
 				t.Error("Azure's error is no longer reachable with errors.Is")
+			}
+			if len(forwarding) != 0 || len(unknown) != 0 {
+				t.Errorf("forwarding = %v, unknown = %v, want the refused node skipped", forwarding, unknown)
 			}
 		})
 	}
@@ -274,7 +337,8 @@ func TestEnsureNodesCanForward_OtherWriteFailuresUnchanged(t *testing.T) {
 	}
 	p := &Platform{cfg: Config{}, nics: nics}
 
-	err = p.ensureNodesCanForward(context.Background(), []VirtualMachine{vm})
+	node := testNode("worker-centralus1-xjf5l", "10.0.128.4")
+	forwarding, unknown, err := p.ensureNodesCanForward(context.Background(), []platform.RouterNode{node})
 
 	var refused *forwardingRefusedError
 	if errors.As(err, &refused) {
@@ -282,6 +346,9 @@ func TestEnsureNodesCanForward_OtherWriteFailuresUnchanged(t *testing.T) {
 	}
 	if !errors.Is(err, failure) {
 		t.Errorf("got %v, want it to wrap Azure's error", err)
+	}
+	if len(forwarding) != 0 || len(unknown) != 0 {
+		t.Errorf("forwarding = %v, unknown = %v, want the failed node skipped", forwarding, unknown)
 	}
 }
 
@@ -335,42 +402,90 @@ func TestDiscoverEndpoints_Refusals(t *testing.T) {
 	}
 }
 
-// TestToVirtualMachines_WrapsBadProviderIDWithNodeName pins that a node that
-// cannot be resolved to a VM fails with its own name in the error, since
-// "not an Azure VM provider ID" alone does not say which of several router
-// nodes is the problem.
-func TestToVirtualMachines_WrapsBadProviderIDWithNodeName(t *testing.T) {
-	nodes := []platform.RouterNode{
-		{Name: "good-node", ProviderID: testProviderID},
-		{Name: "bad-node", ProviderID: "not-a-provider-id"},
-	}
-	_, err := toVirtualMachines(nodes)
+// TestEnsureNodesCanForward_BadProviderIDIsUnknown pins that a node that
+// cannot be resolved to a VM is reported without causing an existing peering
+// to be removed.
+func TestEnsureNodesCanForward_BadProviderIDIsUnknown(t *testing.T) {
+	node := platform.RouterNode{Name: "bad-node", ProviderID: "not-a-provider-id"}
+	p := &Platform{nics: &fakeNICs{}}
+	forwarding, unknown, err := p.ensureNodesCanForward(context.Background(), []platform.RouterNode{node})
 	if err == nil {
 		t.Fatal("expected an error for the unparseable node")
 	}
 	if !strings.Contains(err.Error(), "bad-node") {
 		t.Errorf("error %q does not name the offending node", err.Error())
 	}
+	if len(forwarding) != 0 || len(unknown) != 1 || unknown[0].Name != node.Name {
+		t.Errorf("forwarding = %v, unknown = %v, want only %s unknown", forwarding, unknown, node.Name)
+	}
 }
 
-// TestReconcileNodes_ForwardingFailureSkipsPeering pins the ordering the code
-// comments call out: a node whose interface cannot be found for forwarding
-// must not reach peering reconciliation, since a peering to a node dropping
-// forwarded packets is the failure that looks healthy.
-func TestReconcileNodes_ForwardingFailureSkipsPeering(t *testing.T) {
-	rs := &fakeRS{}
+// TestReconcileNodes_ForwardingFailureDoesNotBlockHealthyPeer verifies that a
+// refused node is removed from peering while another node is still repaired.
+func TestReconcileNodes_ForwardingFailureDoesNotBlockHealthyPeer(t *testing.T) {
+	victim := testNode("victim", "10.0.128.4")
+	control := testNode("control", "10.0.128.5")
+	victimVM := mustParseProviderID(t, victim.ProviderID)
+	controlVM := mustParseProviderID(t, control.ProviderID)
+	refusal := azureRefusal(t, http.StatusForbidden, "DenyAssignmentAuthorizationFailed")
+	nics := &fakeNICs{
+		nics: []NIC{
+			{Name: "victim-nic", ResourceGroup: victimVM.ResourceGroup, VMID: victimVM.ID},
+			{Name: "control-nic", ResourceGroup: controlVM.ResourceGroup, VMID: controlVM.ID},
+		},
+		enableErrs: map[string]error{"victim-nic": refusal},
+	}
+	rs := &fakeRS{current: []ObservedPeer{
+		{Peer: Peer{Name: peeringName("cluster", victim.PrivateIP), PeerIP: victim.PrivateIP, PeerASN: 65001}},
+		{Peer: Peer{Name: peeringName("cluster", control.PrivateIP), PeerIP: control.PrivateIP, PeerASN: 65001}},
+	}}
 	p := &Platform{
 		cfg:  Config{ClusterID: "cluster", LocalASN: 65001},
 		rs:   rs,
-		nics: &fakeNICs{}, // no NICs, so forwarding cannot find one
+		nics: nics,
 	}
 
-	nodes := []platform.RouterNode{{Name: "n1", PrivateIP: "10.0.128.4", ProviderID: testProviderID}}
-	if err := p.ReconcileNodes(context.Background(), nodes); err == nil {
+	err := p.ReconcileNodes(context.Background(), []platform.RouterNode{victim, control})
+	if err == nil {
 		t.Fatal("expected the forwarding failure to be reported")
 	}
-	if rs.desired != nil {
-		t.Errorf("peering reconciliation ran despite the forwarding failure: %v", rs.desired)
+	if !errors.Is(err, refusal) {
+		t.Errorf("got %v, want it to wrap Azure's refusal", err)
+	}
+	if len(nics.enabled) != 1 || nics.enabled[0] != "control-nic" {
+		t.Errorf("enabled = %v, want [control-nic]", nics.enabled)
+	}
+	if len(rs.desired) != 1 || rs.desired[0].PeerIP != control.PrivateIP {
+		t.Errorf("desired peerings = %+v, want only the healthy control", rs.desired)
+	}
+}
+
+// TestReconcileNodes_UnknownForwardingPreservesOnlyExistingPeer verifies that
+// an inspection failure neither deletes a known peering nor creates a new one.
+func TestReconcileNodes_UnknownForwardingPreservesOnlyExistingPeer(t *testing.T) {
+	existing := platform.RouterNode{Name: "existing-unknown", PrivateIP: "10.0.128.4", ProviderID: "bad-existing"}
+	missing := platform.RouterNode{Name: "missing-unknown", PrivateIP: "10.0.128.5", ProviderID: "bad-missing"}
+	control := testNode("control", "10.0.128.6")
+	controlVM := mustParseProviderID(t, control.ProviderID)
+	rs := &fakeRS{current: []ObservedPeer{{Peer: Peer{
+		Name: peeringName("cluster", existing.PrivateIP), PeerIP: existing.PrivateIP, PeerASN: 65001,
+	}}}}
+	p := &Platform{
+		cfg:  Config{ClusterID: "cluster", LocalASN: 65001},
+		rs:   rs,
+		nics: &fakeNICs{nics: []NIC{{Name: "control-nic", ResourceGroup: controlVM.ResourceGroup, VMID: controlVM.ID}}},
+	}
+
+	err := p.ReconcileNodes(context.Background(), []platform.RouterNode{existing, missing, control})
+	if err == nil {
+		t.Fatal("expected the unknown nodes to be reported")
+	}
+	desiredIPs := map[string]bool{}
+	for _, peer := range rs.desired {
+		desiredIPs[peer.PeerIP] = true
+	}
+	if !desiredIPs[existing.PrivateIP] || !desiredIPs[control.PrivateIP] || desiredIPs[missing.PrivateIP] {
+		t.Errorf("desired peer IPs = %v, want existing unknown and healthy control only", desiredIPs)
 	}
 }
 
