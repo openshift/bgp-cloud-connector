@@ -20,7 +20,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -35,6 +37,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v6"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armlocks"
 	ginkgotypes "github.com/onsi/ginkgo/v2/types"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -70,6 +73,7 @@ var (
 	// The singular client is the mutating one: the plural lists.
 	peeringMutator *armnetwork.VirtualHubBgpConnectionClient
 	nicClient      *armnetwork.InterfacesClient
+	lockClient     *armlocks.ManagementLocksClient
 
 	bgpConfig  *networkingapi.BGPCloudConfiguration
 	bgpRouting *networkingapi.BGPRouting
@@ -87,6 +91,8 @@ func TestAzureE2E(t *testing.T) {
 }
 
 var _ = e2e.RegisterJUnitReporter("junit_azure_e2e.xml")
+
+const forwardingFailureLockName = "bgpcc-e2e-read-only-nic"
 
 var _ = BeforeSuite(func() {
 	// See the note in the AWS suite: a profile generated per run cannot
@@ -145,6 +151,9 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	peeringClient = factory.NewVirtualHubBgpConnectionsClient()
 	peeringMutator = factory.NewVirtualHubBgpConnectionClient()
+	lockFactory, err := armlocks.NewClientFactory(bgpConfig.Spec.Azure.SubscriptionID, cred, nil)
+	Expect(err).NotTo(HaveOccurred())
+	lockClient = lockFactory.NewManagementLocksClient()
 
 	By("building the interface client from the cluster's own credentials")
 	// The estate is this suite's to own, and the credential above is the
@@ -505,16 +514,35 @@ func deletePeering(ctx context.Context, name string) error {
 	return err
 }
 
-// setForwarding rewrites enableIPForwarding on a node's interface, so a
-// test can turn it off and watch the operator put it back.
-func setForwarding(ctx context.Context, nic *armnetwork.Interface, enabled bool) error {
-	nic.Properties.EnableIPForwarding = to.Ptr(enabled)
+// disableForwarding turns off enableIPForwarding on a node's interface so a
+// test can watch the operator put it back.
+func disableForwarding(ctx context.Context, nic *armnetwork.Interface) error {
+	nic.Properties.EnableIPForwarding = to.Ptr(false)
 	poller, err := nicClient.BeginCreateOrUpdate(ctx,
 		resourceGroupOf(*nic.ID), *nic.Name, *nic, nil)
 	if err != nil {
 		return err
 	}
 	_, err = poller.PollUntilDone(ctx, nil)
+	return err
+}
+
+func createForwardingFailureLock(ctx context.Context, scope string) error {
+	_, err := lockClient.CreateOrUpdateByScope(ctx, scope, forwardingFailureLockName, armlocks.ManagementLockObject{
+		Properties: &armlocks.ManagementLockProperties{
+			Level: to.Ptr(armlocks.LockLevelReadOnly),
+			Notes: to.Ptr("Temporary BGP cloud connector forwarding-failure test"),
+		},
+	}, nil)
+	return err
+}
+
+func deleteForwardingFailureLock(ctx context.Context, scope string) error {
+	_, err := lockClient.DeleteByScope(ctx, scope, forwardingFailureLockName, nil)
+	var respErr *azcore.ResponseError
+	if errors.As(err, &respErr) && respErr.StatusCode == http.StatusNotFound {
+		return nil
+	}
 	return err
 }
 
