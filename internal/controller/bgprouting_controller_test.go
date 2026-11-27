@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -61,7 +62,7 @@ func newTestBGPRouting() *networkingapi.BGPRouting {
 			Name: "prod",
 		},
 		Spec: networkingapi.BGPRoutingSpec{
-			Network: networkingapi.NetworkConfig{
+			Network: &networkingapi.NetworkConfig{
 				Name:    "prod",
 				Subnets: []string{"10.100.0.0/16"},
 			},
@@ -94,6 +95,7 @@ func newReadyBGPCloudConfiguration() *networkingapi.BGPCloudConfiguration {
 
 func TestRoutingReconcile_FullReconcile(t *testing.T) {
 	routing := newTestBGPRouting()
+	routing.Generation = 1
 	config := newReadyBGPCloudConfiguration()
 	ns := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
@@ -105,23 +107,47 @@ func TestRoutingReconcile_FullReconcile(t *testing.T) {
 		},
 	}
 
+	const cudnUID = types.UID("provisioned-cudn-uid")
+	failAdvertisement := true
 	s := routingTestScheme()
 	c := fake.NewClientBuilder().WithScheme(s).
 		WithObjects(routing, config, ns).
 		WithStatusSubresource(routing, config).
-		Build()
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				switch obj.GetObjectKind().GroupVersionKind() {
+				case ClusterUDNGVK:
+					obj.SetUID(cudnUID)
+				case RouteAdvertisementsGVK:
+					if failAdvertisement {
+						return errors.New("test RouteAdvertisements create failure")
+					}
+				}
+				return cl.Create(ctx, obj, opts...)
+			},
+		}).Build()
 
 	r := &BGPRoutingReconciler{Client: c, Scheme: s}
 
-	// First reconcile adds finalizer
-	_, _ = r.Reconcile(context.Background(), reconcile.Request{
-		NamespacedName: types.NamespacedName{Name: "prod"},
-	})
+	req := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(routing)}
+	updated := &networkingapi.BGPRouting{}
+	if _, err := r.Reconcile(t.Context(), req); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(t.Context(), req.NamespacedName, updated); err != nil {
+		t.Fatal(err)
+	}
+	wantNetwork := networkingapi.ResolvedRoutingNetwork{
+		Name: "cluster-udn-prod", UID: string(cudnUID), Role: primaryNetworkRole, Topology: layer2Topology,
+	}
+	if updated.Status.Phase != networkingapi.PhaseDegraded || updated.Status.RouteAdvertisementsRef != nil ||
+		updated.Status.NetworkRef == nil || *updated.Status.NetworkRef != wantNetwork ||
+		updated.Status.ObservedGeneration != routing.Generation {
+		t.Fatalf("unexpected status when advertisement creation fails: %+v", updated.Status)
+	}
 
-	// Second reconcile does full 2-phase
-	result, err := r.Reconcile(context.Background(), reconcile.Request{
-		NamespacedName: types.NamespacedName{Name: "prod"},
-	})
+	failAdvertisement = false
+	result, err := r.Reconcile(t.Context(), req)
 	if err != nil {
 		t.Fatalf("reconcile error: %v", err)
 	}
@@ -129,12 +155,15 @@ func TestRoutingReconcile_FullReconcile(t *testing.T) {
 		t.Errorf("expected 5m resync requeue, got %v", result.RequeueAfter)
 	}
 
-	updated := &networkingapi.BGPRouting{}
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "prod"}, updated); err != nil {
 		t.Fatalf("failed to get updated BGPRouting: %v", err)
 	}
 	if updated.Status.Phase != networkingapi.PhaseReady {
 		t.Errorf("expected Ready, got %s", updated.Status.Phase)
+	}
+	if updated.Status.NetworkRef == nil || *updated.Status.NetworkRef != wantNetwork ||
+		updated.Status.RouteAdvertisementsRef == nil || updated.Status.RouteAdvertisementsRef.Name != RouteAdvertisementName {
+		t.Fatalf("unexpected provisioning references: %+v", updated.Status)
 	}
 	// 2 per-step conditions + the 3 aggregate summary conditions.
 	if len(updated.Status.Conditions) != 5 {
@@ -171,7 +200,7 @@ func TestRoutingReconcile_CUDNFailureMakesRoutingUnavailable(t *testing.T) {
 		WithObjects(routing, config, ns).
 		WithStatusSubresource(routing, config).
 		Build()
-	if err := EnsureClusterUDN(context.Background(), c, routing); err != nil {
+	if _, err := EnsureClusterUDN(context.Background(), c, routing); err != nil {
 		t.Fatalf("ensure CUDN: %v", err)
 	}
 	cudn := &unstructured.Unstructured{}
@@ -221,7 +250,7 @@ func TestRoutingReconcile_RepeatedReconcile_DoesNotRewriteSharedRouteAdvertiseme
 	routingStaging := &networkingapi.BGPRouting{
 		ObjectMeta: metav1.ObjectMeta{Name: "staging"},
 		Spec: networkingapi.BGPRoutingSpec{
-			Network: networkingapi.NetworkConfig{Name: "staging", Subnets: []string{"10.200.0.0/16"}},
+			Network: &networkingapi.NetworkConfig{Name: "staging", Subnets: []string{"10.200.0.0/16"}},
 		},
 	}
 	nsProd := &corev1.Namespace{
@@ -242,9 +271,7 @@ func TestRoutingReconcile_RepeatedReconcile_DoesNotRewriteSharedRouteAdvertiseme
 	prodReq := reconcile.Request{NamespacedName: types.NamespacedName{Name: "prod"}}
 	stagingReq := reconcile.Request{NamespacedName: types.NamespacedName{Name: "staging"}}
 
-	// Drive both CRs to Ready (finalizer-add + full pass each, matching
-	// TestRoutingReconcile_FullReconcile's two-call convention). This
-	// creates the single shared RouteAdvertisements object.
+	// Drive both CRs to Ready with a single shared RouteAdvertisements object.
 	_, _ = r.Reconcile(context.Background(), prodReq)
 	if _, err := r.Reconcile(context.Background(), prodReq); err != nil {
 		t.Fatalf("prod reconcile error: %v", err)
@@ -330,7 +357,7 @@ func TestRoutingReconcile_DeleteKeepsRAWhenOthersExist(t *testing.T) {
 	other := &networkingapi.BGPRouting{
 		ObjectMeta: metav1.ObjectMeta{Name: "staging"},
 		Spec: networkingapi.BGPRoutingSpec{
-			Network: networkingapi.NetworkConfig{
+			Network: &networkingapi.NetworkConfig{
 				Name: "staging", Subnets: []string{"10.200.0.0/16"},
 			},
 		},
@@ -373,7 +400,7 @@ func TestRoutingReconcile_DuplicateNetworkName(t *testing.T) {
 	existing := &networkingapi.BGPRouting{
 		ObjectMeta: metav1.ObjectMeta{Name: "existing-prod"},
 		Spec: networkingapi.BGPRoutingSpec{
-			Network: networkingapi.NetworkConfig{
+			Network: &networkingapi.NetworkConfig{
 				Name: "prod", Subnets: []string{"10.100.0.0/16"},
 			},
 		},
@@ -415,7 +442,7 @@ func TestRoutingReconcile_DuplicateNetwork_RecoversOnConflictDelete(t *testing.T
 	existing := &networkingapi.BGPRouting{
 		ObjectMeta: metav1.ObjectMeta{Name: "existing-prod"},
 		Spec: networkingapi.BGPRoutingSpec{
-			Network: networkingapi.NetworkConfig{
+			Network: &networkingapi.NetworkConfig{
 				Name: "prod", Subnets: []string{"10.100.0.0/16"},
 			},
 		},
@@ -532,7 +559,7 @@ func TestEnqueueAllRoutings(t *testing.T) {
 	routing2 := &networkingapi.BGPRouting{
 		ObjectMeta: metav1.ObjectMeta{Name: "staging"},
 		Spec: networkingapi.BGPRoutingSpec{
-			Network: networkingapi.NetworkConfig{Name: "staging", Subnets: []string{"10.200.0.0/16"}},
+			Network: &networkingapi.NetworkConfig{Name: "staging", Subnets: []string{"10.200.0.0/16"}},
 		},
 	}
 	s := routingTestScheme()

@@ -70,8 +70,7 @@ spec:
       version: v1beta1
     - description: |-
         BGPRouting declares a single network to advertise via BGP.
-        Users must pre-create and label namespaces; the operator manages only the
-        ClusterUserDefinedNetwork and RouteAdvertisements.
+        It can provision a ClusterUserDefinedNetwork or advertise an existing one.
       displayName: BGP Routing
       kind: BGPRouting
       name: bgproutings.networking.openshift.io

@@ -244,8 +244,102 @@ spec:
 
 | Field | Required | Description |
 |:---|:---|:---|
-| `spec.network.name` | Yes | Identifies the CUDN network. The operator creates a ClusterUserDefinedNetwork named `cluster-udn-<name>` that selects namespaces with label `cluster-udn: <name>`. Users must pre-create and label namespaces. |
-| `spec.network.subnets[]` | Yes | CIDRs for the CUDN pod network (1 or 2 entries for single-stack or dual-stack). The operator hardcodes `topology: Layer2`, `role: Primary`, and `ipam.lifecycle: Persistent` on the generated CUDN. |
+| `spec.network.name` | When provisioning | Identifies the CUDN network. The operator creates a ClusterUserDefinedNetwork named `cluster-udn-<name>` that selects namespaces with label `cluster-udn: <name>`. Users must pre-create and label namespaces. |
+| `spec.network.subnets[]` | When provisioning | CIDRs for the CUDN pod network (1 or 2 entries for single-stack or dual-stack). The operator hardcodes `topology: Layer2`, `role: Primary`, and `ipam.lifecycle: Persistent` on the generated CUDN. |
+| `spec.networkRef.kind` | When referencing | Must be `ClusterUserDefinedNetwork` in the `k8s.ovn.org` API group. |
+| `spec.networkRef.name` | When referencing | Name of the existing primary Layer 2 or Layer 3 CUDN. |
+
+Both modes report the CUDN in `status.networkRef` and the advertisement in
+`status.routeAdvertisementsRef`. See the status examples below.
+
+### Advertise an existing primary CUDN
+
+Set exactly one of `spec.network` and `spec.networkRef`. The network source and
+the reference are immutable. Create a ready `BGPCloudConfiguration` for the
+peers, then opt the existing CUDN in as the network administrator.
+
+```bash
+name=vm-network
+uid=$(oc get clusteruserdefinednetwork "$name" -o jsonpath='{.metadata.uid}')
+oc label clusteruserdefinednetwork "$name" "networking.openshift.io/bgp-network-ref=$uid"
+```
+
+OVN-Kubernetes copies the label to the CUDN's generated attachments so that
+`RouteAdvertisements` can select this network. Reserve this label for the named
+CUDN and its generated attachments. Set the label again with the new UID if the
+CUDN is recreated. Use a single advertisement configuration for the network,
+and keep it outside the shared provisioning selector `advertise: "true"`.
+
+```yaml
+apiVersion: networking.openshift.io/v1beta1
+kind: BGPRouting
+metadata:
+  name: advertise-vm-network
+spec:
+  networkRef:
+    kind: ClusterUserDefinedNetwork
+    name: vm-network
+```
+
+The controller owns a dedicated `RouteAdvertisements` that selects the
+connector's FRR configuration. `RouteAdvertisementsAccepted` reports
+OVN-Kubernetes acceptance for its current generation. Deleting the
+`BGPRouting` withdraws its own advertisement and preserves the CUDN.
+
+### Status examples
+
+With `spec.network`, the connector ensures a CUDN and the shared advertisement.
+The shared object reports OVN acceptance.
+
+```yaml
+status:
+  phase: Ready
+  observedGeneration: 1
+  networkRef:
+    name: cluster-udn-prod
+    uid: 24b08231-6dab-4aea-bc7d-bbb0cb588e07
+    role: Primary
+    topology: Layer2
+  routeAdvertisementsRef:
+    name: bgp-cc-route-advertisements
+  conditions:
+    - type: Available
+      status: "True"
+      reason: AsExpected
+    - type: NetworkCreated
+      status: "True"
+      reason: Created
+    - type: RouteAdvertisementsCreated
+      status: "True"
+      reason: Created
+```
+
+With `spec.networkRef`, `Ready` reflects OVN acceptance of the current
+generation of the dedicated advertisement. Check the external router to confirm
+that the peer learned the route.
+
+```yaml
+status:
+  phase: Ready
+  observedGeneration: 1
+  networkRef:
+    name: vm-network
+    uid: 672cf656-c787-4158-88c6-21adc0782ea5
+    role: Primary
+    topology: Layer2
+  routeAdvertisementsRef:
+    name: bgp-cc-ref-22081cab2916d4ffa2c1a94cac326393e
+  conditions:
+    - type: Available
+      status: "True"
+      reason: AsExpected
+    - type: NetworkResolved
+      status: "True"
+      reason: Resolved
+    - type: RouteAdvertisementsAccepted
+      status: "True"
+      reason: Accepted
+```
 
 ## Operator-generated resources
 

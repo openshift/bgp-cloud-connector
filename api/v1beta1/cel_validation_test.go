@@ -355,7 +355,7 @@ func validRouting(name string) *networkingapi.BGPRouting {
 	return &networkingapi.BGPRouting{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec: networkingapi.BGPRoutingSpec{
-			Network: networkingapi.NetworkConfig{
+			Network: &networkingapi.NetworkConfig{
 				Name:    "prod",
 				Subnets: []string{"10.100.0.0/16"},
 			},
@@ -451,6 +451,63 @@ func TestCEL_ForwardingSelectorRejectedOnManual(t *testing.T) {
 		t.Fatal("forwardingNodeSelector on Manual should be rejected")
 	}
 	assertErrorContains(t, err, "spec.forwardingNodeSelector may only be set when spec.platform is not Manual")
+}
+
+func TestCEL_RoutingNetworkSources(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		network   bool
+		ref       *networkingapi.RoutingNetworkReference
+		wantError string
+	}{
+		{name: "reference", ref: &networkingapi.RoutingNetworkReference{Kind: "ClusterUserDefinedNetwork", Name: "vm-net"}},
+		{name: "both", network: true, ref: &networkingapi.RoutingNetworkReference{Kind: "ClusterUserDefinedNetwork", Name: "vm-net"}, wantError: "exactly one"},
+		{name: "neither", wantError: "exactly one"},
+		{name: "bad-kind", ref: &networkingapi.RoutingNetworkReference{Kind: "UserDefinedNetwork", Name: "vm-net"}, wantError: "Unsupported value"},
+		{name: "bad-name", ref: &networkingapi.RoutingNetworkReference{Kind: "ClusterUserDefinedNetwork", Name: "team/vm-net"}, wantError: "should match"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			obj := validRouting("cel-routing-" + tc.name)
+			obj.Spec.NetworkRef = tc.ref
+			if !tc.network {
+				obj.Spec.Network = nil
+			}
+			err := testClient.Create(ctx, obj)
+			if tc.wantError == "" {
+				if err != nil {
+					t.Fatalf("valid networkRef rejected: %v", err)
+				}
+				t.Cleanup(func() { _ = testClient.Delete(ctx, obj) })
+				fetched := &networkingapi.BGPRouting{}
+				if err := testClient.Get(ctx, client.ObjectKeyFromObject(obj), fetched); err != nil {
+					t.Fatal(err)
+				}
+				if fetched.Spec.Network != nil || fetched.Spec.NetworkRef == nil || *fetched.Spec.NetworkRef != *tc.ref {
+					t.Fatalf("unexpected round-tripped spec: %+v", fetched.Spec)
+				}
+				fetched.Spec.NetworkRef.Name = "another-net"
+				err = testClient.Update(ctx, fetched)
+				if err == nil {
+					t.Fatal("networkRef update should be rejected")
+				}
+				assertErrorContains(t, err, "networkRef is immutable")
+
+				fetched.Spec.NetworkRef = nil
+				fetched.Spec.Network = validRouting("unused").Spec.Network
+				err = testClient.Update(ctx, fetched)
+				if err == nil {
+					t.Fatal("changing the network source should be rejected")
+				}
+				assertErrorContains(t, err, "the network source is immutable")
+				return
+			}
+			if err == nil {
+				t.Cleanup(func() { _ = testClient.Delete(ctx, obj) })
+				t.Fatal("invalid network source should be rejected")
+			}
+			assertErrorContains(t, err, tc.wantError)
+		})
+	}
 }
 
 // --- helpers ---

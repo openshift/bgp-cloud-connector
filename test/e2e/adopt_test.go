@@ -34,7 +34,7 @@ func routing(name string, subnets ...string) *networkingapi.BGPRouting {
 	return &networkingapi.BGPRouting{
 		ObjectMeta: metav1.ObjectMeta{Name: "cudn1"},
 		Spec: networkingapi.BGPRoutingSpec{
-			Network: networkingapi.NetworkConfig{Name: name, Subnets: subnets},
+			Network: &networkingapi.NetworkConfig{Name: name, Subnets: subnets},
 		},
 	}
 }

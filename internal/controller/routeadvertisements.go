@@ -25,28 +25,27 @@ import (
 )
 
 func EnsureRouteAdvertisements(ctx context.Context, c client.Client) error {
-	obj := &unstructured.Unstructured{
+	obj := routeAdvertisements(RouteAdvertisementName, map[string]interface{}{LabelAdvertise: "true"}, map[string]interface{}{})
+	return createOrUpdate(ctx, c, obj, nil)
+}
+
+func routeAdvertisements(name string, networkLabels, frrSelector map[string]interface{}) *unstructured.Unstructured {
+	return &unstructured.Unstructured{
 		Object: map[string]interface{}{
-			"apiVersion": "k8s.ovn.org/v1",
-			"kind":       "RouteAdvertisements",
+			"apiVersion": RouteAdvertisementsGVK.GroupVersion().String(),
+			"kind":       RouteAdvertisementsGVK.Kind,
 			"metadata": map[string]interface{}{
-				"name": RouteAdvertisementName,
-				"labels": map[string]interface{}{
-					LabelManagedBy: LabelManagedByVal,
-				},
+				"name":   name,
+				"labels": map[string]interface{}{LabelManagedBy: LabelManagedByVal},
 			},
 			"spec": map[string]interface{}{
 				"nodeSelector":             map[string]interface{}{},
-				"frrConfigurationSelector": map[string]interface{}{},
+				"frrConfigurationSelector": frrSelector,
 				"networkSelectors": []interface{}{
 					map[string]interface{}{
 						"networkSelectionType": "ClusterUserDefinedNetworks",
 						"clusterUserDefinedNetworkSelector": map[string]interface{}{
-							"networkSelector": map[string]interface{}{
-								"matchLabels": map[string]interface{}{
-									LabelAdvertise: "true",
-								},
-							},
+							"networkSelector": map[string]interface{}{"matchLabels": networkLabels},
 						},
 					},
 				},
@@ -54,8 +53,6 @@ func EnsureRouteAdvertisements(ctx context.Context, c client.Client) error {
 			},
 		},
 	}
-
-	return createOrUpdate(ctx, c, obj, nil)
 }
 
 func DeleteRouteAdvertisements(ctx context.Context, c client.Client) error {
