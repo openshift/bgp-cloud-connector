@@ -818,6 +818,7 @@ stub_policy_rc=0
 stub_policy_write_failures=0
 stub_policy_write_denied=0
 stub_sa_policy_notfound=0
+stub_sa_delete=""
 # Reached through gcp_query's, retry's and try's "$@".
 # shellcheck disable=SC2329
 gcloud() {
@@ -844,6 +845,22 @@ gcloud() {
                 echo "ERROR: (gcloud.projects.add-iam-policy-binding) ABORTED: There were concurrent policy changes." >&2
                 return 1
             fi ;;
+        "iam service-accounts delete"*)
+            case "${stub_sa_delete}" in
+                notfound) echo "ERROR: (gcloud.iam.service-accounts.delete) NOT_FOUND: Unknown service account. This command is authenticated as ci@proj.iam.gserviceaccount.com" >&2; return 1 ;;
+                notfound_once)
+                    if [[ ! -e "${workdir}/sa-delete-seen" ]]; then
+                        : >"${workdir}/sa-delete-seen"
+                        echo "ERROR: (gcloud.iam.service-accounts.delete) NOT_FOUND: Unknown service account." >&2; return 1
+                    fi ;;
+                notfound_4)
+                    # The call being answered is already in the log.
+                    if (( $(grep -c 'iam service-accounts delete' "${sa_calls}") <= 4 )); then
+                        echo "ERROR: (gcloud.iam.service-accounts.delete) NOT_FOUND: Unknown service account." >&2; return 1
+                    fi ;;
+                quoted)   echo "ERROR: (gcloud.iam.service-accounts.delete) PERMISSION_DENIED: denied; the earlier read said NOT_FOUND." >&2; return 1 ;;
+                denied)   echo "ERROR: (gcloud.iam.service-accounts.delete) PERMISSION_DENIED: Permission 'iam.serviceAccounts.delete' denied on projects/proj." >&2; return 1 ;;
+            esac ;;
     esac
 }
 sa_calls_matching() { grep -c -- "$1" "${sa_calls}"; }
@@ -868,19 +885,69 @@ check "it adopts an account that is already there" "$(sa_calls_matching 'iam ser
 gcp_ensure_service_account proj bgpcc-infra >/dev/null 2>&1
 check "it fails when it cannot tell whether the account exists" "$?" "1"
 check "and creates nothing on a guess" "$(sa_calls_matching 'iam service-accounts create')" "0"
-gcp_delete_service_account proj bgpcc-infra >/dev/null 2>&1
-check "the delete fails the same way" "$?" "1"
-check "and deletes nothing on a guess" "$(sa_calls_matching 'iam service-accounts delete')" "0"
 stub_sa_list_rc=0
 
 : >"${sa_calls}"; stub_sas="${email}"$'\n'
 gcp_delete_service_account proj bgpcc-infra >/dev/null 2>&1
 check "gcp_delete_service_account deletes the account" \
     "$(sa_calls_matching "iam service-accounts delete ${email} --project=proj")" "1"
+# IAM's list is eventually consistent, so an account it does not show
+# may still be there: the delete is attempted, and its own NOT_FOUND is
+# what "already gone" means.
 : >"${sa_calls}"; stub_sas=""
 gcp_delete_service_account proj bgpcc-infra >/dev/null 2>&1
+check "an account the list does not show is still deleted" \
+    "$(sa_calls_matching "iam service-accounts delete ${email} --project=proj")" "1"
+: >"${sa_calls}"; stub_sa_delete=notfound
+out="$(GCP_IAM_WAIT_SECS=2 gcp_delete_service_account proj bgpcc-infra 2>&1)"
 check "an account already gone is success" "$?" "0"
-check "and is not deleted again" "$(sa_calls_matching 'iam service-accounts delete')" "0"
+check "and says so" "${out}" "  service account bgpcc-infra already gone"
+check "but only after NOT_FOUND has held for more than one attempt" \
+    "$(( $(sa_calls_matching "iam service-accounts delete ${email}") > 1 ))" "1"
+# Straight after creation IAM can answer NOT_FOUND for an account that
+# exists; the retry is what deletes it.
+: >"${sa_calls}"; rm -f "${workdir}/sa-delete-seen"; stub_sa_delete=notfound_once
+gcp_delete_service_account proj bgpcc-infra >/dev/null 2>&1
+check "an account IAM cannot see yet is deleted on the retry" "$?" "0"
+check "on the second attempt" \
+    "$(sa_calls_matching "iam service-accounts delete ${email}")" "2"
+# NOT_FOUND counts as gone only once it has outlasted GCP_IAM_WAIT_SECS,
+# the window gcp_ensure_sa_binding gives IAM to see a new account, not a
+# fixed number of attempts.
+: >"${sa_calls}"; stub_sa_delete=notfound_4
+out="$(GCP_IAM_WAIT_SECS=30 gcp_delete_service_account proj bgpcc-infra 2>&1)"
+check "an account IAM cannot see for four attempts is still deleted" "${out}" "  deleted service account bgpcc-infra"
+check "on the fifth" "$(sa_calls_matching "iam service-accounts delete ${email}")" "5"
+: >"${sa_calls}"; stub_sa_delete=denied
+gcp_delete_service_account proj bgpcc-infra >/dev/null 2>&1
+check "a delete that fails for any other reason fails" "$?" "1"
+out="$(gcp_delete_service_account proj bgpcc-infra 2>&1)"
+check "its warning masks the project" "$(grep -c 'projects/<PROJECT>' <<<"${out}")" "1"
+check "and does not name it" "$(grep -c 'proj\b' <<<"${out}")" "0"
+check "the mask replaces every whole id, adjacent ones included" \
+    "$(_gcp_mask_project ci-example <<<'ci-example ci-example ci-example-backup')" "<PROJECT> <PROJECT> ci-example-backup"
+# The replacement must not match the id again, or the mask never ends.
+check "the mask ends for a project called project" \
+    "$(timeout 5 "${BASH}" -c 'source "$1"; _gcp_mask_project project' _ "${here}/gcp/lib.sh" <<<'projects/project')" "projects/<PROJECT>"
+out="$(dry_run=true; stub_sa_delete=""; : >"${sa_calls}"; gcp_delete_service_account proj bgpcc-infra 2>&1)"
+check "a rehearsal says what it would delete, by name" "${out}" "  would delete service account bgpcc-infra"
+check "and calls nothing" "$(wc -l <"${sa_calls}")" "0"
+# A retry interval sleep cannot honour must not turn three quick
+# NOT_FOUNDs into "already gone".
+: >"${sa_calls}"; stub_sa_delete=notfound
+( RETRY_INTERVAL_SECS=five; gcp_delete_service_account proj bgpcc-infra ) >/dev/null 2>&1
+check "a wait that fails fails the delete" "$?" "1"
+stub_sa_delete=""
+: >"${sa_calls}"; stub_sa_delete=quoted
+gcp_delete_service_account proj bgpcc-infra >/dev/null 2>&1
+check "a denial that merely mentions NOT_FOUND still fails" "$?" "1"
+: >"${sa_calls}"; stub_sa_delete=""; stub_sa_list_rc=1
+gcp_delete_service_account proj bgpcc-infra >/dev/null 2>&1
+check "a failing list does not stop the delete" \
+    "$(sa_calls_matching "iam service-accounts delete ${email} --project=proj")" "1"
+check "because the delete does not list at all" "$(sa_calls_matching 'iam service-accounts list')" "0"
+stub_sa_list_rc=0
+stub_sa_delete=""
 
 # Bindings, on the project and on the account. The policy is read
 # flattened, "<role>\t<member>" per line, and the pair compared whole.
