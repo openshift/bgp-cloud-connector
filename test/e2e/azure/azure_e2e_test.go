@@ -18,6 +18,7 @@ package azure_e2e
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -76,15 +77,18 @@ var _ = Describe("Azure E2E", Ordered, func() {
 	// which is how you debug one assertion without waiting out the
 	// others.
 	BeforeAll(func(ctx context.Context) {
-		By("removing any leftover forwarding-failure NIC lock")
-		nodes, err := routerNodes(ctx)
-		Expect(err).NotTo(HaveOccurred())
-		for i := range nodes {
-			nic, nicErr := nicForNode(ctx, &nodes[i])
-			Expect(nicErr).NotTo(HaveOccurred())
-			Expect(nic).NotTo(BeNil())
-			Expect(nic.ID).NotTo(BeNil())
-			Expect(deleteForwardingFailureLock(ctx, *nic.ID)).To(Succeed())
+		// On ARO the operator receives lock permission inside E2E-AZURE-08.
+		if !lockAsOperator {
+			By("removing any leftover forwarding-failure NIC lock")
+			nodes, err := routerNodes(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			for i := range nodes {
+				nic, nicErr := nicForNode(ctx, &nodes[i])
+				Expect(nicErr).NotTo(HaveOccurred())
+				Expect(nic).NotTo(BeNil())
+				Expect(nic.ID).NotTo(BeNil())
+				Expect(deleteForwardingFailureLock(ctx, *nic.ID)).To(Succeed())
+			}
 		}
 
 		By("applying BGPCloudConfiguration CR")
@@ -589,6 +593,7 @@ var _ = Describe("Azure E2E", Ordered, func() {
 			Expect(cfg.Spec.ForwardingNodeSelector).To(BeEmpty(), "forwarding selector cleanup did not complete")
 			selectorChanged := false
 			lockAttached := false
+			roleAssignment := ""
 			forwarding := func(g Gomega, node *corev1.Node) bool {
 				nic, nicErr := nicForNode(ctx, node)
 				g.Expect(nicErr).NotTo(HaveOccurred())
@@ -597,17 +602,33 @@ var _ = Describe("Azure E2E", Ordered, func() {
 				return *nic.Properties.EnableIPForwarding
 			}
 
-			// Register cleanup before the first mutation so no failure can leave the NIC locked.
+			// Register cleanup before the first mutation so every later failure attempts it.
 			DeferCleanup(func(ctx context.Context) {
+				var cleanupErrs []error
 				if lockAttached {
 					By("removing the temporary NIC lock")
-					Expect(deleteForwardingFailureLock(ctx, *victimNIC.ID)).To(Succeed())
+					if err := deleteForwardingFailureLock(ctx, *victimNIC.ID); err != nil {
+						cleanupErrs = append(cleanupErrs, fmt.Errorf("removing temporary NIC lock: %w", err))
+					}
+				}
+				if roleAssignment != "" {
+					By("removing the operator Locks Contributor assignment")
+					if err := deleteOperatorLockRole(ctx, roleAssignment); err != nil {
+						cleanupErrs = append(cleanupErrs, fmt.Errorf("removing operator role assignment: %w", err))
+					}
 				}
 				if selectorChanged {
-					_, clearErr := e2e.ClearForwardingSelector(ctx, k8sClient, configCR.Name)
-					Expect(clearErr).NotTo(HaveOccurred())
+					if _, err := e2e.ClearForwardingSelector(ctx, k8sClient, configCR.Name); err != nil {
+						cleanupErrs = append(cleanupErrs, fmt.Errorf("clearing forwarding selector: %w", err))
+					}
 				}
+				Expect(errors.Join(cleanupErrs...)).NotTo(HaveOccurred())
 			})
+			if lockAsOperator {
+				By("granting the operator SP temporary Locks Contributor access")
+				roleAssignment, err = grantOperatorLockRole(ctx)
+				Expect(err).NotTo(HaveOccurred())
+			}
 
 			before, err := managedPeerings(ctx)
 			Expect(err).NotTo(HaveOccurred())

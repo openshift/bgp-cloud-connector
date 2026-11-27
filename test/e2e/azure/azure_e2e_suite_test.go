@@ -34,10 +34,13 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/authorization/armauthorization/v2"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v6"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armlocks"
+	"github.com/golang-jwt/jwt/v5"
 	ginkgotypes "github.com/onsi/ginkgo/v2/types"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -47,6 +50,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -71,9 +75,12 @@ var (
 	// fault in that code.
 	peeringClient *armnetwork.VirtualHubBgpConnectionsClient
 	// The singular client is the mutating one: the plural lists.
-	peeringMutator *armnetwork.VirtualHubBgpConnectionClient
-	nicClient      *armnetwork.InterfacesClient
-	lockClient     *armlocks.ManagementLocksClient
+	peeringMutator       *armnetwork.VirtualHubBgpConnectionClient
+	nicClient            *armnetwork.InterfacesClient
+	lockClient           *armlocks.ManagementLocksClient
+	roleAssignmentClient *armauthorization.RoleAssignmentsClient
+	operatorCred         azcore.TokenCredential
+	lockAsOperator       bool
 
 	bgpConfig  *networkingapi.BGPCloudConfiguration
 	bgpRouting *networkingapi.BGPRouting
@@ -154,6 +161,13 @@ var _ = BeforeSuite(func() {
 	lockFactory, err := armlocks.NewClientFactory(bgpConfig.Spec.Azure.SubscriptionID, cred, nil)
 	Expect(err).NotTo(HaveOccurred())
 	lockClient = lockFactory.NewManagementLocksClient()
+	lockAsOperator = os.Getenv("E2E_AZURE_LOCK_AS_OPERATOR") == "1"
+	if lockAsOperator {
+		By("building the role assignment client for operator-owned locks")
+		authorizationFactory, err := armauthorization.NewClientFactory(bgpConfig.Spec.Azure.SubscriptionID, cred, nil)
+		Expect(err).NotTo(HaveOccurred())
+		roleAssignmentClient = authorizationFactory.NewRoleAssignmentsClient()
+	}
 
 	By("building the interface client from the cluster's own credentials")
 	// The estate is this suite's to own, and the credential above is the
@@ -183,10 +197,15 @@ var _ = BeforeSuite(func() {
 	// A cluster whose operators federate has no such secret. There the
 	// operator reaches interfaces as its own managed identity, and so does
 	// this suite: see interfaceCredential.
-	clusterCred := interfaceCredential(context.Background())
-	nodeFactory, err := armnetwork.NewClientFactory(bgpConfig.Spec.Azure.SubscriptionID, clusterCred, nil)
+	operatorCred = interfaceCredential(context.Background())
+	nodeFactory, err := armnetwork.NewClientFactory(bgpConfig.Spec.Azure.SubscriptionID, operatorCred, nil)
 	Expect(err).NotTo(HaveOccurred())
 	nicClient = nodeFactory.NewInterfacesClient()
+	if lockAsOperator {
+		operatorLockFactory, err := armlocks.NewClientFactory(bgpConfig.Spec.Azure.SubscriptionID, operatorCred, nil)
+		Expect(err).NotTo(HaveOccurred())
+		lockClient = operatorLockFactory.NewManagementLocksClient()
+	}
 
 	By("reading cluster infrastructure name")
 	infra := &unstructured.Unstructured{}
@@ -544,6 +563,59 @@ func deleteForwardingFailureLock(ctx context.Context, scope string) error {
 		return nil
 	}
 	return err
+}
+
+func grantOperatorLockRole(ctx context.Context) (string, error) {
+	// Azure built-in Locks Contributor role definition.
+	const locksContributorRoleID = "28bf596f-4eb7-45ce-b5bc-6cf482fec137"
+
+	principalID, err := tokenObjectID(ctx, operatorCred)
+	if err != nil {
+		return "", err
+	}
+	assignment := string(uuid.NewUUID())
+	subscriptionScope := "subscriptions/" + bgpConfig.Spec.Azure.SubscriptionID
+	roleDefinitionID := "/" + subscriptionScope + "/providers/Microsoft.Authorization/roleDefinitions/" +
+		locksContributorRoleID
+	_, err = roleAssignmentClient.Create(ctx, subscriptionScope, assignment,
+		armauthorization.RoleAssignmentCreateParameters{
+			Properties: &armauthorization.RoleAssignmentProperties{
+				Description:      to.Ptr("Temporary BGP cloud connector forwarding-failure test"),
+				PrincipalID:      to.Ptr(principalID),
+				PrincipalType:    to.Ptr(armauthorization.PrincipalTypeServicePrincipal),
+				RoleDefinitionID: to.Ptr(roleDefinitionID),
+			},
+		}, nil)
+	return assignment, err
+}
+
+func deleteOperatorLockRole(ctx context.Context, assignment string) error {
+	scope := "subscriptions/" + bgpConfig.Spec.Azure.SubscriptionID
+	_, err := roleAssignmentClient.Delete(ctx, scope, assignment, nil)
+	var respErr *azcore.ResponseError
+	if errors.As(err, &respErr) && respErr.StatusCode == http.StatusNotFound {
+		return nil
+	}
+	return err
+}
+
+func tokenObjectID(ctx context.Context, cred azcore.TokenCredential) (string, error) {
+	// A role assignment needs the Entra object ID, while the credentials
+	// secret only carries the application ID. The token identifies the SP
+	// without requiring Microsoft Graph access.
+	token, err := cred.GetToken(ctx, policy.TokenRequestOptions{Scopes: []string{"https://management.azure.com/.default"}})
+	if err != nil {
+		return "", fmt.Errorf("getting operator token: %w", err)
+	}
+	claims := jwt.MapClaims{}
+	if _, _, err := jwt.NewParser().ParseUnverified(token.Token, claims); err != nil {
+		return "", fmt.Errorf("decoding operator token: %w", err)
+	}
+	objectID, _ := claims["oid"].(string)
+	if objectID == "" {
+		return "", fmt.Errorf("operator access token has no oid claim")
+	}
+	return objectID, nil
 }
 
 // resourceGroupOf pulls the group out of an ARM resource id, which is
