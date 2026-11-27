@@ -45,6 +45,14 @@ teardown_done=false
 ci_bootstrap
 trap ci_remove_workdir EXIT
 
+# The ARO classic workflow records the service principal it created in
+# SHARED_DIR. Its managed resource group only lets that principal mutate
+# node interfaces, so the forwarding-failure test must create its lock as
+# the operator rather than as the e2e runner.
+if [[ -s "${SHARED_DIR:-}/aro-cluster-app-id" ]]; then
+    export E2E_AZURE_LOCK_AS_OPERATOR=1
+fi
+
 require_cmd az oc jq
 require_cluster
 require_platform Azure

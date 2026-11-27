@@ -266,6 +266,25 @@ func TestReconcilePeers_PropagatesCreateError(t *testing.T) {
 	}
 }
 
+// TestReconcilePeers_DeletesStaleBeforeCreateFailure ensures a stale peer
+// cannot hold a Route Server slot needed by its replacement.
+func TestReconcilePeers_DeletesStaleBeforeCreateFailure(t *testing.T) {
+	wantErr := errors.New("create boom")
+	mutator := &fakeBgpMutator{createErr: map[string]error{"new-peer": wantErr}}
+	b := &RouteServerBackend{
+		ListClient:   &fakeBgpLister{errAt: -1, pages: [][]*armnetwork.BgpConnection{{conn("stale-peer", "10.0.0.1", 65001)}}},
+		MutateClient: mutator,
+	}
+
+	_, err := b.ReconcilePeers(context.Background(), []Peer{{Name: "new-peer", PeerIP: "10.0.0.2", PeerASN: 65001}})
+	if err == nil || !errors.Is(err, wantErr) {
+		t.Fatalf("got error %v, want it to wrap %v", err, wantErr)
+	}
+	if len(mutator.deleted) != 1 || mutator.deleted[0] != "stale-peer" {
+		t.Errorf("deleted = %v, want [stale-peer] before creating its replacement", mutator.deleted)
+	}
+}
+
 // TestDeleteAllPeers_DeletesEveryPeerAndPropagatesError covers both the
 // happy path and a failure partway through.
 func TestDeleteAllPeers_DeletesEveryPeerAndPropagatesError(t *testing.T) {

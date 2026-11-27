@@ -54,6 +54,7 @@ Azure models a Route Server as a **Virtual Hub**. The actions the operator perfo
 
 Azure-specific behaviour:
 
+- **Forwarding failures are isolated.** IP forwarding is reconciled before Route Server peerings, and every selected node is attempted even if another node fails. Speakers confirmed unable to enable forwarding lose their managed peerings. When a speaker's forwarding state cannot be inspected, an existing peering is preserved but a missing one is not created. Failures are reported through `CloudResourcesReconciled` without preventing healthy speakers or forwarding-only nodes from being updated.
 - **One region-wide peer group.** An Azure Route Server is regional and presents the same redundant pair of addresses to every node, so discovery produces a single peer group (one FRRConfiguration) — not per-AZ like AWS.
 - **eBGP multi-hop is mandatory.** The Route Server sits in its own subnet rather than on the node's link, so every neighbour is configured with eBGP multi-hop.
 - **The far-side ASN is fixed** by the hub and is not configurable.

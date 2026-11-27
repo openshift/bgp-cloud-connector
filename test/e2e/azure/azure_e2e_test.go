@@ -18,6 +18,7 @@ package azure_e2e
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -76,6 +77,20 @@ var _ = Describe("Azure E2E", Ordered, func() {
 	// which is how you debug one assertion without waiting out the
 	// others.
 	BeforeAll(func(ctx context.Context) {
+		// On ARO the operator receives lock permission inside E2E-AZURE-08.
+		if !lockAsOperator {
+			By("removing any leftover forwarding-failure NIC lock")
+			nodes, err := routerNodes(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			for i := range nodes {
+				nic, nicErr := nicForNode(ctx, &nodes[i])
+				Expect(nicErr).NotTo(HaveOccurred())
+				Expect(nic).NotTo(BeNil())
+				Expect(nic.ID).NotTo(BeNil())
+				Expect(deleteForwardingFailureLock(ctx, *nic.ID)).To(Succeed())
+			}
+		}
+
 		By("applying BGPCloudConfiguration CR")
 		configCR = bgpConfig.DeepCopy()
 		configCR.ResourceVersion = ""
@@ -264,7 +279,7 @@ var _ = Describe("Azure E2E", Ordered, func() {
 			Expect(nic).NotTo(BeNil())
 
 			By("disabling enableIPForwarding on " + victim.Name)
-			Expect(setForwarding(ctx, nic, false)).To(Succeed())
+			Expect(disableForwarding(ctx, nic)).To(Succeed())
 
 			By("waiting for the operator to put it back")
 			// This is the failure that looks healthy: with forwarding
@@ -469,7 +484,7 @@ var _ = Describe("Azure E2E", Ordered, func() {
 					nic, nicErr := nicForNode(ctx, node)
 					Expect(nicErr).NotTo(HaveOccurred())
 					Expect(nic).NotTo(BeNil())
-					Expect(setForwarding(ctx, nic, false)).To(Succeed())
+					Expect(disableForwarding(ctx, nic)).To(Succeed())
 				}
 			})
 
@@ -540,6 +555,176 @@ var _ = Describe("Azure E2E", Ordered, func() {
 				g.Expect(probeErr).NotTo(HaveOccurred())
 				g.Expect(e2e.CheckAnswers(dests, answers, vmAddress)).To(Succeed())
 			})
+		})
+	})
+
+	// ---------------------------------------------------------------
+	// E2E-AZURE-08: one node cannot enable IP forwarding
+	//
+	// Late in the ordered suite because it deliberately disrupts one
+	// established peer. E2E-AZURE-05 is the only spec after it and removes
+	// the configuration and all managed peers.
+	// ---------------------------------------------------------------
+	Context("E2E-AZURE-08: Isolate IP forwarding failure", func() {
+		It("should skip only the failed node and recover after the lock is removed", func(ctx context.Context) {
+			By("choosing one established router node as the forwarding failure")
+			nodes, err := routerNodes(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(len(nodes)).To(BeNumerically(">=", 2), "the isolation check needs one failed and one healthy router node")
+			victim, control := nodes[0], nodes[1]
+			victimIP, controlIP := nodeInternalIP(&victim), nodeInternalIP(&control)
+			Expect(victimIP).NotTo(BeEmpty())
+			Expect(controlIP).NotTo(BeEmpty())
+			victimNIC, err := nicForNode(ctx, &victim)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(victimNIC).NotTo(BeNil())
+			Expect(victimNIC.ID).NotTo(BeNil())
+			Expect(victimNIC.Name).NotTo(BeNil())
+			controlNIC, err := nicForNode(ctx, &control)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(controlNIC).NotTo(BeNil())
+			Expect(controlNIC.ID).NotTo(BeNil())
+			Expect(controlNIC.Name).NotTo(BeNil())
+			GinkgoWriter.Printf("failure target node=%s nic=%s; healthy control=%s\n",
+				victim.Name, *victimNIC.Name, control.Name)
+
+			cfg := &networkingapi.BGPCloudConfiguration{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: configCR.Name}, cfg)).To(Succeed())
+			Expect(cfg.Spec.ForwardingNodeSelector).To(BeEmpty(), "forwarding selector cleanup did not complete")
+			selectorChanged := false
+			lockAttached := false
+			roleAssignment := ""
+			forwarding := func(g Gomega, node *corev1.Node) bool {
+				nic, nicErr := nicForNode(ctx, node)
+				g.Expect(nicErr).NotTo(HaveOccurred())
+				g.Expect(nic).NotTo(BeNil())
+				g.Expect(nic.Properties.EnableIPForwarding).NotTo(BeNil())
+				return *nic.Properties.EnableIPForwarding
+			}
+
+			// Register cleanup before the first mutation so every later failure attempts it.
+			DeferCleanup(func(ctx context.Context) {
+				var cleanupErrs []error
+				if lockAttached {
+					By("removing the temporary NIC lock")
+					if err := deleteForwardingFailureLock(ctx, *victimNIC.ID); err != nil {
+						cleanupErrs = append(cleanupErrs, fmt.Errorf("removing temporary NIC lock: %w", err))
+					}
+				}
+				if roleAssignment != "" {
+					By("removing the operator Locks Contributor assignment")
+					if err := deleteOperatorLockRole(ctx, roleAssignment); err != nil {
+						cleanupErrs = append(cleanupErrs, fmt.Errorf("removing operator role assignment: %w", err))
+					}
+				}
+				if selectorChanged {
+					if _, err := e2e.ClearForwardingSelector(ctx, k8sClient, configCR.Name); err != nil {
+						cleanupErrs = append(cleanupErrs, fmt.Errorf("clearing forwarding selector: %w", err))
+					}
+				}
+				Expect(errors.Join(cleanupErrs...)).NotTo(HaveOccurred())
+			})
+			if lockAsOperator {
+				By("granting the operator SP temporary Locks Contributor access")
+				roleAssignment, err = grantOperatorLockRole(ctx)
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			before, err := managedPeerings(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			oldPeers := map[string]string{}
+			for _, peer := range before {
+				if peer.ProvisioningState == "Succeeded" && (peer.PeerIP == victimIP || peer.PeerIP == controlIP) {
+					oldPeers[peer.PeerIP] = peer.Name
+				}
+			}
+			Expect(oldPeers[victimIP]).NotTo(BeEmpty(), "victim %s has no succeeded peering to remove", victim.Name)
+			Expect(oldPeers[controlIP]).NotTo(BeEmpty(), "control %s has no succeeded peering to preserve", control.Name)
+
+			By("turning IP forwarding off and locking only the victim NIC against writes")
+			Eventually(func(g Gomega) {
+				if lockAttached {
+					g.Expect(deleteForwardingFailureLock(ctx, *victimNIC.ID)).To(Succeed())
+					lockAttached = false
+				}
+				g.Expect(disableForwarding(ctx, victimNIC)).To(Succeed())
+				lockAttached = true
+				g.Expect(createForwardingFailureLock(ctx, *victimNIC.ID)).To(Succeed(),
+					"the Azure E2E identity needs Microsoft.Authorization/locks/write")
+				g.Expect(forwarding(g, &victim)).To(BeFalse(), "the operator repaired the victim before the lock was attached")
+			}).WithTimeout(reconcileTimeout).WithPolling(pollInterval).Should(Succeed())
+
+			By("turning IP forwarding off for one healthy control")
+			Expect(disableForwarding(ctx, controlNIC)).To(Succeed())
+
+			By("changing generation without changing the effective router set")
+			patch := client.MergeFrom(cfg.DeepCopy())
+			cfg.Spec.ForwardingNodeSelector = cfg.Spec.RouterNodeSelector
+			Expect(k8sClient.Patch(ctx, cfg, patch)).To(Succeed())
+			selectorChanged = true
+			failureGeneration := cfg.Generation
+
+			By("waiting for the partial cloud pass to report the victim")
+			Eventually(func(g Gomega) {
+				fresh := &networkingapi.BGPCloudConfiguration{}
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: configCR.Name}, fresh)).To(Succeed())
+				g.Expect(fresh.Status.Phase).To(Equal(networkingapi.PhaseDegraded))
+				cond := meta.FindStatusCondition(fresh.Status.Conditions, networkingapi.ConditionCloudResourcesReconciled)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(cond.Reason).To(Equal("CloudReconcileFailed"))
+				g.Expect(cond.ObservedGeneration).To(Equal(failureGeneration))
+				g.Expect(cond.Message).To(ContainSubstring(victim.Name))
+				g.Expect(cond.Message).To(ContainSubstring(*victimNIC.Name))
+			}).WithTimeout(reconcileTimeout).WithPolling(pollInterval).Should(Succeed())
+
+			By("verifying the victim remains disabled while the healthy control is repaired")
+			Eventually(func(g Gomega) {
+				g.Expect(forwarding(g, &victim)).To(BeFalse())
+				g.Expect(forwarding(g, &control)).To(BeTrue(), "healthy control %s was not reconciled", control.Name)
+			}).WithTimeout(reconcileTimeout).WithPolling(pollInterval).Should(Succeed())
+
+			By("waiting for the unsafe victim peering to be removed")
+			Eventually(func(g Gomega) {
+				peers, listErr := managedPeerings(ctx)
+				g.Expect(listErr).NotTo(HaveOccurred())
+				controlPresent := false
+				for _, peer := range peers {
+					g.Expect(peer.PeerIP).NotTo(Equal(victimIP), "victim peering %s remains", peer.Name)
+					if peer.PeerIP == controlIP {
+						controlPresent = true
+						g.Expect(peer.Name).To(Equal(oldPeers[controlIP]))
+						g.Expect(peer.ProvisioningState).To(Equal("Succeeded"))
+					}
+				}
+				g.Expect(controlPresent).To(BeTrue(), "healthy control peering %s was removed", oldPeers[controlIP])
+			}).WithTimeout(peeringSettleTimeout).WithPolling(pollInterval).Should(Succeed())
+
+			By("removing the lock and relying on the degraded retry to recover")
+			Expect(deleteForwardingFailureLock(ctx, *victimNIC.ID)).To(Succeed())
+			lockAttached = false
+
+			By("waiting for forwarding, the peering, and Ready status")
+			Eventually(func(g Gomega) {
+				g.Expect(forwarding(g, &victim)).To(BeTrue())
+				peers, listErr := managedPeerings(ctx)
+				g.Expect(listErr).NotTo(HaveOccurred())
+				found := slices.ContainsFunc(peers, func(peer observedPeering) bool {
+					return peer.PeerIP == victimIP && peer.Name == oldPeers[victimIP] && peer.ProvisioningState == "Succeeded"
+				})
+				g.Expect(found).To(BeTrue())
+				fresh := &networkingapi.BGPCloudConfiguration{}
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: configCR.Name}, fresh)).To(Succeed())
+				g.Expect(fresh.Status.Phase).To(Equal(networkingapi.PhaseReady))
+			}).WithTimeout(peeringSettleTimeout).WithPolling(pollInterval).Should(Succeed())
+
+			By("restoring the original forwarding selector")
+			restoredGeneration, err := e2e.ClearForwardingSelector(ctx, k8sClient, configCR.Name)
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func() error {
+				return e2e.CloudPassDone(ctx, k8sClient, configCR.Name, restoredGeneration)
+			}).WithTimeout(reconcileTimeout).WithPolling(pollInterval).Should(Succeed())
+			selectorChanged = false
 		})
 	})
 

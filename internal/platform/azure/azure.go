@@ -2,6 +2,7 @@ package azure
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -101,45 +102,44 @@ func (p *Platform) ReconcileNodes(ctx context.Context, nodes []platform.RouterNo
 		return nil
 	}
 
-	vms, err := toVirtualMachines(nodes)
-	if err != nil {
-		return err
-	}
-
 	// Forwarding first. A peering to a node that drops forwarded packets
 	// establishes and carries nothing, which is the failure that looks healthy.
-	if err := p.ensureNodesCanForward(ctx, vms); err != nil {
-		return err
+	forwardingNodes, unknownNodes, forwardingErr := p.ensureNodesCanForward(ctx, nodes)
+	if forwardingErr != nil {
+		forwardingErr = fmt.Errorf("enabling IP forwarding: %w", forwardingErr)
 	}
+	logger.Info("IP forwarding reconciled",
+		"nodeCount", len(forwardingNodes), "unknownNodeCount", len(unknownNodes),
+		"skippedNodeCount", len(nodes)-len(forwardingNodes)-len(unknownNodes))
 
-	peers := platform.Speakers(nodes)
-	if len(peers) == 0 {
-		return nil
-	}
+	var peeringErr error
+	selectedSpeakers := platform.Speakers(nodes)
+	if len(selectedSpeakers) > 0 {
+		peers := platform.Speakers(forwardingNodes)
+		preservedPeers := platform.Speakers(unknownNodes)
+		desired := make([]Peer, 0, len(peers))
+		for _, n := range peers {
+			desired = append(desired, Peer{
+				Name:    peeringName(p.cfg.ClusterID, n.PrivateIP),
+				PeerIP:  n.PrivateIP,
+				PeerASN: p.cfg.LocalASN,
+			})
+		}
 
-	desired := make([]Peer, 0, len(peers))
-	for _, n := range peers {
-		desired = append(desired, Peer{
-			Name:    peeringName(p.cfg.ClusterID, n.PrivateIP),
-			PeerIP:  n.PrivateIP,
-			PeerASN: p.cfg.LocalASN,
-		})
+		changed, err := p.reconcileOurPeerings(ctx, desired, preservedPeers)
+		if err != nil {
+			peeringErr = fmt.Errorf("reconciling Route Server peerings: %w", err)
+		} else if managed, err := p.countManagedPeers(ctx, selectedSpeakers); err != nil {
+			peeringErr = err
+		} else {
+			platform.SetCloudPeersManaged(platform.PlatformAzure, float64(managed))
+			if changed {
+				logger.Info("Route Server peerings updated",
+					"routeServer", p.cfg.RouteServerName, "nodes", len(peers))
+			}
+		}
 	}
-
-	changed, err := p.reconcileOurPeerings(ctx, desired)
-	if err != nil {
-		return fmt.Errorf("reconciling Route Server peerings: %w", err)
-	}
-	managed, err := p.countManagedPeers(ctx, peers)
-	if err != nil {
-		return err
-	}
-	platform.SetCloudPeersManaged(platform.PlatformAzure, float64(managed))
-	if changed {
-		logger.Info("Route Server peerings updated",
-			"routeServer", p.cfg.RouteServerName, "nodes", len(peers))
-	}
-	return nil
+	return errors.Join(forwardingErr, peeringErr)
 }
 
 // reconcileOurPeerings writes this cluster's peerings without disturbing any
@@ -147,14 +147,22 @@ func (p *Platform) ReconcileNodes(ctx context.Context, nodes []platform.RouterNo
 //
 // ReconcilePeers removes every peering absent from the set it is given, so
 // peerings belonging to another cluster are added to that set and survive.
-func (p *Platform) reconcileOurPeerings(ctx context.Context, desired []Peer) (bool, error) {
+// Existing peerings for nodes whose forwarding state is unknown are preserved,
+// but an unknown node without a peering is not added to the desired set.
+func (p *Platform) reconcileOurPeerings(
+	ctx context.Context, desired []Peer, preservedNodes []platform.RouterNode,
+) (bool, error) {
 	current, err := p.rs.ListPeers(ctx)
 	if err != nil {
 		platform.RecordCloudAPIError(platform.PlatformAzure, platform.OpPeer)
 		return false, err
 	}
+	preservedIPs := make(map[string]bool, len(preservedNodes))
+	for _, node := range preservedNodes {
+		preservedIPs[node.PrivateIP] = true
+	}
 	for _, c := range current {
-		if !isOurPeering(c.Name, p.cfg.ClusterID) {
+		if !isOurPeering(c.Name, p.cfg.ClusterID) || preservedIPs[c.PeerIP] {
 			desired = append(desired, c.Peer)
 		}
 	}
@@ -212,18 +220,4 @@ func (p *Platform) Cleanup(ctx context.Context) error {
 	}
 	platform.SetCloudPeersManaged(platform.PlatformAzure, 0)
 	return nil
-}
-
-// toVirtualMachines resolves the cloud-neutral node list into Azure VM
-// identities.
-func toVirtualMachines(nodes []platform.RouterNode) ([]VirtualMachine, error) {
-	out := make([]VirtualMachine, 0, len(nodes))
-	for _, n := range nodes {
-		vm, err := ParseProviderID(n.ProviderID)
-		if err != nil {
-			return nil, fmt.Errorf("node %q: %w", n.Name, err)
-		}
-		out = append(out, vm)
-	}
-	return out, nil
 }
