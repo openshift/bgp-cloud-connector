@@ -3,6 +3,7 @@ package aws
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -205,7 +206,7 @@ func TestReconcilePeers_MultiAZCreate(t *testing.T) {
 		{Name: "node-c", PrivateIP: "10.0.3.10", Zone: "us-east-1c", ProviderID: "aws:///us-east-1c/i-c"},
 	}
 
-	if err := p.reconcileRouteServerPeers(context.Background(), nodes); err != nil {
+	if err := p.reconcileRouteServerPeers(context.Background(), nodes, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -255,7 +256,7 @@ func TestReconcilePeers_AdoptPreExistingUntagged(t *testing.T) {
 		{Name: "node-a", PrivateIP: "10.0.1.10", Zone: "us-east-1a", ProviderID: "aws:///us-east-1a/i-a"},
 	}
 
-	if err := p.reconcileRouteServerPeers(context.Background(), nodes); err != nil {
+	if err := p.reconcileRouteServerPeers(context.Background(), nodes, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -295,7 +296,7 @@ func TestReconcilePeers_DeleteStalePeer(t *testing.T) {
 	}
 
 	// No desired nodes in this AZ — the managed peer is stale
-	if err := p.reconcileRouteServerPeers(context.Background(), nil); err != nil {
+	if err := p.reconcileRouteServerPeers(context.Background(), nil, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -328,7 +329,7 @@ func TestReconcilePeers_BFDLivenessDetection(t *testing.T) {
 		{Name: "node-a", PrivateIP: "10.0.1.10", Zone: "us-east-1a", ProviderID: "aws:///us-east-1a/i-a"},
 	}
 
-	if err := p.reconcileRouteServerPeers(context.Background(), nodes); err != nil {
+	if err := p.reconcileRouteServerPeers(context.Background(), nodes, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -365,7 +366,7 @@ func TestReconcilePeers_SkipsManagedPeerWithNilFields(t *testing.T) {
 	nodes := []platform.RouterNode{
 		{Name: "node-a", PrivateIP: "10.0.1.10", Zone: "us-east-1a", ProviderID: "aws:///us-east-1a/i-a"},
 	}
-	if err := p.reconcileRouteServerPeers(context.Background(), nodes); err != nil {
+	if err := p.reconcileRouteServerPeers(context.Background(), nodes, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -454,8 +455,15 @@ func TestDisableSourceDestCheck_EnabledToDisabled(t *testing.T) {
 	nodes := []platform.RouterNode{
 		{Name: "node-a", PrivateIP: "10.0.1.10", Zone: "us-east-1a", ProviderID: "aws:///us-east-1a/i-a"},
 	}
-	if err := p.disableSourceDestCheck(context.Background(), nodes); err != nil {
+	forwardingNodes, unknownNodes, err := p.disableSourceDestCheck(context.Background(), nodes)
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(forwardingNodes) != 1 || forwardingNodes[0].Name != "node-a" {
+		t.Fatalf("forwarding nodes = %v, want [node-a]", forwardingNodes)
+	}
+	if len(unknownNodes) != 0 {
+		t.Fatalf("unknown nodes = %v, want none", unknownNodes)
 	}
 
 	if len(mock.modifyENICalls) != 1 {
@@ -490,8 +498,15 @@ func TestDisableSourceDestCheck_AlreadyDisabled(t *testing.T) {
 	nodes := []platform.RouterNode{
 		{Name: "node-a", PrivateIP: "10.0.1.10", Zone: "us-east-1a", ProviderID: "aws:///us-east-1a/i-a"},
 	}
-	if err := p.disableSourceDestCheck(context.Background(), nodes); err != nil {
+	forwardingNodes, unknownNodes, err := p.disableSourceDestCheck(context.Background(), nodes)
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(forwardingNodes) != 1 || forwardingNodes[0].Name != "node-a" {
+		t.Fatalf("forwarding nodes = %v, want [node-a]", forwardingNodes)
+	}
+	if len(unknownNodes) != 0 {
+		t.Fatalf("unknown nodes = %v, want none", unknownNodes)
 	}
 
 	if len(mock.modifyENICalls) != 0 {
@@ -520,9 +535,15 @@ func TestDisableSourceDestCheck_NoPrimaryENI(t *testing.T) {
 	nodes := []platform.RouterNode{
 		{Name: "node-a", PrivateIP: "10.0.1.10", Zone: "us-east-1a", ProviderID: "aws:///us-east-1a/i-a"},
 	}
-	err := p.disableSourceDestCheck(context.Background(), nodes)
+	forwardingNodes, unknownNodes, err := p.disableSourceDestCheck(context.Background(), nodes)
 	if err == nil {
 		t.Fatal("expected error when no primary ENI found")
+	}
+	if len(forwardingNodes) != 0 {
+		t.Fatalf("forwarding nodes = %v, want none", forwardingNodes)
+	}
+	if len(unknownNodes) != 1 || unknownNodes[0].Name != nodes[0].Name {
+		t.Fatalf("unknown nodes = %v, want [node-a]", unknownNodes)
 	}
 }
 
@@ -1003,7 +1024,7 @@ func TestReconcilePeers_DeleteStalePeerOnPage2(t *testing.T) {
 		clusterID:     "test-cluster",
 	}
 
-	if err := p.reconcileRouteServerPeers(context.Background(), nil); err != nil {
+	if err := p.reconcileRouteServerPeers(context.Background(), nil, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(mock.deletePeerCalls) != 1 {
@@ -1056,8 +1077,8 @@ func TestCleanup_DeletesManagedPeerOnPage2(t *testing.T) {
 // see which of them a reconcile pass would delete.
 func managedPeersMock(peers map[string]string) *mockEC2 {
 	return &mockEC2{
-		// ReconcileNodes runs the source/dest check after the peers, so an
-		// instance with a primary ENI has to exist for it to reach that far.
+		// ReconcileNodes verifies the source/dest check before reconciling peers,
+		// so an instance with a primary ENI has to exist for it to reach them.
 		describeInstFunc: func(_ *ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
 			return &ec2.DescribeInstancesOutput{
 				Reservations: []ec2types.Reservation{{
@@ -1111,6 +1132,244 @@ func TestReconcileNodes_EmptyNodeListLeavesPeersAlone(t *testing.T) {
 
 	if len(mock.deletePeerCalls) != 0 {
 		t.Errorf("deleted %d peers, want 0: an empty node list must not release the peers", len(mock.deletePeerCalls))
+	}
+}
+
+func TestReconcileNodes_ForwardingFailuresSkipNodesAndContinue(t *testing.T) {
+	managedTag := []ec2types.Tag{
+		{Key: aws.String("managed-by"), Value: aws.String("bgp-cloud-connector/test-cluster")},
+	}
+	mock := &mockEC2{}
+	mock.describeInstFunc = func(input *ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
+		instanceID := input.InstanceIds[0]
+		return &ec2.DescribeInstancesOutput{
+			Reservations: []ec2types.Reservation{{
+				Instances: []ec2types.Instance{{
+					NetworkInterfaces: []ec2types.InstanceNetworkInterface{{
+						NetworkInterfaceId: aws.String("eni-" + instanceID),
+						SourceDestCheck:    aws.Bool(true),
+						Attachment:         &ec2types.InstanceNetworkInterfaceAttachment{DeviceIndex: aws.Int32(0)},
+					}},
+				}},
+			}},
+		}, nil
+	}
+	mock.modifyENIFunc = func(input *ec2.ModifyNetworkInterfaceAttributeInput) (*ec2.ModifyNetworkInterfaceAttributeOutput, error) {
+		switch aws.ToString(input.NetworkInterfaceId) {
+		case "eni-i-b", "eni-i-d":
+			return nil, errors.New("UnauthorizedOperation")
+		default:
+			return &ec2.ModifyNetworkInterfaceAttributeOutput{}, nil
+		}
+	}
+	mock.describePeersFunc = func(_ *ec2.DescribeRouteServerPeersInput) (*ec2.DescribeRouteServerPeersOutput, error) {
+		return &ec2.DescribeRouteServerPeersOutput{
+			RouteServerPeers: []ec2types.RouteServerPeer{
+				{PeerAddress: aws.String("10.0.1.10"), RouteServerPeerId: aws.String("peer-a"), RouteServerEndpointId: aws.String("ep-a1"), Tags: managedTag},
+				{PeerAddress: aws.String("10.0.1.20"), RouteServerPeerId: aws.String("peer-b"), RouteServerEndpointId: aws.String("ep-a1"), Tags: managedTag},
+				{PeerAddress: aws.String("10.0.1.40"), RouteServerPeerId: aws.String("peer-d"), RouteServerEndpointId: aws.String("ep-a1"), Tags: managedTag},
+			},
+		}, nil
+	}
+	p := &Platform{
+		ec2Client:     mock,
+		endpointsByAZ: map[string][]string{"us-east-1a": {"ep-a1"}},
+		localASN:      65001,
+		clusterID:     "test-cluster",
+	}
+	nodes := []platform.RouterNode{
+		{Name: "node-a", PrivateIP: "10.0.1.10", Zone: "us-east-1a", ProviderID: "aws:///us-east-1a/i-a"},
+		{Name: "node-b", PrivateIP: "10.0.1.20", Zone: "us-east-1a", ProviderID: "aws:///us-east-1a/i-b"},
+		{Name: "node-c", PrivateIP: "10.0.1.30", Zone: "us-east-1a", ProviderID: "aws:///us-east-1a/i-c"},
+		{Name: "node-d", PrivateIP: "10.0.1.40", Zone: "us-east-1a", ProviderID: "aws:///us-east-1a/i-d"},
+	}
+
+	err := p.ReconcileNodes(context.Background(), nodes)
+	if err == nil {
+		t.Fatal("expected the forwarding failure to be reported")
+	}
+	for _, node := range []string{"node-b", "node-d"} {
+		if !strings.Contains(err.Error(), node) {
+			t.Errorf("ReconcileNodes error %q does not name skipped %s", err, node)
+		}
+	}
+
+	attempted := map[string]bool{}
+	for _, call := range mock.modifyENICalls {
+		attempted[aws.ToString(call.NetworkInterfaceId)] = true
+	}
+	for _, eni := range []string{"eni-i-a", "eni-i-b", "eni-i-c", "eni-i-d"} {
+		if !attempted[eni] {
+			t.Errorf("SourceDestCheck was not attempted on %s", eni)
+		}
+	}
+
+	created := map[string]bool{}
+	for _, call := range mock.createPeerCalls {
+		created[aws.ToString(call.PeerAddress)] = true
+	}
+	if !created["10.0.1.30"] || len(created) != 1 {
+		t.Errorf("created peers = %v, want only node-c (10.0.1.30)", created)
+	}
+
+	deleted := map[string]bool{}
+	for _, call := range mock.deletePeerCalls {
+		deleted[aws.ToString(call.RouteServerPeerId)] = true
+	}
+	if !deleted["peer-b"] || !deleted["peer-d"] || len(deleted) != 2 {
+		t.Errorf("deleted peers = %v, want peer-b and peer-d", deleted)
+	}
+}
+
+func TestReconcileNodes_UnknownForwardingStateOnlyPreservesExistingPeers(t *testing.T) {
+	managedTag := []ec2types.Tag{
+		{Key: aws.String("managed-by"), Value: aws.String("bgp-cloud-connector/test-cluster")},
+	}
+	mock := &mockEC2{}
+	mock.describeInstFunc = func(input *ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
+		instanceID := input.InstanceIds[0]
+		if strings.HasPrefix(instanceID, "i-unknown") {
+			return nil, errors.New("ThrottlingException")
+		}
+		return &ec2.DescribeInstancesOutput{
+			Reservations: []ec2types.Reservation{{
+				Instances: []ec2types.Instance{{
+					NetworkInterfaces: []ec2types.InstanceNetworkInterface{{
+						NetworkInterfaceId: aws.String("eni-" + instanceID),
+						SourceDestCheck:    aws.Bool(true),
+						Attachment:         &ec2types.InstanceNetworkInterfaceAttachment{DeviceIndex: aws.Int32(0)},
+					}},
+				}},
+			}},
+		}, nil
+	}
+	mock.modifyENIFunc = func(_ *ec2.ModifyNetworkInterfaceAttributeInput) (*ec2.ModifyNetworkInterfaceAttributeOutput, error) {
+		return nil, errors.New("UnauthorizedOperation")
+	}
+	mock.describePeersFunc = func(_ *ec2.DescribeRouteServerPeersInput) (*ec2.DescribeRouteServerPeersOutput, error) {
+		return &ec2.DescribeRouteServerPeersOutput{
+			RouteServerPeers: []ec2types.RouteServerPeer{
+				{PeerAddress: aws.String("10.0.1.10"), RouteServerPeerId: aws.String("peer-unknown"), RouteServerEndpointId: aws.String("ep-a1"), Tags: managedTag},
+				{PeerAddress: aws.String("10.0.1.30"), RouteServerPeerId: aws.String("peer-unsafe"), RouteServerEndpointId: aws.String("ep-a1"), Tags: managedTag},
+			},
+		}, nil
+	}
+	p := &Platform{
+		ec2Client:     mock,
+		endpointsByAZ: map[string][]string{"us-east-1a": {"ep-a1"}},
+		localASN:      65001,
+		clusterID:     "test-cluster",
+	}
+	nodes := []platform.RouterNode{
+		{Name: "unknown-existing", PrivateIP: "10.0.1.10", Zone: "us-east-1a", ProviderID: "aws:///us-east-1a/i-unknown-existing"},
+		{Name: "unknown-missing", PrivateIP: "10.0.1.20", Zone: "us-east-1a", ProviderID: "aws:///us-east-1a/i-unknown-missing"},
+		{Name: "unsafe", PrivateIP: "10.0.1.30", Zone: "us-east-1a", ProviderID: "aws:///us-east-1a/i-unsafe"},
+	}
+
+	err := p.ReconcileNodes(context.Background(), nodes)
+	if err == nil {
+		t.Fatal("expected forwarding failures to be reported")
+	}
+	for _, node := range []string{"unknown-existing", "unknown-missing", "unsafe"} {
+		if !strings.Contains(err.Error(), node) {
+			t.Errorf("ReconcileNodes error %q does not name %s", err, node)
+		}
+	}
+	if len(mock.deletePeerCalls) != 1 || aws.ToString(mock.deletePeerCalls[0].RouteServerPeerId) != "peer-unsafe" {
+		t.Errorf("deleted peers = %v, want only peer-unsafe", mock.deletePeerCalls)
+	}
+	if len(mock.createPeerCalls) != 0 {
+		t.Errorf("created %d peers, want 0 for nodes with unknown forwarding state", len(mock.createPeerCalls))
+	}
+	if got := platform.PeersManagedValue(platform.PlatformAWS); got != 1 {
+		t.Errorf("cloud_peers_managed = %v, want 1 preserved peer", got)
+	}
+}
+
+func TestReconcileNodes_AllSpeakersFailRemovesPeers(t *testing.T) {
+	mock := managedPeersMock(map[string]string{"ep-a1": "10.0.1.10"})
+	mock.describeInstFunc = func(_ *ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
+		return &ec2.DescribeInstancesOutput{
+			Reservations: []ec2types.Reservation{{
+				Instances: []ec2types.Instance{{
+					NetworkInterfaces: []ec2types.InstanceNetworkInterface{{
+						NetworkInterfaceId: aws.String("eni-primary"),
+						SourceDestCheck:    aws.Bool(true),
+						Attachment:         &ec2types.InstanceNetworkInterfaceAttachment{DeviceIndex: aws.Int32(0)},
+					}},
+				}},
+			}},
+		}, nil
+	}
+	mock.modifyENIFunc = func(_ *ec2.ModifyNetworkInterfaceAttributeInput) (*ec2.ModifyNetworkInterfaceAttributeOutput, error) {
+		return nil, errors.New("UnauthorizedOperation")
+	}
+	p := &Platform{
+		ec2Client:     mock,
+		endpointsByAZ: map[string][]string{"us-east-1a": {"ep-a1"}},
+		localASN:      65001,
+		clusterID:     "test-cluster",
+	}
+	nodes := []platform.RouterNode{{
+		Name:       "node-a",
+		PrivateIP:  "10.0.1.10",
+		Zone:       "us-east-1a",
+		ProviderID: "aws:///us-east-1a/i-a",
+	}}
+
+	if err := p.ReconcileNodes(context.Background(), nodes); err == nil {
+		t.Fatal("expected the forwarding failure to be reported")
+	}
+	if len(mock.deletePeerCalls) != 1 || aws.ToString(mock.deletePeerCalls[0].RouteServerPeerId) != "peer-ep-a1" {
+		t.Errorf("deleted peers = %v, want peer-ep-a1", mock.deletePeerCalls)
+	}
+	if len(mock.createPeerCalls) != 0 {
+		t.Errorf("created %d peers, want 0", len(mock.createPeerCalls))
+	}
+}
+
+func TestReconcileNodes_ForwardingOnlyFailureDoesNotBlockOtherNodes(t *testing.T) {
+	mock := managedPeersMock(nil)
+	mock.describeInstFunc = func(input *ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
+		return &ec2.DescribeInstancesOutput{
+			Reservations: []ec2types.Reservation{{
+				Instances: []ec2types.Instance{{
+					NetworkInterfaces: []ec2types.InstanceNetworkInterface{{
+						NetworkInterfaceId: aws.String("eni-" + input.InstanceIds[0]),
+						SourceDestCheck:    aws.Bool(true),
+						Attachment:         &ec2types.InstanceNetworkInterfaceAttachment{DeviceIndex: aws.Int32(0)},
+					}},
+				}},
+			}},
+		}, nil
+	}
+	mock.modifyENIFunc = func(input *ec2.ModifyNetworkInterfaceAttributeInput) (*ec2.ModifyNetworkInterfaceAttributeOutput, error) {
+		if aws.ToString(input.NetworkInterfaceId) == "eni-i-forwarding-b" {
+			return nil, errors.New("UnauthorizedOperation")
+		}
+		return &ec2.ModifyNetworkInterfaceAttributeOutput{}, nil
+	}
+	p := &Platform{
+		ec2Client:     mock,
+		endpointsByAZ: map[string][]string{"us-east-1a": {"ep-a1"}},
+		localASN:      65001,
+		clusterID:     "test-cluster",
+	}
+	nodes := []platform.RouterNode{
+		{Name: "speaker", PrivateIP: "10.0.1.10", Zone: "us-east-1a", ProviderID: "aws:///us-east-1a/i-speaker"},
+		{Name: "forwarding-b", PrivateIP: "10.0.1.20", Zone: "us-east-1a", ProviderID: "aws:///us-east-1a/i-forwarding-b", ForwardingOnly: true},
+		{Name: "forwarding-c", PrivateIP: "10.0.1.30", Zone: "us-east-1a", ProviderID: "aws:///us-east-1a/i-forwarding-c", ForwardingOnly: true},
+	}
+
+	err := p.ReconcileNodes(context.Background(), nodes)
+	if err == nil || !strings.Contains(err.Error(), "forwarding-b") {
+		t.Fatalf("ReconcileNodes error = %v, want forwarding-b failure", err)
+	}
+	if len(mock.modifyENICalls) != 3 {
+		t.Errorf("SourceDestCheck attempts = %d, want 3", len(mock.modifyENICalls))
+	}
+	if len(mock.createPeerCalls) != 1 || aws.ToString(mock.createPeerCalls[0].PeerAddress) != "10.0.1.10" {
+		t.Errorf("created peers = %v, want only speaker (10.0.1.10)", mock.createPeerCalls)
 	}
 }
 
@@ -1268,7 +1527,7 @@ func TestReconcilePeers_SkipsPruningPeersAlreadyGoing(t *testing.T) {
 		clusterID:     "test-cluster",
 	}
 
-	if err := p.reconcileRouteServerPeers(context.Background(), nil); err != nil {
+	if err := p.reconcileRouteServerPeers(context.Background(), nil, nil); err != nil {
 		t.Fatalf("reconcile should not fail on a peer already going: %v", err)
 	}
 
@@ -1313,7 +1572,7 @@ func TestReconcilePeers_RecreatesOverADeletedPeer(t *testing.T) {
 		{Name: "node-a", PrivateIP: "10.0.1.10", Zone: "us-east-1a", ProviderID: "aws:///us-east-1a/i-a"},
 	}
 
-	if err := p.reconcileRouteServerPeers(context.Background(), nodes); err != nil {
+	if err := p.reconcileRouteServerPeers(context.Background(), nodes, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -1375,7 +1634,7 @@ func TestAWSMetrics_APIErrorsIncrement(t *testing.T) {
 				}
 				if err := p.reconcileRouteServerPeers(context.Background(), []platform.RouterNode{
 					{Name: "node-a", PrivateIP: "10.0.1.10", Zone: "us-east-1a"},
-				}); err == nil {
+				}, nil); err == nil {
 					t.Fatal("expected error")
 				}
 			},
@@ -1386,7 +1645,7 @@ func TestAWSMetrics_APIErrorsIncrement(t *testing.T) {
 				p := &Platform{ec2Client: &mockEC2{describeInstFunc: func(_ *ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
 					return nil, errors.New("describe instances failed")
 				}}}
-				if err := p.disableSourceDestCheck(context.Background(), []platform.RouterNode{
+				if _, _, err := p.disableSourceDestCheck(context.Background(), []platform.RouterNode{
 					{Name: "node-a", ProviderID: "aws:///us-east-1a/i-a"},
 				}); err == nil {
 					t.Fatal("expected error")
@@ -1426,7 +1685,7 @@ func TestAWSMetrics_PeersManagedGauge(t *testing.T) {
 		{Name: "node-b", PrivateIP: "10.0.2.10", Zone: "us-east-1b", ProviderID: "aws:///us-east-1b/i-b"},
 		{Name: "node-c", PrivateIP: "10.0.3.10", Zone: "us-east-1c", ProviderID: "aws:///us-east-1c/i-c"},
 	}
-	if err := p.reconcileRouteServerPeers(context.Background(), nodes); err != nil {
+	if err := p.reconcileRouteServerPeers(context.Background(), nodes, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	got := platform.PeersManagedValue(platform.PlatformAWS)
@@ -1452,7 +1711,7 @@ func TestAWSMetrics_PeersManagedGaugeCountsActualNotDesired(t *testing.T) {
 		{Name: "node-b", PrivateIP: "10.0.2.10", Zone: "us-east-1b", ProviderID: "aws:///us-east-1b/i-b"},
 		{Name: "node-c", PrivateIP: "10.0.3.10", Zone: "us-east-1c", ProviderID: "aws:///us-east-1c/i-c"},
 	}
-	if err := p.reconcileRouteServerPeers(context.Background(), nodes); err != nil {
+	if err := p.reconcileRouteServerPeers(context.Background(), nodes, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	got := platform.PeersManagedValue(platform.PlatformAWS)
@@ -1481,7 +1740,7 @@ func TestAWSMetrics_LocalErrorsDoNotIncrement(t *testing.T) {
 	}
 
 	pSrc := &Platform{ec2Client: &mockEC2{}}
-	if err := pSrc.disableSourceDestCheck(context.Background(), []platform.RouterNode{
+	if _, _, err := pSrc.disableSourceDestCheck(context.Background(), []platform.RouterNode{
 		{Name: "node-a", ProviderID: "not-aws"},
 	}); err == nil {
 		t.Fatal("expected providerID error")

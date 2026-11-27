@@ -12,19 +12,17 @@ import (
 	"github.com/openshift/bgp-cloud-connector/internal/platform"
 )
 
-func (p *Platform) reconcileRouteServerPeers(ctx context.Context, nodes []platform.RouterNode) error {
+// preservedNodes protect existing peers from transient forwarding read
+// failures, but never cause a missing peer to be created.
+func (p *Platform) reconcileRouteServerPeers(ctx context.Context, desiredNodes, preservedNodes []platform.RouterNode) error {
 	logger := log.FromContext(ctx)
 
-	nodesByAZ := make(map[string]map[string]bool)
-	for _, n := range nodes {
-		if nodesByAZ[n.Zone] == nil {
-			nodesByAZ[n.Zone] = make(map[string]bool)
-		}
-		nodesByAZ[n.Zone][n.PrivateIP] = true
-	}
+	desiredByAZ := nodeIPsByAZ(desiredNodes)
+	preservedByAZ := nodeIPsByAZ(preservedNodes)
 
 	for az, endpointIDs := range p.endpointsByAZ {
-		desiredIPs := nodesByAZ[az]
+		desiredIPs := desiredByAZ[az]
+		preservedIPs := preservedByAZ[az]
 
 		for _, endpointID := range endpointIDs {
 			managedPeers, err := p.listManagedPeers(ctx, endpointID)
@@ -50,7 +48,7 @@ func (p *Platform) reconcileRouteServerPeers(ctx context.Context, nodes []platfo
 			}
 
 			for ip, peerID := range managedIPs {
-				if desiredIPs[ip] || deleting[peerID] {
+				if desiredIPs[ip] || preservedIPs[ip] || deleting[peerID] {
 					continue
 				}
 				logger.Info("deleting stale route server peer", "endpoint", endpointID, "peerIP", ip, "peerID", peerID, "az", az)
@@ -99,12 +97,23 @@ func (p *Platform) reconcileRouteServerPeers(ctx context.Context, nodes []platfo
 		}
 	}
 
-	managed, err := p.countManagedPeers(ctx, nodesByAZ)
+	managed, err := p.countManagedPeers(ctx, desiredByAZ, preservedByAZ)
 	if err != nil {
 		return err
 	}
 	platform.SetCloudPeersManaged(platform.PlatformAWS, float64(managed))
 	return nil
+}
+
+func nodeIPsByAZ(nodes []platform.RouterNode) map[string]map[string]bool {
+	nodesByAZ := make(map[string]map[string]bool)
+	for _, node := range nodes {
+		if nodesByAZ[node.Zone] == nil {
+			nodesByAZ[node.Zone] = make(map[string]bool)
+		}
+		nodesByAZ[node.Zone][node.PrivateIP] = true
+	}
+	return nodesByAZ
 }
 
 // countManagedPeers asks EC2 what is there rather than counting what the loop
@@ -115,10 +124,11 @@ func (p *Platform) reconcileRouteServerPeers(ctx context.Context, nodes []platfo
 // deleted out from under the operator, shows up as the gauge sitting below the
 // node count. A gauge fed from the desired set could never report that, since
 // it would be right by construction. The cost is one more list per endpoint.
-func (p *Platform) countManagedPeers(ctx context.Context, nodesByAZ map[string]map[string]bool) (int, error) {
+func (p *Platform) countManagedPeers(ctx context.Context, desiredByAZ, preservedByAZ map[string]map[string]bool) (int, error) {
 	managed := 0
 	for az, endpointIDs := range p.endpointsByAZ {
-		desiredIPs := nodesByAZ[az]
+		desiredIPs := desiredByAZ[az]
+		preservedIPs := preservedByAZ[az]
 		for _, endpointID := range endpointIDs {
 			peers, err := p.listManagedPeers(ctx, endpointID)
 			if err != nil {
@@ -128,7 +138,7 @@ func (p *Platform) countManagedPeers(ctx context.Context, nodesByAZ map[string]m
 				if peer.PeerAddress == nil || isDeleted(peer) {
 					continue
 				}
-				if desiredIPs[*peer.PeerAddress] {
+				if desiredIPs[*peer.PeerAddress] || preservedIPs[*peer.PeerAddress] {
 					managed++
 				}
 			}

@@ -2,6 +2,7 @@ package aws
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -12,28 +13,40 @@ import (
 	"github.com/openshift/bgp-cloud-connector/internal/platform"
 )
 
-func (p *Platform) disableSourceDestCheck(ctx context.Context, nodes []platform.RouterNode) error {
+func (p *Platform) disableSourceDestCheck(ctx context.Context, nodes []platform.RouterNode) ([]platform.RouterNode, []platform.RouterNode, error) {
 	logger := log.FromContext(ctx)
+	forwardingNodes := make([]platform.RouterNode, 0, len(nodes))
+	unknownNodes := make([]platform.RouterNode, 0, len(nodes))
+	var errs []error
 
+	// Unknown nodes could not be inspected, so their existing peers must be
+	// preserved. Once SourceDestCheck is observed enabled, a failed update is a
+	// known unsafe state and the node belongs in neither result.
 	for _, node := range nodes {
 		instanceID, _, err := ParseProviderID(node.ProviderID)
 		if err != nil {
-			return fmt.Errorf("node %s: %w", node.Name, err)
+			errs = append(errs, fmt.Errorf("node %s: %w", node.Name, err))
+			unknownNodes = append(unknownNodes, node)
+			continue
 		}
 
 		eniID, srcDstEnabled, err := p.getPrimaryENI(ctx, instanceID)
 		if err != nil {
-			return fmt.Errorf("node %s (instance %s): %w", node.Name, instanceID, err)
+			errs = append(errs, fmt.Errorf("node %s (instance %s): %w", node.Name, instanceID, err))
+			unknownNodes = append(unknownNodes, node)
+			continue
 		}
 
 		if srcDstEnabled {
 			logger.Info("disabling SourceDestCheck", "node", node.Name, "instance", instanceID, "eni", eniID)
 			if err := p.setSourceDestCheck(ctx, eniID, false); err != nil {
-				return fmt.Errorf("node %s (eni %s): %w", node.Name, eniID, err)
+				errs = append(errs, fmt.Errorf("node %s (eni %s): %w", node.Name, eniID, err))
+				continue
 			}
 		}
+		forwardingNodes = append(forwardingNodes, node)
 	}
-	return nil
+	return forwardingNodes, unknownNodes, errors.Join(errs...)
 }
 
 func (p *Platform) getPrimaryENI(ctx context.Context, instanceID string) (eniID string, srcDstCheckEnabled bool, err error) {

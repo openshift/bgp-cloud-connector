@@ -64,12 +64,16 @@ Phase 5: Reconcile AWS Resources (if spec.aws configured)
   ├── Use the complete nodes from the node inventory: AZ from the
   │   topology.kubernetes.io/zone label, private IP from status.addresses,
   │   instance ID from spec.providerID
-  ├── Route Server peers: for each AZ, ensure peers exist on the
-  │   discovered endpoint IDs for the speakers only. No speakers leaves
-  │   existing peers in place.
-  ├── Forwarding: every selected node. Unset forwardingNodeSelector, or one
-  │   that matches nobody, updates speakers only. Nodes that match only
-  │   forwardingNodeSelector are not peered.
+  ├── Forwarding: first try every selected node. A failure is reported in
+  │   status and does not stop the remaining nodes. Unset forwardingNodeSelector,
+  │   or one that matches nobody, updates speakers only.
+  ├── Route Server peers: for each AZ, ensure peers exist on the discovered
+  │   endpoint IDs for speakers whose forwarding check succeeded. A speaker
+  │   confirmed unable to disable SourceDestCheck loses its managed peers. If
+  │   its forwarding state could not be read, existing peers are preserved but
+  │   missing peers are not created. An inventory containing no speakers leaves
+  │   existing peers in place. Nodes that match only forwardingNodeSelector are
+  │   never peered.
   ├── NOTE: forwarding is intentionally never reverted. Removing a node from
   │   the selector, or unsetting forwardingNodeSelector entirely, leaves the
   │   cloud-side forwarding flag enabled. The flag is harmless once set, and
@@ -144,7 +148,7 @@ Both CRs use the same phase enum. `BGPRouting` follows `Pending` → `Configurin
 | `CloudEndpointsDiscovered` | `CloudDiscoveryFailed` | Failed to build the cloud platform client (e.g. Infrastructure name unavailable, ambient credentials unresolved) or to discover endpoints (bad Route Server / Cloud Router reference, insufficient permissions). The generic discovery failure for all clouds |
 | `CloudEndpointsDiscovered` | `RouteServerNotFound` | **AWS only** — the specified Route Server ID was not found. Azure/GCP discovery failures surface as `CloudDiscoveryFailed` |
 | `FRRConfigurationApplied` | `ApplyFailed` | Failed to create/update one or more FRRConfigurations |
-| `CloudResourcesReconciled` | `CloudReconcileFailed` | Failed to reconcile Route Server peers or disable source/dest check |
+| `CloudResourcesReconciled` | `CloudReconcileFailed` | Failed to reconcile cloud peers or node forwarding. Healthy AWS nodes are still reconciled when another node fails; existing peers are preserved when forwarding state is unknown, and the message names every failed node |
 
 > Phase 2 also uses `FRRNamespaceReady=False` with reason `WaitingForFRR` when the FRR namespace or pods are not yet available. This is **not** `Degraded` — the CR stays in `Configuring` and requeues every 10 seconds.
 

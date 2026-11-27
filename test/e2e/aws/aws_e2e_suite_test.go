@@ -19,9 +19,12 @@ package aws_e2e
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -293,4 +296,98 @@ func setSourceDestCheck(ctx context.Context, node *corev1.Node, enabled bool) er
 		SourceDestCheck:    &ec2types.AttributeBooleanValue{Value: aws.Bool(enabled)},
 	})
 	return err
+}
+
+type iamPrincipal struct {
+	Kind      string
+	ARN       string
+	Name      string
+	Account   string
+	Partition string
+}
+
+func parseIAMPrincipal(principalARN, kind string) (iamPrincipal, error) {
+	parts := strings.SplitN(principalARN, ":", 6)
+	if len(parts) != 6 || parts[2] != "iam" {
+		return iamPrincipal{}, fmt.Errorf("operator %s ARN %q is not an IAM ARN", kind, principalARN)
+	}
+	resource, ok := strings.CutPrefix(parts[5], kind+"/")
+	name := resource[strings.LastIndexByte(resource, '/')+1:]
+	if !ok || name == "" || parts[1] == "" || parts[4] == "" {
+		return iamPrincipal{}, fmt.Errorf("operator %s ARN %q is incomplete", kind, principalARN)
+	}
+	return iamPrincipal{Kind: kind, ARN: principalARN, Name: name, Account: parts[4], Partition: parts[1]}, nil
+}
+
+// operatorPrincipal returns the STS role or minted IAM user named by the operator's CredentialsRequest.
+func operatorPrincipal(ctx context.Context) (iamPrincipal, error) {
+	cr := &unstructured.Unstructured{}
+	cr.SetGroupVersionKind(awsplatform.CredentialsRequestGVK)
+	if err := k8sClient.Get(ctx, types.NamespacedName{
+		Name:      awsplatform.CredentialsRequestName,
+		Namespace: awsplatform.CredentialsRequestNamespace,
+	}, cr); err != nil {
+		return iamPrincipal{}, fmt.Errorf("reading operator CredentialsRequest: %w", err)
+	}
+
+	roleARN, _, err := unstructured.NestedString(cr.Object, "spec", "providerSpec", "stsIAMRoleARN")
+	if err != nil {
+		return iamPrincipal{}, fmt.Errorf("reading spec.providerSpec.stsIAMRoleARN: %w", err)
+	}
+	if roleARN != "" {
+		return parseIAMPrincipal(roleARN, "role")
+	}
+
+	user, _, err := unstructured.NestedString(cr.Object, "status", "providerStatus", "user")
+	if err != nil {
+		return iamPrincipal{}, fmt.Errorf("reading status.providerStatus.user: %w", err)
+	}
+	if user == "" {
+		return iamPrincipal{}, fmt.Errorf("operator CredentialsRequest names neither an STS role nor a minted IAM user")
+	}
+
+	args := []string{"iam", "get-user", "--user-name", user, "--query", "User.Arn", "--output", "text"}
+	output, err := exec.CommandContext(ctx, "aws", args...).CombinedOutput()
+	if err != nil {
+		return iamPrincipal{}, fmt.Errorf("aws iam get-user: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return parseIAMPrincipal(strings.TrimSpace(string(output)), "user")
+}
+
+func putInlinePolicy(ctx context.Context, principal iamPrincipal, policy, resource string) error {
+	policyDocument, err := json.Marshal(map[string]any{
+		"Version": "2012-10-17",
+		"Statement": []map[string]any{{
+			"Sid":      "DenySourceDestCheckOnVictim",
+			"Effect":   "Deny",
+			"Action":   "ec2:ModifyNetworkInterfaceAttribute",
+			"Resource": resource,
+		}},
+	})
+	if err != nil {
+		return fmt.Errorf("marshalling inline policy: %w", err)
+	}
+
+	command := "put-" + principal.Kind + "-policy"
+	args := []string{"iam", command,
+		"--" + principal.Kind + "-name", principal.Name,
+		"--policy-name", policy,
+		"--policy-document", string(policyDocument)}
+	output, err := exec.CommandContext(ctx, "aws", args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("aws iam %s: %w: %s", command, err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func deleteInlinePolicy(ctx context.Context, principal iamPrincipal, policy string) error {
+	command := "delete-" + principal.Kind + "-policy"
+	args := []string{"iam", command,
+		"--" + principal.Kind + "-name", principal.Name,
+		"--policy-name", policy}
+	output, err := exec.CommandContext(ctx, "aws", args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("aws iam %s: %w: %s", command, err, strings.TrimSpace(string(output)))
+	}
+	return nil
 }

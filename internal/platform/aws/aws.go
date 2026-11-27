@@ -2,6 +2,7 @@ package aws
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -115,19 +116,31 @@ func (p *Platform) ReconcileNodes(ctx context.Context, nodes []platform.RouterNo
 		return nil
 	}
 
-	if peers := platform.Speakers(nodes); len(peers) > 0 {
-		if err := p.reconcileRouteServerPeers(ctx, peers); err != nil {
-			return fmt.Errorf("reconciling route server peers: %w", err)
+	forwardingNodes, unknownNodes, forwardingErr := p.disableSourceDestCheck(ctx, nodes)
+	if forwardingErr != nil {
+		forwardingErr = fmt.Errorf("disabling source/dest check: %w", forwardingErr)
+	}
+	logger.Info("source/dest check reconciled",
+		"nodeCount", len(forwardingNodes), "unknownNodeCount", len(unknownNodes),
+		"skippedNodeCount", len(nodes)-len(forwardingNodes)-len(unknownNodes))
+
+	var peeringErr error
+	selectedSpeakers := platform.Speakers(nodes)
+	if len(selectedSpeakers) > 0 {
+		// An inventory containing only forwarding-only nodes leaves peers alone.
+		// Speakers confirmed unable to forward are omitted so their unsafe peers
+		// are removed. An unknown forwarding state only preserves existing peers;
+		// it must not cause a new peer to be created.
+		peers := platform.Speakers(forwardingNodes)
+		preservedPeers := platform.Speakers(unknownNodes)
+		if err := p.reconcileRouteServerPeers(ctx, peers, preservedPeers); err != nil {
+			peeringErr = fmt.Errorf("reconciling route server peers: %w", err)
+		} else {
+			logger.Info("route server peers reconciled", "nodeCount", len(peers))
 		}
-		logger.Info("route server peers reconciled", "nodeCount", len(peers))
 	}
 
-	if err := p.disableSourceDestCheck(ctx, nodes); err != nil {
-		return fmt.Errorf("disabling source/dest check: %w", err)
-	}
-	logger.Info("source/dest check verified", "nodeCount", len(nodes))
-
-	return nil
+	return errors.Join(forwardingErr, peeringErr)
 }
 
 func (p *Platform) Cleanup(ctx context.Context) error {
