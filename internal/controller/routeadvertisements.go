@@ -24,7 +24,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func EnsureRouteAdvertisements(ctx context.Context, c client.Client) error {
+func EnsureRouteAdvertisements(ctx context.Context, c client.Client, nodeSelector map[string]string) error {
+	raNodeSelector := map[string]interface{}{}
+	if len(nodeSelector) > 0 {
+		raNodeSelector["matchLabels"] = toInterfaceMap(nodeSelector)
+	}
 	obj := &unstructured.Unstructured{
 		Object: map[string]interface{}{
 			"apiVersion": "k8s.ovn.org/v1",
@@ -36,7 +40,7 @@ func EnsureRouteAdvertisements(ctx context.Context, c client.Client) error {
 				},
 			},
 			"spec": map[string]interface{}{
-				"nodeSelector":             map[string]interface{}{},
+				"nodeSelector":             raNodeSelector,
 				"frrConfigurationSelector": map[string]interface{}{},
 				"networkSelectors": []interface{}{
 					map[string]interface{}{

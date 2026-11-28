@@ -50,6 +50,8 @@ const wrongName = "wrong-name"
 
 const routerName = "router"
 
+const routerLabelValue = "true"
+
 // forwardingLabel is what the forwarding tests select with
 // forwardingNodeSelector.
 var forwardingLabel = map[string]string{"cudn": "true"}
@@ -1297,7 +1299,7 @@ func TestConfigReconcile_ForwardingNodePromotedToSpeaker(t *testing.T) {
 	if err := c.Get(ctx, types.NamespacedName{Name: "forwarder"}, node); err != nil {
 		t.Fatalf("get forwarder: %v", err)
 	}
-	node.Labels["bgp_router"] = "true"
+	node.Labels["bgp_router"] = routerLabelValue
 	if err := c.Update(ctx, node); err != nil {
 		t.Fatalf("update forwarder labels: %v", err)
 	}

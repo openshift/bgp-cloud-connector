@@ -95,6 +95,7 @@ func newReadyBGPCloudConfiguration() *networkingapi.BGPCloudConfiguration {
 func TestRoutingReconcile_FullReconcile(t *testing.T) {
 	routing := newTestBGPRouting()
 	config := newReadyBGPCloudConfiguration()
+	config.Spec.RouteAdvertisementNodeSelector = map[string]string{"bgp_router": "true"}
 	ns := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "app1",
@@ -154,6 +155,68 @@ func TestRoutingReconcile_FullReconcile(t *testing.T) {
 	ra.SetGroupVersionKind(RouteAdvertisementsGVK)
 	if err := c.Get(context.Background(), types.NamespacedName{Name: RouteAdvertisementName}, ra); err != nil {
 		t.Fatalf("RouteAdvertisements not created: %v", err)
+	}
+	selector, found, err := unstructured.NestedMap(ra.Object, "spec", "nodeSelector", "matchLabels")
+	if err != nil || !found {
+		t.Fatalf("RouteAdvertisements nodeSelector not found: %v", err)
+	}
+	if selector["bgp_router"] != "true" {
+		t.Errorf("RouteAdvertisements nodeSelector = %#v, want bgp_router=true", selector)
+	}
+}
+
+func TestEnsureRouteAdvertisements_UpdatesNodeSelectorExactly(t *testing.T) {
+	ctx := context.Background()
+	s := routingTestScheme()
+	c := fake.NewClientBuilder().WithScheme(s).Build()
+
+	if err := EnsureRouteAdvertisements(ctx, c, map[string]string{
+		"bgp_router": "true",
+		"topology":   "zone-a",
+	}); err != nil {
+		t.Fatalf("create RouteAdvertisements: %v", err)
+	}
+
+	if err := EnsureRouteAdvertisements(ctx, c, map[string]string{
+		"bgp_router": "true",
+	}); err != nil {
+		t.Fatalf("narrow RouteAdvertisements selector: %v", err)
+	}
+	assertRouteAdvertisementNodeSelector(t, c, map[string]string{"bgp_router": "true"})
+
+	if err := EnsureRouteAdvertisements(ctx, c, nil); err != nil {
+		t.Fatalf("clear RouteAdvertisements selector: %v", err)
+	}
+	ra := &unstructured.Unstructured{}
+	ra.SetGroupVersionKind(RouteAdvertisementsGVK)
+	if err := c.Get(ctx, types.NamespacedName{Name: RouteAdvertisementName}, ra); err != nil {
+		t.Fatalf("get RouteAdvertisements after clearing selector: %v", err)
+	}
+	if _, found, err := unstructured.NestedFieldNoCopy(ra.Object, "spec", "nodeSelector", "matchLabels"); err != nil {
+		t.Fatalf("read cleared RouteAdvertisements selector: %v", err)
+	} else if found {
+		t.Fatal("RouteAdvertisements matchLabels remained after clearing selector")
+	}
+}
+
+func assertRouteAdvertisementNodeSelector(t *testing.T, c client.Client, want map[string]string) {
+	t.Helper()
+	ra := &unstructured.Unstructured{}
+	ra.SetGroupVersionKind(RouteAdvertisementsGVK)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: RouteAdvertisementName}, ra); err != nil {
+		t.Fatalf("get RouteAdvertisements: %v", err)
+	}
+	got, found, err := unstructured.NestedMap(ra.Object, "spec", "nodeSelector", "matchLabels")
+	if err != nil || !found {
+		t.Fatalf("RouteAdvertisements matchLabels not found: %v", err)
+	}
+	for key, value := range want {
+		if got[key] != value {
+			t.Errorf("RouteAdvertisements matchLabels[%q] = %v, want %q", key, got[key], value)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("RouteAdvertisements matchLabels = %#v, want %#v", got, want)
 	}
 }
 
@@ -258,6 +321,10 @@ func TestRoutingReconcile_RepeatedReconcile_DoesNotRewriteSharedRouteAdvertiseme
 	ra.SetGroupVersionKind(RouteAdvertisementsGVK)
 	if err := c.Get(context.Background(), types.NamespacedName{Name: RouteAdvertisementName}, ra); err != nil {
 		t.Fatalf("RouteAdvertisements not created: %v", err)
+	}
+	selector, found, err := unstructured.NestedMap(ra.Object, "spec", "nodeSelector")
+	if err != nil || !found || len(selector) != 0 {
+		t.Fatalf("default RouteAdvertisements nodeSelector = %#v, want empty selector (err: %v)", selector, err)
 	}
 	resourceVersionAfterFirstPass := ra.GetResourceVersion()
 

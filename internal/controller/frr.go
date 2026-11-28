@@ -390,6 +390,14 @@ func createOrUpdate(ctx context.Context, c client.Client, obj *unstructured.Unst
 // its own (e.g. FRRConfiguration defaults neighbors[].dualStackAddressFamily),
 // and comparing those exactly would never match, rewriting the object forever.
 func specEqual(existing, desired *unstructured.Unstructured) bool {
+	if existing.GroupVersionKind() == RouteAdvertisementsGVK && desired.GroupVersionKind() == RouteAdvertisementsGVK {
+		existingNodeSelector, existingFound, existingErr := unstructured.NestedFieldNoCopy(existing.Object, "spec", "nodeSelector")
+		desiredNodeSelector, desiredFound, desiredErr := unstructured.NestedFieldNoCopy(desired.Object, "spec", "nodeSelector")
+		if existingErr != nil || desiredErr != nil || existingFound != desiredFound ||
+			!apiequality.Semantic.DeepEqual(existingNodeSelector, desiredNodeSelector) {
+			return false
+		}
+	}
 	return specSatisfied(existing.Object["spec"], desired.Object["spec"])
 }
 
